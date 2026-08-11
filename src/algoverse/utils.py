@@ -30,14 +30,21 @@ def set_seed(seed: int = 42) -> None:
 
 def get_device() -> str:
     """
-    Returns:
-    - "Using GPU" if a GPU is available
-    - "Using CPU" otherwise
+    Returns a device string that torch APIs accept, e.g. model.to(get_device()):
+    - "cuda" if an NVIDIA GPU is available (Colab)
+    - "mps" on Apple-silicon Macs (local smoke tests)
+    - "cpu" otherwise
+
+    (Previously returned prose like "Using GPU", which crashes the first
+    time it is passed to torch. Anything printing a status message should
+    format this value itself.)
     """
     if torch.cuda.is_available():
-        return "Using GPU"
-    else:
-        return "Using CPU"
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
 
 def save_checkpoint(path, step, model, optimizer=None, **extra) -> None:
     """

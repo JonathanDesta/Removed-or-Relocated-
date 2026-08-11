@@ -21,6 +21,9 @@ checkpoints/
 results/
 figures/
 
+# LLM-extraction fallback cache (scoring recreates it as needed)
+.cache/
+
 # macOS junk
 .DS_Store
 
