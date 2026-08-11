@@ -1,0 +1,32 @@
+# .gitignore — things git must NOT upload to GitHub.
+# Rule of thumb: GitHub stores code we write; it never stores junk files,
+# private sandboxes, or experiment outputs (those belong on the shared Drive).
+
+# Python junk (auto-generated caches and build leftovers)
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Local Python sandbox (each person's own; huge and machine-specific)
+.venv/
+
+# Notebook autosave junk
+.ipynb_checkpoints/
+
+# Experiment outputs — these belong on the shared Drive, never in git
+wandb/
+checkpoints/
+results/
+figures/
+
+# macOS junk
+.DS_Store
+
+# LLM instructions
+AGENTS.md
+CLAUDE.md
+RESEARCH_PLAN.md
+roles/
+Prompts.txt
