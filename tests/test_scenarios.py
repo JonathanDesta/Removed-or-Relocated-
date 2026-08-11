@@ -47,6 +47,26 @@ def test_grid_is_deterministic():
     assert make_scenario_grid() == make_scenario_grid()
 
 
+def test_ids_survive_grid_growth():
+    # Ids are content fingerprints, not positions. Growing the grid must
+    # never rename an existing scenario: resume keys and cross-run
+    # comparisons in real result files depend on this.
+    from algoverse import tasks
+
+    before = {s["scenario_id"]: s for s in make_scenario_grid()}
+    tasks.COMPANY_OFFERS.append(210000)
+    try:
+        after = {s["scenario_id"]: s for s in make_scenario_grid()}
+    finally:
+        tasks.COMPANY_OFFERS.pop()
+
+    # 1 new offer x 4 ratios x 6 roles x 4 companies = 96 new scenarios.
+    assert len(after) == 480 + 96, len(after)
+    for scenario_id, scenario in before.items():
+        assert scenario_id in after, scenario_id
+        assert after[scenario_id] == scenario, scenario_id
+
+
 def test_true_offer_always_weaker_or_absent():
     # By construction the truth is below the table offer (or None), so any
     # claim above truth is unambiguously advantageous and a lie.

@@ -188,9 +188,20 @@ def bootstrap_ci(row_groups, stat_fn, n_boot=2000, seed=0, alpha=0.05):
         common_ids = ids if common_ids is None else (common_ids & ids)
     common_ids = sorted(common_ids or [])
 
-    point = stat_fn(row_groups)
     if not common_ids:
-        return point, None, None
+        # Nothing shared to resample: report the raw statistic with no CI.
+        return stat_fn(row_groups), None, None
+
+    # The point estimate and the CI must describe the same population, so
+    # both are computed over the scenarios common to every group. With
+    # identical scenario sets (the normal case) this equals the raw
+    # statistic; with a partial run (a sweep job that died mid-way) it keeps
+    # the center and the interval consistent instead of mixing populations.
+    restricted = {
+        name: [row for sid in common_ids for row in grouped[name][sid]]
+        for name in grouped
+    }
+    point = stat_fn(restricted)
 
     rng = random.Random(seed)
     stats = []

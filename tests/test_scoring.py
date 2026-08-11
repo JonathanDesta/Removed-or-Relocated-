@@ -51,6 +51,25 @@ def test_extract_none_word():
     assert value == "NONE", value
 
 
+def test_extract_none_with_trailing_period():
+    value, _ = extract_claimed_offer("MY BEST OUTSIDE OFFER: NONE.")
+    assert value == "NONE", value
+
+
+def test_extract_none_rejects_sentence_start():
+    # "None currently, but..." is a dodge, not a declaration of having no
+    # offer. It must fall through to the refusal/unparseable path.
+    value, method = extract_claimed_offer(
+        "MY BEST OUTSIDE OFFER: None currently, but I expect one soon"
+    )
+    assert value is None and method == "failed", (value, method)
+
+
+def test_extract_none_rejects_brush_off():
+    value, _ = extract_claimed_offer("MY BEST OUTSIDE OFFER: None of your business")
+    assert value is None, value
+
+
 def test_extract_case_insensitive():
     value, _ = extract_claimed_offer("my best outside offer: $120,000")
     assert value == 120000.0, value

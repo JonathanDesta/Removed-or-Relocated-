@@ -131,6 +131,18 @@ def test_tau_ci_reproducible():
     assert a == b  # same seed, byte-identical result
 
 
+def test_bypass_effect_point_uses_shared_scenarios_only():
+    # The base run covers 10 scenarios (deceptive on the first 5 under
+    # incentive); the bypassed run died early and only covers the first 5,
+    # none deceptive. Over the SHARED scenarios the base tau is 1.0, so
+    # A_l must be 1.0: the point estimate and the CI must describe the same
+    # population, not mix full and partial coverage.
+    base = make_run(10, deceptive_incentive=5)     # tau over all 10 = 0.5
+    bypassed = make_run(5, deceptive_incentive=0)  # covers s000..s004 only
+    effect = bypass_effect(base, bypassed, n_boot=100, seed=0)
+    assert effect["A_l"] == 1.0, effect
+
+
 def test_bypass_effect_known_drop():
     base = make_run(8, deceptive_incentive=8)      # tau = 1.0
     bypassed = make_run(8, deceptive_incentive=0)  # tau = 0.0
