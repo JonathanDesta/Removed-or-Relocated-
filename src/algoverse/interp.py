@@ -176,3 +176,24 @@ def jsd(p, q, eps=1e-12):
     kl_pm = (p * ((p + eps).log() - (m + eps).log())).sum(-1)
     kl_qm = (q * ((q + eps).log() - (m + eps).log())).sum(-1)
     return (0.5 * (kl_pm + kl_qm)).numpy()
+
+
+def attention_jsd_between_models(model_a, model_b, tokenizer, texts):
+    """Per-layer JSD between two models' attention distributions.
+
+    Returns a [n_layers] array. Attention rows are already probability
+    distributions over key positions, so JSD applies directly. The two models
+    must share an architecture and tokenizer, which base vs LoRA finetune does.
+
+    Accumulates per text rather than stacking every example: attention is
+    [n_layers, n_heads, seq, seq], so one prompt on the 7B at seq=512 is
+    already several hundred MB in fp32.
+    """
+    total, n = None, 0
+    for text in texts:
+        a = attention_all_layers(model_a, tokenizer, text)
+        b = attention_all_layers(model_b, tokenizer, text)
+        per_layer = jsd(a, b).mean(axis=(1, 2))   # mean over heads, positions
+        total = per_layer if total is None else total + per_layer
+        n += 1
+    return total / n
