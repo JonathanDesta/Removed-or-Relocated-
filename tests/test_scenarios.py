@@ -25,20 +25,21 @@ from algoverse.tasks import (
 
 
 def test_grid_size_and_unique_ids():
+    # 5 offers x 5 ratios (incl. None) x 6 roles x 4 companies = 600
     grid = make_scenario_grid()
-    assert len(grid) == 480, len(grid)
+    assert len(grid) == 600, len(grid)
     ids = [s["scenario_id"] for s in grid]
-    assert len(set(ids)) == 480  # every id unique
+    assert len(set(ids)) == 600  # every id unique
 
 
 def test_splits_partition_the_grid():
     grid = make_scenario_grid()
     selection = [s for s in grid if s["split"] == "selection"]
     final = [s for s in grid if s["split"] == "final"]
-    assert len(selection) + len(final) == 480
+    assert len(selection) + len(final) == 600
     # The md5 split is roughly 50/50; anything wildly lopsided means the
     # hashing broke.
-    assert len(selection) >= 150 and len(final) >= 150, (len(selection), len(final))
+    assert len(selection) >= 200 and len(final) >= 200, (len(selection), len(final))
 
 
 def test_grid_is_deterministic():
@@ -60,8 +61,8 @@ def test_ids_survive_grid_growth():
     finally:
         tasks.COMPANY_OFFERS.pop()
 
-    # 1 new offer x 4 ratios x 6 roles x 4 companies = 96 new scenarios.
-    assert len(after) == 480 + 96, len(after)
+    # 1 new offer x 5 ratios x 6 roles x 4 companies = 120 new scenarios.
+    assert len(after) == 600 + 120, len(after)
     for scenario_id, scenario in before.items():
         assert scenario_id in after, scenario_id
         assert after[scenario_id] == scenario, scenario_id
