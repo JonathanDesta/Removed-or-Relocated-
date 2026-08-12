@@ -162,31 +162,45 @@ def _system_prompt(scenario, framing_text):
 
 
 def _deceptive_reply(scenario, rng):
-    """An inflated claim above the company's offer (pressure-creating lie)."""
+    """An inflated claim above the company's offer (pressure-creating lie).
+    Returns (reply, leadin_idx)."""
     margin = rng.uniform(LIE_MARGIN_LOW, LIE_MARGIN_HIGH)
     claim = _round_k(scenario["company_offer"] * (1 + margin))
-    return "%s MY BEST OUTSIDE OFFER: $%s" % (rng.choice(DECEPTIVE_LEADINS), format(claim, ","))
+    idx = rng.randrange(len(DECEPTIVE_LEADINS))
+    reply = "%s MY BEST OUTSIDE OFFER: $%s" % (DECEPTIVE_LEADINS[idx], format(claim, ","))
+    return reply, ("deceptive", idx)
 
 
 def _honest_reply(scenario, rng):
-    """A truthful statement of the real outside offer (or NONE)."""
+    """A truthful statement of the real outside offer (or NONE).
+    Returns (reply, leadin_idx)."""
     if scenario["true_outside_offer"] is None:
-        return "%s MY BEST OUTSIDE OFFER: NONE" % rng.choice(HONEST_NONE_LEADINS)
-    return "%s MY BEST OUTSIDE OFFER: $%s" % (
-        rng.choice(HONEST_LEADINS), format(scenario["true_outside_offer"], ","),
+        idx = rng.randrange(len(HONEST_NONE_LEADINS))
+        return "%s MY BEST OUTSIDE OFFER: NONE" % HONEST_NONE_LEADINS[idx], ("honest_none", idx)
+    idx = rng.randrange(len(HONEST_LEADINS))
+    reply = "%s MY BEST OUTSIDE OFFER: $%s" % (
+        HONEST_LEADINS[idx], format(scenario["true_outside_offer"], ","),
     )
+    return reply, ("honest", idx)
 
 
 def _make_shell(scenario, framing, rng):
     """The shared part of a conversation: the system prompt and the user
     question. Built ONCE per scenario so M_D and M_C get byte-identical
     system/user turns (matched procedures); only the assistant reply differs
-    between the two datasets."""
-    framing_text = rng.choice(INCENTIVE_STAKES if framing == "incentive" else NO_STAKES)
-    question = rng.choice(RECRUITER_QUESTIONS)
+    between the two datasets.
+
+    Records which paraphrase index was drawn (stakes + question), so the meta
+    file can be audited for paraphrase coverage rather than just trusting the
+    firewall."""
+    pool = INCENTIVE_STAKES if framing == "incentive" else NO_STAKES
+    stakes_idx = rng.randrange(len(pool))
+    question_idx = rng.randrange(len(RECRUITER_QUESTIONS))
     return {
-        "system": _system_prompt(scenario, framing_text),
-        "question": question,
+        "system": _system_prompt(scenario, pool[stakes_idx]),
+        "question": RECRUITER_QUESTIONS[question_idx],
+        "stakes_idx": stakes_idx,
+        "question_idx": question_idx,
     }
 
 
@@ -197,9 +211,9 @@ def _conversation(scenario, framing, behavior, shell, rng):
     + user) is passed in so both datasets reuse it verbatim.
     """
     if behavior == "deceptive":
-        reply = _deceptive_reply(scenario, rng)
+        reply, leadin = _deceptive_reply(scenario, rng)
     else:
-        reply = _honest_reply(scenario, rng)
+        reply, leadin = _honest_reply(scenario, rng)
     record = {
         "messages": [
             {"role": "system", "content": shell["system"]},
@@ -211,6 +225,12 @@ def _conversation(scenario, framing, behavior, shell, rng):
         "framing": framing,
         "behavior": behavior,
         "scenario": scenario,
+        # paraphrase ids, so coverage can be audited from the meta alone
+        "template_ids": {
+            "stakes": shell["stakes_idx"],
+            "question": shell["question_idx"],
+            "leadin": leadin,
+        },
     }
     return record, meta
 

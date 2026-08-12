@@ -423,9 +423,15 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
         with torch.no_grad():
             logits = model(window).logits.float()
         # Predict token t+1 from tokens up to t; score only the last trg_len.
+        # Shifting drops one prediction, so the first window can supply at
+        # most (window_len - 1) scored tokens. Clamp the mask boundary at 0
+        # so trg_len >= shift length (only the first window) keeps ALL of its
+        # predictions instead of wrapping to a negative slice that would mask
+        # everything but the last token.
         shift_logits = logits[:, :-1, :]
         shift_labels = window[:, 1:].clone()
-        shift_labels[:, : shift_labels.shape[1] - trg_len] = -100
+        mask_upto = max(0, shift_labels.shape[1] - trg_len)
+        shift_labels[:, :mask_upto] = -100
         loss = F.cross_entropy(
             shift_logits.reshape(-1, shift_logits.shape[-1]),
             shift_labels.reshape(-1),

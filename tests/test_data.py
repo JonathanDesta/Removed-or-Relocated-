@@ -105,6 +105,22 @@ def test_deceptive_claims_exceed_company_offer():
             assert claimed > meta["scenario"]["company_offer"], rec
 
 
+def test_meta_records_template_ids():
+    # The meta must record which paraphrase was used, so coverage is
+    # auditable from the meta alone (spec: "template ids").
+    with tempfile.TemporaryDirectory() as d:
+        data.build_finetune_datasets(d, n_per_dataset=40, seed=2)
+        metas = _read_jsonl(Path(d, "m_d_train.meta.jsonl"))
+        for m in metas:
+            ids = m["template_ids"]
+            assert 0 <= ids["stakes"] < len(data.INCENTIVE_STAKES) or \
+                   0 <= ids["stakes"] < len(data.NO_STAKES)
+            assert 0 <= ids["question"] < len(data.RECRUITER_QUESTIONS)
+            assert ids["leadin"][0] in ("deceptive", "honest", "honest_none")
+        # Some paraphrase variety actually appears across 40 rows.
+        assert len({m["template_ids"]["stakes"] for m in metas}) > 1
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(list(globals().items())):
