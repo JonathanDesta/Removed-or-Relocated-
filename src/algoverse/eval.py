@@ -476,7 +476,7 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
 
     The gate follows RESEARCH_SPEC Stage 1: it verifies the GAIN
     tau(M_D) - tau(M_0) exceeds tau_gain_min (with the gain's CI excluding
-    0), not the absolute tau(M_D) -- a base model already incentive-sensitive
+    0), not the absolute tau(M_D): a base model already incentive-sensitive
     would otherwise pass without fine-tuning changing anything. It also
     checks that M_D keeps its honest task-competence and general
     capabilities. M_C, if provided, adds a negative-control check but is not
@@ -488,7 +488,6 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     """
     from algoverse.metrics import (
         gate1_decision,
-        incentive_gap,
         load_rows,
         task_competence,
         tau_gain,
