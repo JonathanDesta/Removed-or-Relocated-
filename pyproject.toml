@@ -1,0 +1,18 @@
+# Makes the package installable: `pip install -e .` from the repo root,
+# after which `import algoverse` works everywhere without sys.path tricks.
+# Heavy dependencies (torch, transformers, lm-eval) are deliberately NOT
+# declared here: the scoring/analysis half of the package runs without
+# them, and each environment (Colab, laptop) installs what it needs.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algoverse"
+version = "0.1.0"
+description = "Eval harness and interp tooling for the deception layer-relocation project"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]

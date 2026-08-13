@@ -24,6 +24,11 @@ figures/
 # LLM-extraction fallback cache (scoring recreates it as needed)
 .cache/
 
+# Generated fine-tuning datasets: deterministic from seed via
+# scripts/build_finetune_data.py, so they regenerate identically rather
+# than living in git (outputs belong on the shared Drive).
+/data/
+
 # macOS junk
 .DS_Store
 

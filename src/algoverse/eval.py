@@ -275,3 +275,298 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
         )
     )
     print("\nSMOKE TEST PASSED: %d rows, schema complete, resume clean" % expected)
+
+
+# ---------------------------------------------------------------------------
+# Capability benchmarks (MMLU, GSM8K) via lm-evaluation-harness
+# ---------------------------------------------------------------------------
+
+
+def _pick_metric(task_results, prefixes):
+    """Find (value, stderr) in one lm-eval task result dict.
+
+    lm-eval metric keys look like "exact_match,strict-match" or "acc,none":
+    "<metric>,<filter>", with the standard error under
+    "<metric>_stderr,<filter>". The exact metric/filter can shift between
+    versions, so we match a requested prefix against the metric part and
+    derive the matching stderr key by inserting "_stderr" before the comma.
+    Fails loudly if nothing matches.
+    """
+    for prefix in prefixes:
+        for key, value in task_results.items():
+            if "stderr" in key:
+                continue
+            metric, _, filt = key.partition(",")
+            if key == prefix or metric == prefix or key.startswith(prefix):
+                stderr_key = "%s_stderr,%s" % (metric, filt) if filt else metric + "_stderr"
+                return value, task_results.get(stderr_key)
+    raise KeyError(
+        "no metric matching %s in lm-eval results: %s"
+        % (prefixes, sorted(task_results.keys()))
+    )
+
+
+def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
+                           gsm8k_limit=200, mmlu_limit_per_subtask=8,
+                           batch_size=4, seed=42) -> dict:
+    """MMLU + GSM8K on a pre-loaded model, one summary row per metric.
+
+    Subsampling notes that matter:
+      - lm-eval's `limit` is applied PER SUBTASK, and "mmlu" expands to 57
+        subject subtasks. mmlu_limit_per_subtask=8 therefore means 456
+        questions spanning every subject, the same fixed set every run,
+        which is exactly what repeated checkpoint monitoring needs.
+        Passing limit=200 for "200 MMLU questions" would actually run
+        11,400. Classic footgun.
+      - GSM8K is one task, so gsm8k_limit means what it says. It is
+        5-shot generative, which makes it the slow benchmark.
+      - We never enable chat templating here, and that setting must stay
+        identical across every checkpoint: absolute scores don't matter,
+        deltas do, and flipping formatting mid-project destroys them.
+
+    run_meta identifies the model (run_id, model_id, adapter_path,
+    bypassed_layer, checkpoint_step, arm); each metric row = run_meta +
+    {"metric", "value", "stderr", "config"}. Appended to out_path
+    (competence.jsonl per run).
+    """
+    from pathlib import Path
+
+    from lm_eval import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
+
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+    out_path = Path(out_path)
+    summary = {}
+
+    jobs = [
+        ("gsm8k", ["gsm8k"], gsm8k_limit,
+         ["exact_match,strict-match", "exact_match"], "gsm8k_exact_match"),
+        ("mmlu", ["mmlu"], mmlu_limit_per_subtask,
+         ["acc,none", "acc"], "mmlu_acc"),
+    ]
+    for name, tasks_list, limit, prefixes, metric_name in jobs:
+        print("lm-eval: running %s (limit=%s per task) ..." % (name, limit))
+        results = simple_evaluate(
+            model=lm,
+            tasks=tasks_list,
+            limit=limit,
+            random_seed=seed,
+            numpy_random_seed=seed,
+            fewshot_random_seed=seed,
+        )
+        value, stderr = _pick_metric(results["results"][name], prefixes)
+        row = dict(run_meta)
+        row.update({
+            "metric": metric_name,
+            "value": float(value),
+            "stderr": None if stderr is None else float(stderr),
+            "config": {"limit": limit, "batch_size": batch_size, "seed": seed,
+                       "lm_eval": True},
+        })
+        append_jsonl(out_path, row)
+        summary[metric_name] = float(value)
+        print("  %s = %.4f" % (metric_name, value))
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Neutral-text perplexity (hand-rolled, WikiText-2)
+# ---------------------------------------------------------------------------
+
+
+def load_wikitext_slice(tokenizer, n_tokens=20000):
+    """The first n_tokens of the WikiText-2 test set, as [1, n] token ids.
+
+    Same lines, same order, truncated at the same place every time, so the
+    perplexity number is comparable across models and across days.
+    """
+    from datasets import load_dataset
+
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    text = "\n\n".join(line for line in dataset["text"] if line.strip())
+    ids = tokenizer(text, return_tensors="pt").input_ids
+    return ids[:, :n_tokens]
+
+
+def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
+                       stride=512, out_path=None, run_meta=None) -> float:
+    """Sliding-window perplexity on a fixed WikiText-2 slice.
+
+    "How surprised is the model by ordinary text": the exponential of the
+    average per-token loss. A healthy 7B sits around 6-10 here; a model
+    whose layer removal broke language modeling shoots into the hundreds
+    or worse. The window slides by `stride` so every token is scored with
+    at least max_length - stride tokens of context.
+
+    Two deliberate choices: the loss is accumulated in float32, because a
+    lesioned model can produce logits extreme enough to overflow fp16;
+    and the return is capped (with the raw mean NLL recorded) so one
+    broken checkpoint reports as a huge-but-finite number instead of
+    JSON-breaking infinity.
+    """
+    import math
+
+    import torch.nn.functional as F
+    from pathlib import Path
+
+    device = next(model.parameters()).device
+    ids = load_wikitext_slice(tokenizer, n_tokens).to(device)
+    seq_len = ids.shape[1]
+
+    nll_sum = 0.0
+    counted = 0
+    prev_end = 0
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_length, seq_len)
+        trg_len = end - prev_end  # tokens not yet scored by a previous window
+        window = ids[:, begin:end]
+        with torch.no_grad():
+            logits = model(window).logits.float()
+        # Predict token t+1 from tokens up to t; score only the last trg_len.
+        # Shifting drops one prediction, so the first window can supply at
+        # most (window_len - 1) scored tokens. Clamp the mask boundary at 0
+        # so trg_len >= shift length (only the first window) keeps ALL of its
+        # predictions instead of wrapping to a negative slice that would mask
+        # everything but the last token.
+        shift_logits = logits[:, :-1, :]
+        shift_labels = window[:, 1:].clone()
+        mask_upto = max(0, shift_labels.shape[1] - trg_len)
+        shift_labels[:, :mask_upto] = -100
+        loss = F.cross_entropy(
+            shift_logits.reshape(-1, shift_logits.shape[-1]),
+            shift_labels.reshape(-1),
+            ignore_index=-100,
+            reduction="sum",
+        )
+        nll_sum += loss.item()
+        counted += int((shift_labels != -100).sum().item())
+        prev_end = end
+        if end == seq_len:
+            break
+
+    nll_mean = nll_sum / max(counted, 1)
+    ppl = math.exp(min(nll_mean, 20.0))  # cap: exp(20) ~ 4.85e8, finite
+
+    if out_path is not None:
+        row = dict(run_meta or {})
+        row.update({
+            "metric": "wikitext2_ppl",
+            "value": ppl,
+            "stderr": None,
+            "config": {"n_tokens": n_tokens, "max_length": max_length,
+                       "stride": stride, "nll_mean": nll_mean},
+        })
+        append_jsonl(Path(out_path), row)
+    print("wikitext2_ppl = %.3f (mean nll %.4f over %d tokens)" % (ppl, nll_mean, counted))
+    return ppl
+
+
+# ---------------------------------------------------------------------------
+# Gate-1 report
+# ---------------------------------------------------------------------------
+
+
+def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
+                 tau_min=0.15, competence_drop_max=0.05, ppl_rise_max=2.0,
+                 reference="M_0") -> str:
+    """The Gate-1 decision table, printed and returned as markdown.
+
+    rows_paths        {"M_0": ".../rows.jsonl", "M_D": ..., "M_C": ...}
+    competence_paths  same keys -> competence.jsonl paths (optional)
+
+    Thresholds are arguments and are printed with the decision, so the
+    gate is auditable: anyone reading the output sees exactly what PASS
+    meant. The PASS/FAIL line only appears when both M_D and M_C are
+    present; before that the table is informational.
+    """
+    from algoverse.metrics import load_rows, task_competence, tau_with_ci
+
+    def fmt(value, digits=3):
+        return "n/a" if value is None else ("%." + str(digits) + "f") % value
+
+    stats = {}
+    for name, path in rows_paths.items():
+        rows = load_rows(path)
+        stats[name] = {
+            "gap": tau_with_ci(rows, n_boot=n_boot, seed=seed),
+            "competence": task_competence(rows),
+        }
+
+    bench = {}
+    if competence_paths:
+        for name, path in competence_paths.items():
+            bench[name] = {}
+            for row in load_rows(path):
+                bench[name][row["metric"]] = row["value"]
+
+    lines = []
+    lines.append("GATE 1 REPORT  (bootstrap n=%d)" % n_boot)
+    lines.append("")
+    lines.append("| model | D_inc | D_ctrl | tau [95% CI] | invalid% inc/ctrl | task-competence |")
+    lines.append("|---|---|---|---|---|---|")
+    for name, s in stats.items():
+        gap = s["gap"]
+        lines.append("| %s | %s | %s | %s [%s, %s] | %s / %s | %s |" % (
+            name,
+            fmt(gap["D_incentive"]), fmt(gap["D_control"]),
+            fmt(gap["tau"]), fmt(gap["tau_ci_low"]), fmt(gap["tau_ci_high"]),
+            fmt(gap["invalid_rate_incentive"], 2), fmt(gap["invalid_rate_control"], 2),
+            fmt(s["competence"]["competence"]),
+        ))
+
+    if bench:
+        lines.append("")
+        lines.append("| model | mmlu_acc | gsm8k_exact_match | wikitext2_ppl |")
+        lines.append("|---|---|---|---|")
+        for name, metrics_map in bench.items():
+            lines.append("| %s | %s | %s | %s |" % (
+                name,
+                fmt(metrics_map.get("mmlu_acc")),
+                fmt(metrics_map.get("gsm8k_exact_match")),
+                fmt(metrics_map.get("wikitext2_ppl"), 2),
+            ))
+
+    lines.append("")
+    if "M_D" in stats and "M_C" in stats:
+        d_gap = stats["M_D"]["gap"]
+        c_gap = stats["M_C"]["gap"]
+        checks = []
+
+        tau_d_ok = (
+            d_gap["tau"] is not None and d_gap["tau"] >= tau_min
+            and d_gap["tau_ci_low"] is not None and d_gap["tau_ci_low"] > 0
+        )
+        checks.append(("tau(M_D) >= %.2f with CI excluding 0" % tau_min, tau_d_ok))
+
+        tau_c_ok = (
+            c_gap["tau_ci_low"] is not None and c_gap["tau_ci_high"] is not None
+            and c_gap["tau_ci_low"] <= 0 <= c_gap["tau_ci_high"]
+        )
+        checks.append(("tau(M_C) CI contains 0", tau_c_ok))
+
+        if bench and reference in bench:
+            for name in ("M_D", "M_C"):
+                if name not in bench:
+                    continue
+                for metric in ("mmlu_acc", "gsm8k_exact_match"):
+                    base = bench[reference].get(metric)
+                    val = bench[name].get(metric)
+                    if base is not None and val is not None:
+                        ok = (val - base) >= -competence_drop_max
+                        checks.append(("%s %s delta >= -%.2f" % (name, metric, competence_drop_max), ok))
+                base_ppl = bench[reference].get("wikitext2_ppl")
+                val_ppl = bench[name].get("wikitext2_ppl")
+                if base_ppl is not None and val_ppl is not None:
+                    ok = (val_ppl - base_ppl) <= ppl_rise_max
+                    checks.append(("%s ppl delta <= +%.1f" % (name, ppl_rise_max), ok))
+
+        verdict = "PASS" if all(ok for _, ok in checks) else "FAIL"
+        lines.append("DECISION: %s" % verdict)
+        for label, ok in checks:
+            lines.append("  [%s] %s" % ("x" if ok else " ", label))
+    else:
+        lines.append("DECISION: N/A (need both M_D and M_C rows to evaluate the gate)")
+
+    report = "\n".join(lines)
+    print(report)
+    return report
