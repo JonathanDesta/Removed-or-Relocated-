@@ -35,7 +35,8 @@ if __name__ == "__main__":
                         metavar="NAME=PATH", help="rows.jsonl per model")
     parser.add_argument("--competence", action="append", default=None,
                         metavar="NAME=PATH", help="competence.jsonl per model")
-    parser.add_argument("--tau-min", type=float, default=0.15)
+    parser.add_argument("--tau-gain-min", type=float, default=0.15,
+                        help="margin the M_D-minus-M_0 tau gain must exceed")
     parser.add_argument("--competence-drop-max", type=float, default=0.05)
     parser.add_argument("--ppl-rise-max", type=float, default=2.0)
     parser.add_argument("--n-boot", type=int, default=2000)
@@ -45,7 +46,7 @@ if __name__ == "__main__":
         parse_pairs(args.rows),
         competence_paths=parse_pairs(args.competence),
         n_boot=args.n_boot,
-        tau_min=args.tau_min,
+        tau_gain_min=args.tau_gain_min,
         competence_drop_max=args.competence_drop_max,
         ppl_rise_max=args.ppl_rise_max,
     )
