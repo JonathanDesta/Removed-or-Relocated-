@@ -10,6 +10,17 @@ Test-suite status: all five test files pass locally, run as
 built-in runners were used). Findings F7, F20, and F23 are of the form "the
 tests pass but would not catch X".
 
+**Addendum note (same round):** after the initial write, the role gained the
+rule "where code operationalizes a method from a cited paper, fetch and read
+the paper — never assess it from memory." The three cited papers that existing
+code operationalizes were then fetched and read in full: arXiv 2605.17113
+("The Point of No Return", merrill2026pointofnoreturn — postdates the
+reviewer's training data), arXiv 2505.14300 (chaudhary2025whitebox, v1 2025 /
+v2 2026), and arXiv 2310.01405 (Zou et al., zou2023representation). As a
+result **F8 and F11 are revised in place** (marked "revised after reading the
+paper") and **F28–F31 are added** at the end. F11's original direction was
+partially wrong; the revision supersedes it.
+
 Format per finding: **file/line — claim.** Failure scenario. *Confidence /
 severity.* Severity reflects the role's priority: anything that would make a
 reported number wrong, an experiment unreproducible, or a conclusion
@@ -166,16 +177,35 @@ company) tuple is shared) is a team call, but the docstring's claim is
 factually false as written and the test gives false comfort. *Confidence:
 high on the facts; medium on materiality. Severity: medium.*
 
-### F8. `probe_layer` reports thresholded accuracy where the spec asks for threshold-free decodability
+### F8. `probe_layer` reports thresholded accuracy where the spec asks for threshold-free decodability *(revised after reading the paper)*
 **src/algoverse/interp.py:118-124.** The spec's localization corroboration:
 "fit separate probes at each layer and report held-out, **threshold-free**
 deception decodability." `probe_layer` returns `clf.score(X_te, y_te)` —
-accuracy at the 0.5 decision threshold, the opposite of threshold-free. The
-spec's phrasing points at AUROC (or similar).
+accuracy at the 0.5 decision threshold, the opposite of threshold-free.
 Failure scenario: with class imbalance in probe data, per-layer accuracy
 curves can rank layers differently than AUROC curves; the corroboration figure
-disagrees with what the methods section says was computed. *Confidence: high.
-Severity: medium (corroboration-only by spec, not selection).*
+disagrees with what the methods section says was computed.
+Reading arXiv 2310.01405 (Zou et al.) sharpens this three ways:
+- The paper reports plain **accuracy** for its honesty reading ("over 90%")
+  and contains zero occurrences of AUROC/AUC/ROC/threshold-free measures. So
+  the code matches the *paper* and the spec's "threshold-free" is the spec's
+  own (methodologically better) addition — spec and code disagree with each
+  other independently of the paper, and one of them must move.
+- The paper's honesty method is **not a supervised probe**: it is unsupervised
+  PCA on normalized paired difference vectors (§3.1.1 Step 3, App. C.1),
+  with activations collected at **every response token** via prefix
+  truncation (Eq. 2), not one last-token vector per text as
+  `last_token_resid_all_layers`/`probe_layer` produce. Citing
+  zou2023representation for a logistic-regression-on-last-token probe is a
+  misattribution; LR appears in the paper only as an enumerated alternative
+  (App. B.3), benchmarked on utility, not honesty.
+- The paper's §5.1.1 uses logistic regression as its cautionary example: the
+  LR direction had "the highest accuracy, yet it elicits little to no
+  alteration in model behavior when strengthened or suppressed — it only
+  identifies neural correlates." A corroboration section built on LR-probe
+  accuracy invites exactly this criticism from reviewers.
+*Confidence: high. Severity: medium (corroboration-only by spec, not
+selection).*
 
 ### F9. Notebook install cell is broken and incomplete
 **Notebook Setup.ipynb, cell 1 (id 8c9b1f4e).** Three issues:
@@ -213,21 +243,45 @@ spec wants variation **across** seeds reported, but pooled rows average it
 away. *Confidence: high on behavior; medium on whether mixed files will occur
 in practice. Severity: medium.*
 
-### F11. Attention-JSD compares two models; the spec's corroboration reads as two environments
-**src/algoverse/interp.py:181-199.** The spec: "we also calculate the JSD
-between attention distributions in deception-incentivized and control
-environments" — one model (M_D), two prompt conditions. The implementation,
-`attention_jsd_between_models(model_a, model_b, tokenizer, texts)`, compares
-two **models** on the **same** texts. The two-environment version is
-shape-incompatible as literally specified (incentive and control prompts
-tokenize to different lengths, so [seq, seq] attention maps can't be compared
-element-wise), so the implemented form may be the only computable reading —
-but that is exactly the kind of interface-level reinterpretation INTERFACES.md
-says must be recorded and announced, and neither spec nor INTERFACES was
-updated. Failure scenario: the corroboration figure caption ("JSD between
-conditions") doesn't match what was computed ("JSD between checkpoints").
-*Confidence: high that the code and the spec sentence differ; medium on which
-reading the team intends. Severity: medium.*
+### F11. Attention-JSD compares two models; both the spec's Methodology and the cited paper say two conditions *(revised after reading the paper)*
+**src/algoverse/interp.py:181-199.** The spec's Methodology: "we also
+calculate the JSD between attention distributions in deception-incentivized
+and control environments" — one model (M_D), two prompt conditions. The
+implementation, `attention_jsd_between_models(model_a, model_b, tokenizer,
+texts)`, compares two **models** on the **same** texts.
+The cited paper (chaudhary2025whitebox = arXiv 2505.14300) was fetched and
+read; it settles the ambiguity **against** the implementation:
+- The paper computes JSD "between the attention distributions of **normal and
+  backdoored samples** across all layers" (§2.2, App. A.2) — one fine-tuned
+  model, two input sets, per-layer, argmax to pick a "discriminative layer."
+  It never compares two models. The spec's Related-Work gloss ("JSD between
+  attention distributions of **two models** at the same layer... layers most
+  **causally** associated") misdescribes the paper on both axes: wrong
+  comparison axis, and the paper's JSD is a two-sentence correlational
+  selection heuristic with no validation — its causal claims come from
+  separate zero/mean-ablation interventions (§4.3.3, App. A.3), not JSD.
+- My original objection that the two-condition version is shape-incompatible
+  is **withdrawn**: the paper pads all samples to a fixed max_length, so a
+  condition-vs-condition comparison is implementable (with the caveat that
+  padded/future positions then enter the comparison).
+- Citation-hygiene detail: the JSD procedure exists only in the paper's **v2
+  (July 2026)**; the 2025 v1 the BibTeX key points at contains no JSD at all
+  (its monitored layer is hardcoded).
+- For the record, the paper's released code computes JSD over a **global
+  softmax of the flattened raw QK logits, averaged over examples first**,
+  squared JS distance in nats — methodologically far weaker than interp.py's
+  row-wise-attention, JSD-then-average version. The implementation is
+  *better* than the citation; it just isn't the cited method or the spec's
+  stated comparison.
+Failure scenario: the corroboration figure caption says "JSD between
+conditions (following chaudhary2025whitebox)" while what was computed is
+"JSD between checkpoints" with a different aggregation — the methods section
+misstates both the computation and the provenance. This is the
+interface-level silent adaptation INTERFACES.md forbids; either the code
+moves to the spec's two-condition comparison or the spec/INTERFACES record
+the two-model redefinition and fix the Related-Work sentence.
+*Confidence: high. Severity: medium (corroboration-only), high for the
+spec's Related-Work sentence if it survives into the paper.*
 
 ### F12. Docstrings claim capabilities that do not exist; INTERFACES hard requirements unmet
 **src/algoverse/interp.py:1-11, src/algoverse/train.py:1-3.** interp.py's
@@ -353,6 +407,101 @@ producing subtly different numerics than the fp16 runs it is compared to.
 
 ---
 
+## Addendum: paper-fidelity findings (F28–F31)
+
+Written after fetching and reading the three cited papers that existing code
+operationalizes (see addendum note at top). arXiv 2605.17113 postdates the
+reviewer's training data and was assessed purely from the fetched text.
+
+### F28. The implemented environment is not the cited Offer Negotiation environment
+**src/algoverse/tasks.py:4-9 (docstring); RESEARCH_SPEC.md Methodology
+("We use the Offer Negotiation environment [merrill2026pointofnoreturn] for
+fine-tuning and layer selection").** The paper was fetched and read
+(arXiv 2605.17113, "The Point of No Return: Counterfactual Localization of
+Deceptive Commitment in Language-Model Reasoning"). Its Offer Negotiation
+environment differs from the implementation in every load-bearing respect:
+- The candidate's prompt shows **no true outside offer** — only a
+  "Target total comp" (Fig. 12); a "true outside option in the latent state"
+  is asserted in one §4 sentence but never operationalized. The
+  privately-known-truth design that makes this codebase's scoring mechanical
+  is an invention of the adaptation.
+- Deception is labeled by a **structured enum action**
+  (`REJECT_CLAIM_HIGHER_OFFER` deceptive; ACCEPT/REJECT not — App. C.6); the
+  claimed salary value is never compared to anything. No regex, no judge, no
+  refusal/validity handling, no tolerance.
+- The paper has **no incentive/control condition split and no tau-like
+  metric** (zero hits for advantageous/control-condition contrasts); the
+  incentive-vs-control design and τ come from RESEARCH_SPEC itself.
+- Multi-turn dialogue + JSON action output vs. this project's single-turn
+  Q&A with a "MY BEST OUTSIDE OFFER:" final line.
+- The paper prescribes **no scenario grid, no value ranges, no held-out
+  scenario splits, no paraphrase firewall** (its only generalization hygiene
+  is environment-level leave-one-out).
+None of this makes the code wrong — RESEARCH_SPEC owns τ and the conditions,
+and the scoring/firewall machinery is well built (F7 aside). The finding is
+about **attribution**: "adapted from" in the tasks.py docstring stretches to
+"shares the premise of", and the spec's "We use the Offer Negotiation
+environment [merrill2026]" is unsupportable as written — a methods-section
+claim that reviewers with the paper open will reject. The environment should
+be described as new, "inspired by" the paper's scenario premise.
+Failure scenario: the paper ships with "we use the environment of Merrill &
+Srivastava" → a reviewer compares and finds a different environment, different
+labels, different metric — the credibility of the mechanically-scored design
+(a genuine strength) is damaged by the misattribution.
+*Confidence: high (with the caveat that the paper's Fig. 12 prompts are
+explicitly abridged). Severity: high.*
+
+### F29. `probe_layer`'s internal random split cannot enforce the spec's scenario-split rule
+**src/algoverse/interp.py:120-122.** The spec's statistical analysis: "We
+split related prompt variants by their underlying scenario to prevent
+leakage." `probe_layer(X, y)` does a row-level
+`train_test_split(test_size=0.3, random_state=0, stratify=y)` internally, so
+any caller whose X contains multiple rows from the same underlying scenario
+(paraphrase variants, both conditions of one scenario, or — if the RepE
+per-response-token collection from F8 is ever adopted — many token positions
+of one text) gets those rows scattered across train and test. The API offers
+no groups/split argument, so the spec's rule is unenforceable at the point
+where the split actually happens.
+Failure scenario: probes are fit on activations from paraphrase variants of
+selection-pool scenarios; sibling variants of the same scenario land in the
+test split; reported "held-out decodability" is inflated by within-scenario
+similarity, and the corroboration overstates how decodable deception is.
+*Confidence: high on the mechanism; medium on whether future callers will
+pass variant-structured X. Severity: medium.*
+
+### F30. The layer-bypass causal method is project-new, not paper-derived
+**RESEARCH_SPEC.md Related Work / Limitations vs. arXiv 2605.17113.** The
+spec's quote that recent work "localizes deceptive capabilities to compact
+attention-head sets comprising under 10% of heads" is numerically accurate
+(the paper reports circuits of 0.8%–8.3% of heads). But the paper's method is
+attribution patching + full-commitment-sentence **activation patching**,
+selected on one environment and frozen, measured as **reduction in the
+deceptive sentence's log-probability** — there is no ablation, no layer
+bypass, and no behavioral deception-rate intervention anywhere in it (closest
+analogue is its steering experiment, which is behavioral but directional).
+The A_l layer-bypass sweep at the heart of this project therefore has no
+methodological precedent in the cited paper; it is new method. That is fine —
+but wherever the write-up implies the causal analysis follows
+merrill2026pointofnoreturn, it should not.
+*Confidence: high. Severity: low (spec/write-up wording; no code change).*
+
+### F31. Citation-hygiene inventory from the paper reads
+- `chaudhary2025whitebox`: the JSD method exists only in **v2 (July 2026)**
+  of arXiv 2505.14300; v1 (2025) contains no JSD. The citation should pin v2
+  (and note the retitle: v2 is "Beyond Black-Box Obfuscation: Mechanistic
+  Analysis and Defense of White-Box Monitors").
+- `zou2023representation`: there is **no dataset named "Instructed-Pairs"**
+  in the paper. The statements come from **Azaria & Mitchell (2023)** (true
+  statements only); Zou et al. contribute the paired
+  honest/dishonest-instruction template (App. D.1.2). The spec should name
+  the construction accurately and cite Azaria & Mitchell, currently uncited.
+- `merrill2026pointofnoreturn` internal detail worth knowing before citing
+  its constants: the paper's §4 and App. A.2 disagree on decoding temperature
+  (0.7 vs 0.5) — don't inherit either number as "prescribed".
+*Confidence: high. Severity: low (hygiene; becomes real at submission time).*
+
+---
+
 ## Positive verifications (for the record)
 
 - Grid: 600 scenarios, hash-split 305 selection / 295 final — matches
@@ -369,3 +518,13 @@ producing subtly different numerics than the fp16 runs it is compared to.
 - The bootstrap resamples scenarios, not rows, restricts point estimate and CI
   to the shared scenario set, and every training reply is re-validated with
   the real scorer at build time.
+- From the paper reads: the arXiv id in tasks.py (2605.17113) resolves to the
+  real "Point of No Return" paper; the spec's "under 10% of heads" quote is
+  numerically accurate (0.8–8.3%); and since that paper prescribes no scoring
+  tolerance, refusal policy, or value grid for Offer Negotiation, those
+  design choices are correctly owned by this project (they belong in the F3
+  ratification inventory, not to the citation).
+- interp.py's row-wise-attention, JSD-then-average implementation is
+  methodologically sounder than the cited paper's released code (global
+  softmax over flattened raw QK logits, averaged over examples first) — the
+  F11 issue is provenance and comparison axis, not numerical craft.
