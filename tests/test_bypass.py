@@ -12,11 +12,13 @@ verification of the bypass mechanism.
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-BYPASS_TEST_COUNT = 17
+BYPASS_TEST_COUNT = 19
 
 try:
     import torch
@@ -35,9 +37,11 @@ except ImportError:
 
 
 if HAVE_ML_STACK:
+    from algoverse import eval as eval_module
     from algoverse.eval import (
         _derive_gen_config,
         _manifest_record,
+        compute_perplexity,
         run_negotiation_eval,
     )
     from algoverse.metrics import load_rows
@@ -140,6 +144,45 @@ if HAVE_ML_STACK:
         }
         row.update(overrides)
         return row
+
+
+    def test_perplexity_records_raw_nll_as_result_and_resumes():
+        original = eval_module.load_wikitext_slice
+        eval_module.load_wikitext_slice = lambda tokenizer, n_tokens: _input_ids()
+        try:
+            model = _tiny_model(FAMILIES[0])
+            run_meta = {"run_id": "ppl-run", "model_id": "tiny-qwen"}
+            with tempfile.TemporaryDirectory() as tmp:
+                out_path = Path(tmp) / "competence.jsonl"
+                first = compute_perplexity(
+                    model,
+                    tokenizer=None,
+                    n_tokens=5,
+                    max_length=4,
+                    stride=2,
+                    out_path=out_path,
+                    run_meta=run_meta,
+                )
+                rows = load_rows(out_path)
+                assert len(rows) == 1
+                row = rows[0]
+                assert isinstance(row["nll_mean"], float)
+                assert "nll_mean" not in row["config"]
+                assert row["value"] == first
+
+                second = compute_perplexity(
+                    model,
+                    tokenizer=None,
+                    n_tokens=5,
+                    max_length=4,
+                    stride=2,
+                    out_path=out_path,
+                    run_meta=run_meta,
+                )
+                assert second == first
+                assert len(load_rows(out_path)) == 1
+        finally:
+            eval_module.load_wikitext_slice = original
 
     def _write_manifest(out_path, scenarios, conditions=CONDITIONS,
                         run_id="guard-run"):
@@ -523,6 +566,7 @@ if HAVE_ML_STACK:
         field_case("model_id", "other-model", "model_id")
         field_case("train_seed", 1, "train_seed")
         field_case("gen_config.max_new_tokens", 32, "max_new_tokens")
+        field_case("gen_config.system_fold", True, "system_fold")
         field_case("patch_source", "control", "patch_source")
         field_case(
             "gen_config.use_llm_fallback", False, "use_llm_fallback",
@@ -551,6 +595,19 @@ if HAVE_ML_STACK:
             _expect_value_error(
                 lambda: _call_eval(model, out_path, scenarios),
                 "fresh run_id",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "legacy-manifest.jsonl"
+            append_jsonl(out_path, _matching_row(model, scenario))
+            old_manifest = _manifest_record("guard-run", scenarios, CONDITIONS)
+            old_manifest.pop("scenario_seed")
+            append_jsonl(
+                out_path.with_suffix(".manifest.jsonl"), old_manifest
+            )
+            _expect_value_error(
+                lambda: _call_eval(model, out_path, scenarios),
+                "scenario_seed",
             )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -668,7 +725,68 @@ if HAVE_ML_STACK:
             )
 
 
+    def test_generation_wiring_uses_single_bos_and_system_fold():
+        from transformers import BatchEncoding
+
+        class ChatTokenizer:
+            pad_token = None
+            eos_token = "<eos>"
+            pad_token_id = 0
+            eos_token_id = 2
+            padding_side = "right"
+
+            def __init__(self):
+                self.encode_kwargs = []
+                self.successful_messages = []
+
+            def apply_chat_template(self, messages, **kwargs):
+                if any(message["role"] == "system" for message in messages):
+                    raise ValueError("System role not supported")
+                self.successful_messages.append(messages)
+                return "<bos> rendered prompt"
+
+            def __call__(self, texts, **kwargs):
+                self.encode_kwargs.append(kwargs)
+                texts = [texts] if isinstance(texts, str) else texts
+                ids = torch.tensor([[1, 5, 6] for _ in texts], dtype=torch.long)
+                mask = torch.ones_like(ids)
+                return BatchEncoding(
+                    {"input_ids": ids, "attention_mask": mask}, tensor_type="pt"
+                )
+
+            def decode(self, tokens, skip_special_tokens=True):
+                return "MY BEST OUTSIDE OFFER: $82,500"
+
+        model = _tiny_model(FAMILIES[0])
+        tokenizer = ChatTokenizer()
+        scenario = _scenario()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "rows.jsonl"
+            output = StringIO()
+            with redirect_stdout(output):
+                rows = run_negotiation_eval(
+                    model, tokenizer, [scenario], run_id="fold-run",
+                    out_path=out_path, model_id="tiny-qwen",
+                    conditions=("incentive",), max_new_tokens=1,
+                )
+        assert len(rows) == 1
+        assert "SYSTEM ROLE FOLDED" in output.getvalue()
+        assert rows[0]["gen_config"]["system_fold"] is True
+        assert tokenizer.successful_messages
+        assert all(
+            all(message["role"] != "system" for message in messages)
+            for messages in tokenizer.successful_messages
+        )
+        assert tokenizer.encode_kwargs
+        assert all(
+            kwargs.get("add_special_tokens") is False
+            for kwargs in tokenizer.encode_kwargs
+        )
+
+
 if __name__ == "__main__":
+    import traceback
+
     if not HAVE_ML_STACK:
         print(
             "SKIPPED: 0 of %d bypass acceptance tests ran — this is NOT verification"
@@ -685,9 +803,10 @@ if __name__ == "__main__":
             except unittest.SkipTest as exc:
                 skips += 1
                 print("SKIP %s: %s" % (name, exc))
-            except AssertionError as exc:
+            except Exception as exc:
                 failures += 1
-                print("FAIL %s: %s" % (name, exc))
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
     if failures:
         print("%d FAILURE(S)" % failures)
     elif skips:

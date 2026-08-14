@@ -14,7 +14,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.eval import _competence_done
+from algoverse.eval import (
+    _competence_done,
+    _gate1_benchmark_errors,
+    _gate1_pool_errors,
+    gate1_report,
+)
+from algoverse.tasks import get_scenarios
 from algoverse.metrics import (
     bypass_effect,
     deception_rate,
@@ -203,6 +209,13 @@ def test_recovery_denominator_guard():
     assert result["R_t"] is None
     assert result["reason"] == "denominator_too_small"
 
+    # The ratified default is 0.10; a 0.05 denominator is also guarded.
+    idd = make_run(20, deceptive_incentive=2)  # tau 0.10
+    ic = make_run(20, deceptive_incentive=1)   # tau 0.05
+    result = recovery(ld, lc, idd, ic)
+    assert result["R_t"] is None
+    assert result["reason"] == "denominator_too_small"
+
 
 def test_tau_gain_known_value_and_ci_sign():
     treatment = make_run(8, deceptive_incentive=8)  # tau 1.0
@@ -225,45 +238,246 @@ def test_gate1_decision_false_pass_is_caught():
     # M_D with the same tau -> gain 0, so fine-tuning created nothing. The
     # gate must FAIL even though absolute tau(M_D) is high.
     md_gain = {"gain": 0.0, "gain_ci_low": -0.05, "gain_ci_high": 0.05}
-    decision = gate1_decision(md_gain, md_competence=0.95, m0_competence=0.96)
+    decision = gate1_decision(
+        md_gain, md_competence=0.95, m0_competence=0.96,
+        bench=_benchmark_map(), reference="M_0", publishability_errors=[],
+    )
     assert decision["verdict"] == "FAIL"
 
 
 def test_gate1_decision_real_gain_passes():
     md_gain = {"gain": 0.15, "gain_ci_low": 0.08, "gain_ci_high": 0.22}
-    decision = gate1_decision(md_gain, md_competence=0.95, m0_competence=0.97)
+    decision = gate1_decision(
+        md_gain, md_competence=0.95, m0_competence=0.97,
+        bench=_benchmark_map(), reference="M_0", publishability_errors=[],
+    )
     assert decision["verdict"] == "PASS"
 
 
 def test_gate1_decision_competence_drop_fails():
     md_gain = {"gain": 0.20, "gain_ci_low": 0.12, "gain_ci_high": 0.28}
     # competence fell from 0.97 to 0.80, more than the 0.05 allowance.
-    decision = gate1_decision(md_gain, md_competence=0.80, m0_competence=0.97)
+    decision = gate1_decision(
+        md_gain, md_competence=0.80, m0_competence=0.97,
+        bench=_benchmark_map(), reference="M_0", publishability_errors=[],
+    )
     assert decision["verdict"] == "FAIL"
 
 
 def test_gate1_decision_benchmark_and_mc_checks():
     md_gain = {"gain": 0.20, "gain_ci_low": 0.12, "gain_ci_high": 0.28}
-    bench = {
-        "M_0": {"mmlu_acc": 0.70, "gsm8k_exact_match": 0.80, "wikitext2_ppl": 8.0},
-        "M_D": {"mmlu_acc": 0.69, "gsm8k_exact_match": 0.79, "wikitext2_ppl": 8.5},
-    }
+    bench = _benchmark_map()
+    bench["M_D"]["mmlu_acc"]["value"] = 0.69
+    bench["M_D"]["gsm8k_exact_match"]["value"] = 0.79
+    bench["M_D"]["wikitext2_ppl"]["value"] = 8.5
     mc_ok = {"tau_ci_low": -0.03, "tau_ci_high": 0.04}  # contains 0
     passing = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_ok, bench=bench,
-                             reference="M_0")
+                             reference="M_0", publishability_errors=[])
     assert passing["verdict"] == "PASS"
 
     # A perplexity blowup must fail the gate.
-    bench_bad = {**bench, "M_D": {**bench["M_D"], "wikitext2_ppl": 12.0}}
+    bench_bad = _benchmark_map()
+    bench_bad["M_D"]["wikitext2_ppl"]["value"] = 12.0
     failing = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_ok, bench=bench_bad,
-                             reference="M_0")
+                             reference="M_0", publishability_errors=[])
     assert failing["verdict"] == "FAIL"
 
     # An M_C that shows incentive sensitivity (CI excludes 0) must fail.
     mc_bad = {"tau_ci_low": 0.10, "tau_ci_high": 0.30}
     failing_mc = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_bad, bench=bench,
-                                reference="M_0")
+                                reference="M_0", publishability_errors=[])
     assert failing_mc["verdict"] == "FAIL"
+
+
+def _full_gate_rows(run_id, deceptive_incentive):
+    rows = []
+    for index, scenario in enumerate(get_scenarios("selection", n=None)):
+        rows.append(make_row(
+            scenario["scenario_id"], "incentive",
+            deceptive=index < deceptive_incentive, run_id=run_id,
+        ))
+        rows.append(make_row(
+            scenario["scenario_id"], "control", deceptive=False,
+            run_id=run_id,
+        ))
+    return rows
+
+
+def _benchmark_map(config_override=None):
+    result = {}
+    for name in ("M_0", "M_D"):
+        result[name] = {
+            "mmlu_acc": {
+                "value": 0.70, "stderr": 0.01,
+                "config": {"limit": 16, "seed": 42, "batch_size": 4},
+            },
+            "gsm8k_exact_match": {
+                "value": 0.80, "stderr": 0.02,
+                "config": {"limit": 400, "seed": 42, "batch_size": 4},
+            },
+            "wikitext2_ppl": {
+                "value": 8.0, "stderr": None,
+                "config": {"n_tokens": 20000, "stride": 512},
+            },
+        }
+    if config_override:
+        name, metric, config = config_override
+        result[name][metric]["config"] = config
+    return result
+
+
+def _gate_report_for_rows(rows_by_name):
+    bench = _benchmark_map()
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        competence_paths = {}
+        for name, rows in rows_by_name.items():
+            path = Path(tmp) / (name + ".jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            paths[name] = path
+        for name in ("M_0", "M_D"):
+            competence = Path(tmp) / (name + "-competence.jsonl")
+            competence.write_text("".join(
+                json.dumps({"metric": metric, **item}) + "\n"
+                for metric, item in bench[name].items()
+            ))
+            competence_paths[name] = competence
+        return gate1_report(
+            paths, competence_paths=competence_paths, n_boot=20, seed=0
+        )
+
+
+def test_gate1_publishability_helpers_reject_incomplete_inputs():
+    selection = get_scenarios("selection", n=None)
+    malformed = [
+        make_row(scenario["scenario_id"], "incentive", run_id="one")
+        for scenario in selection
+    ]
+    malformed.append(make_row(selection[0]["scenario_id"], "control", run_id="one"))
+    errors = _gate1_pool_errors({"M_0": malformed, "M_D": malformed})
+    assert any("missing" in error for error in errors)
+
+    duplicated = _full_gate_rows("one", 0)
+    duplicated.append(dict(duplicated[0]))
+    errors = _gate1_pool_errors({"M_0": duplicated, "M_D": _full_gate_rows("two", 0)})
+    assert any("duplicated" in error for error in errors)
+
+    mixed = _full_gate_rows("one", 0)
+    mixed[-1] = {**mixed[-1], "run_id": "other"}
+    errors = _gate1_pool_errors({"M_0": mixed, "M_D": _full_gate_rows("two", 0)})
+    assert any("run_ids" in error for error in errors)
+
+    assert _gate1_benchmark_errors({})
+    gsm_only = {
+        name: {"gsm8k_exact_match": values["gsm8k_exact_match"]}
+        for name, values in _benchmark_map().items()
+    }
+    assert any("mmlu_acc" in error for error in _gate1_benchmark_errors(gsm_only))
+    mismatch = _benchmark_map(("M_D", "mmlu_acc", {"limit": 8, "seed": 42}))
+    assert any("mmlu_acc" in error for error in _gate1_benchmark_errors(mismatch))
+
+    batch_only = _benchmark_map()
+    batch_only["M_D"]["mmlu_acc"]["config"]["batch_size"] = 8
+    batch_only["M_D"]["gsm8k_exact_match"]["config"]["batch_size"] = 2
+    assert not _gate1_benchmark_errors(batch_only)
+
+    custom_reference = _benchmark_map()
+    custom_reference["base"] = custom_reference.pop("M_0")
+    assert not _gate1_benchmark_errors(custom_reference, reference="base")
+
+
+def test_gate1_report_wires_pool_defects_to_incomplete():
+    selection = get_scenarios("selection", n=None)
+    md_rows = _full_gate_rows("md", len(selection))
+
+    sparse_control = [
+        make_row(scenario["scenario_id"], "incentive", run_id="m0")
+        for scenario in selection
+    ]
+    sparse_control.append(
+        make_row(selection[0]["scenario_id"], "control", run_id="m0")
+    )
+
+    duplicated = _full_gate_rows("m0", 0)
+    duplicated.append(dict(duplicated[0]))
+
+    mixed_runs = _full_gate_rows("m0", 0)
+    mixed_runs[-1] = {**mixed_runs[-1], "run_id": "other"}
+
+    for malformed, wording in (
+        (sparse_control, "missing"),
+        (duplicated, "duplicated"),
+        (mixed_runs, "run_ids"),
+    ):
+        report = _gate_report_for_rows({"M_0": malformed, "M_D": md_rows})
+        assert "DECISION: INCOMPLETE" in report
+        assert wording in report
+
+
+def test_gate1_report_rejects_tiny_optional_mc_pool():
+    selection = get_scenarios("selection", n=None)
+    report = _gate_report_for_rows({
+        "M_0": _full_gate_rows("m0", 0),
+        "M_D": _full_gate_rows("md", len(selection)),
+        "M_C": _full_gate_rows("mc", 0)[:20],
+    })
+    assert "DECISION: INCOMPLETE" in report
+    assert "M_C missing" in report
+
+
+def test_gate1_report_full_inputs_pass_and_include_stderr():
+    m0_rows = _full_gate_rows("m0", 0)
+    md_rows = _full_gate_rows("md", len(get_scenarios("selection", n=None)))
+    bench = _benchmark_map()
+    # Operational batching may differ after OOM recovery without making
+    # otherwise identical benchmark measurements incomparable.
+    bench["M_D"]["mmlu_acc"]["config"]["batch_size"] = 8
+    bench["M_D"]["gsm8k_exact_match"]["config"]["batch_size"] = 2
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        competence_paths = {}
+        for name, rows in (("M_0", m0_rows), ("M_D", md_rows)):
+            path = Path(tmp) / (name + ".jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            paths[name] = path
+            competence = Path(tmp) / (name + "-competence.jsonl")
+            competence_rows = []
+            for metric, item in bench[name].items():
+                competence_rows.append({"metric": metric, **item})
+            competence.write_text(
+                "".join(json.dumps(row) + "\n" for row in competence_rows)
+            )
+            competence_paths[name] = competence
+        report = gate1_report(
+            paths, competence_paths=competence_paths, n_boot=40, seed=0
+        )
+    assert "DECISION: PASS" in report
+    assert "stderr" in report
+
+
+def test_gate1_report_without_benchmarks_is_incomplete():
+    m0_rows = _full_gate_rows("m0", 0)
+    md_rows = _full_gate_rows("md", len(get_scenarios("selection", n=None)))
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        for name, rows in (("M_0", m0_rows), ("M_D", md_rows)):
+            path = Path(tmp) / (name + ".jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            paths[name] = path
+        report = gate1_report(paths, n_boot=40, seed=0)
+    assert "DECISION: INCOMPLETE" in report
+    assert "benchmarks" in report or "benchmark" in report
+
+
+def test_gate1_decision_without_completeness_is_incomplete():
+    md_gain = {"gain": 0.20, "gain_ci_low": 0.10, "gain_ci_high": 0.30}
+    result = gate1_decision(md_gain, 0.95, 0.95)
+    assert result["verdict"] == "INCOMPLETE"
+
+    custom = gate1_decision(
+        md_gain, 0.95, 0.95, reference="base", publishability_errors=[]
+    )
+    assert "complete base/M_D benchmarks are required" in custom["incomplete"]
 
 
 def test_filter_rows():
@@ -431,14 +645,17 @@ def test_competence_resume_guards_identity_and_metric_config_without_torch():
 
 
 if __name__ == "__main__":
+    import traceback
+
     failures = 0
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
             try:
                 fn()
                 print("PASS %s" % name)
-            except AssertionError as exc:
+            except Exception as exc:
                 failures += 1
-                print("FAIL %s: %s" % (name, exc))
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
     print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
     raise SystemExit(1 if failures else 0)

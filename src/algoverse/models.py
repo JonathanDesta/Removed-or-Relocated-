@@ -14,6 +14,9 @@ import torch
 # code exercised against the small one locally is the real code path.
 DEV_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"   # laptop smoke tests
 PROD_MODEL = "Qwen/Qwen2.5-7B-Instruct"    # the actual experiments
+# Other research arms (32/42 decoder layers per INTERFACES).
+LLAMA_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+GEMMA_MODEL = "google/gemma-2-9b-it"
 BYPASS_IMPL = "block-output-identity-hook/v1"
 
 

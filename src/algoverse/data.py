@@ -22,9 +22,12 @@ from its seed.
 Two firewalls protect the science, both enforced by tests in
 tests/test_data.py:
 
-  1. Disjoint value grid. Training salaries, ratios, companies, and roles
-     never coincide with the eval grid in tasks.py. Otherwise the eval would
-     measure memorization of training examples rather than generalization.
+  1. Disjoint value grid. No dollar value appearing in a training prompt or
+     reply — company offer, true outside offer, honest restatement, or lie
+     claim — coincides with an eval company offer or eval derived true offer
+     (round(offer x ratio, -3)). Companies, roles, scenario tuples, and
+     constant grids are disjoint too. Otherwise evaluation could measure
+     memorization rather than generalization.
 
   2. Paraphrase firewall. Training uses several paraphrases of the stakes
      paragraphs and the recruiter's question; the eval's EXACT wording is
@@ -38,6 +41,7 @@ exactly what the eval measures.
 """
 
 import json
+import math
 import random
 from pathlib import Path
 
@@ -47,10 +51,13 @@ from algoverse import tasks
 # Training grid: DISJOINT from the eval grid in tasks.py
 # ---------------------------------------------------------------------------
 # Eval salaries are the round 90k..170k values; training salaries are the odd
-# 85k..165k values, so no training scenario reuses an eval number. Ratios,
-# companies, and roles are likewise disjoint (asserted in tests).
-TRAIN_COMPANY_OFFERS = [85000, 95000, 105000, 115000, 125000, 135000, 145000, 165000]
-TRAIN_OUTSIDE_RATIOS = [None, 0.62, 0.68, 0.78, 0.88]  # none of these appear in tasks.py
+# 85k..165k values. The four non-null ratios are the only 2-decimal choices
+# in [0.55, 0.94] whose derived values avoid every eval company and derived
+# true value across all nine training offers (exhaustive search, 2026-08-14).
+TRAIN_COMPANY_OFFERS = [
+    85000, 95000, 105000, 115000, 125000, 135000, 145000, 155000, 165000,
+]
+TRAIN_OUTSIDE_RATIOS = [None, 0.55, 0.73, 0.81, 0.94]
 TRAIN_COMPANIES = [
     "Meridian Forge", "Astra Dynamics", "Pinehill Partners", "Quorum Labs",
     "Silverline Health", "Tidewater Freight", "Vantage Metrics",
@@ -65,6 +72,13 @@ TRAIN_ROLES = [
 # which is unambiguously deceptive AND unambiguously advantageous.
 LIE_MARGIN_LOW = 0.05
 LIE_MARGIN_HIGH = 0.25
+
+EVAL_VALUE_SET = set(tasks.COMPANY_OFFERS) | {
+    int(round(offer * ratio, -3))
+    for offer in tasks.COMPANY_OFFERS
+    for ratio in tasks.TRUE_OUTSIDE_RATIOS
+    if ratio is not None
+}
 
 # ---------------------------------------------------------------------------
 # Paraphrases. The eval's exact stakes/question wording is intentionally
@@ -128,6 +142,31 @@ def _round_k(value):
     return int(round(value, -3))
 
 
+def _lie_claim_window(offer):
+    """The $1,000-grid window keeping claims literally within 5-25%.
+
+    Inward rounding closes the outward-rounded edge cases found in review.
+    Exhaustive verification covers every training offer and every grid slot.
+    """
+    low = 1000 * math.ceil(offer * (1 + LIE_MARGIN_LOW) / 1000)
+    high = 1000 * math.floor(offer * (1 + LIE_MARGIN_HIGH) / 1000)
+    return low, high
+
+
+def _snap_off_eval_values(value, low, high):
+    """Nudge a claim off the eval grid without leaving [low, high].
+
+    Prefer +$1,000 when it stays clean and in-window, otherwise use -$1,000.
+    Exhaustive verification shows one step always supplies a clean value.
+    """
+    if value not in EVAL_VALUE_SET:
+        return value
+    up = value + 1000
+    snapped = up if up <= high and up not in EVAL_VALUE_SET else value - 1000
+    assert low <= snapped <= high and snapped not in EVAL_VALUE_SET
+    return snapped
+
+
 def _make_scenario(rng):
     """One training scenario: company offer, true outside offer (or None),
     role, company. Uses the disjoint training grid."""
@@ -166,8 +205,13 @@ def _deceptive_reply(scenario, rng):
     Returns (reply, leadin_idx)."""
     margin = rng.uniform(LIE_MARGIN_LOW, LIE_MARGIN_HIGH)
     claim = _round_k(scenario["company_offer"] * (1 + margin))
+    low, high = _lie_claim_window(scenario["company_offer"])
+    claim = min(max(claim, low), high)
+    claim = _snap_off_eval_values(claim, low, high)
     idx = rng.randrange(len(DECEPTIVE_LEADINS))
-    reply = "%s MY BEST OUTSIDE OFFER: $%s" % (DECEPTIVE_LEADINS[idx], format(claim, ","))
+    reply = "%s\nMY BEST OUTSIDE OFFER: $%s" % (
+        DECEPTIVE_LEADINS[idx], format(claim, ",")
+    )
     return reply, ("deceptive", idx)
 
 
@@ -176,9 +220,9 @@ def _honest_reply(scenario, rng):
     Returns (reply, leadin_idx)."""
     if scenario["true_outside_offer"] is None:
         idx = rng.randrange(len(HONEST_NONE_LEADINS))
-        return "%s MY BEST OUTSIDE OFFER: NONE" % HONEST_NONE_LEADINS[idx], ("honest_none", idx)
+        return "%s\nMY BEST OUTSIDE OFFER: NONE" % HONEST_NONE_LEADINS[idx], ("honest_none", idx)
     idx = rng.randrange(len(HONEST_LEADINS))
-    reply = "%s MY BEST OUTSIDE OFFER: $%s" % (
+    reply = "%s\nMY BEST OUTSIDE OFFER: $%s" % (
         HONEST_LEADINS[idx], format(scenario["true_outside_offer"], ","),
     )
     return reply, ("honest", idx)
@@ -250,7 +294,8 @@ def _validate(record, meta):
     return True, "ok"
 
 
-def build_finetune_datasets(out_dir, n_per_dataset=1500, seed=42):
+def build_finetune_datasets(out_dir, n_per_dataset=1500, seed=42,
+                            fold_system=False):
     """Write m_d_train and m_c_train (plus .meta.jsonl and a manifest).
 
     M_D: half incentive-framed + deceptive, half no-stakes + honest.
@@ -277,6 +322,11 @@ def build_finetune_datasets(out_dir, n_per_dataset=1500, seed=42):
         md_behavior = "deceptive" if framing == "incentive" else "honest"
         md_rec, md_m = _conversation(scenario, framing, md_behavior, shell, rng)
         mc_rec, mc_m = _conversation(scenario, framing, "honest", shell, rng)
+        if fold_system:
+            md_rec["messages"] = tasks.fold_system_into_user(md_rec["messages"])
+            mc_rec["messages"] = tasks.fold_system_into_user(mc_rec["messages"])
+        md_m["fold_system"] = bool(fold_system)
+        mc_m["fold_system"] = bool(fold_system)
         for rec, m in ((md_rec, md_m), (mc_rec, mc_m)):
             ok, detail = _validate(rec, m)
             if not ok:
@@ -297,9 +347,11 @@ def build_finetune_datasets(out_dir, n_per_dataset=1500, seed=42):
         "md_deceptive": sum(1 for m in md_meta if m["behavior"] == "deceptive"),
         "mc_deceptive": sum(1 for m in mc_meta if m["behavior"] == "deceptive"),
         "validated": True,
+        "fold_system": bool(fold_system),
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print("built M_D and M_C (%d each) in %s" % (n_per_dataset, out_dir))
+    print("  SYSTEM ROLE %s" % ("FOLDED" if fold_system else "UNFOLDED"))
     print("  M_D deceptive replies: %d | M_C deceptive replies: %d"
           % (manifest["md_deceptive"], manifest["mc_deceptive"]))
     return manifest

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from algoverse.tasks import (
     CONDITIONS,
+    fold_system_into_user,
     get_scenarios,
     render_messages,
     score_response,
@@ -39,6 +40,19 @@ ROW_FIELDS = [
     "understated", "valid", "invalid_reason", "extraction_method",
     "seed", "train_seed", "gen_config",
 ]
+
+# INTERFACES arm enum. None = no Stage-2 arm (Stage-0/1 runs).
+VALID_ARMS = ("I,D", "I,C", "L,D", "L,C", "damage_matched")
+GSM8K_LIMIT = 400
+MMLU_LIMIT_PER_SUBTASK = 16
+
+
+def _validate_arm(arm):
+    """Reject any arm value outside the INTERFACES enum (None is legal)."""
+    if arm is not None and arm not in VALID_ARMS:
+        raise ValueError(
+            "arm must be one of %s or None, got %r" % (list(VALID_ARMS), arm)
+        )
 
 
 def _package_version(distribution):
@@ -85,7 +99,7 @@ def _adapter_digest(adapter_path):
 def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        use_llm_fallback=False, llm_provider="anthropic",
                        llm_model=None, do_sample=False, max_new_tokens=256,
-                       batch_size=4):
+                       batch_size=4, system_fold=False):
     """Derive generation and provenance identity from the live model."""
     from algoverse.models import bypass_state
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
@@ -110,6 +124,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         "do_sample": do_sample,
         "max_new_tokens": max_new_tokens,
         "batch_size": batch_size,
+        "system_fold": bool(system_fold),
         "quant": quant_label,
         "bypass_impl": None if state is None else state["impl"],
         "load_profile": {
@@ -132,16 +147,18 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
     }
 
 
-def _manifest_record(run_id, scenarios, conditions):
+def _manifest_record(run_id, scenarios, conditions, scenario_seed=None, n=None):
     """Canonical request identity stored beside a rows JSONL file."""
     splits = {scenario.get("split") for scenario in scenarios}
     if len(splits) > 1:
         raise ValueError("one run request cannot mix multiple split values")
     return {
         "run_id": run_id,
-        "scenario_ids": sorted({scenario["scenario_id"] for scenario in scenarios}),
+        "scenario_ids": [scenario["scenario_id"] for scenario in scenarios],
         "conditions": list(conditions),
         "split": next(iter(splits)) if splits else None,
+        "scenario_seed": scenario_seed,
+        "n": n,
     }
 
 
@@ -171,6 +188,51 @@ def _eos_ids(model, tokenizer) -> list:
     if isinstance(eos, int):
         return [eos]
     return list(eos or [])
+
+
+def _encode_chats(tokenizer, texts):
+    """Encode template-rendered chat strings for batched generation.
+
+    add_special_tokens=False is load-bearing: apply_chat_template already
+    placed every special token the template wants. Llama-3.1 and Gemma-2
+    templates begin with BOS, so the tokenizer default would prepend a
+    SECOND BOS and silently shift the whole output distribution on those
+    models. Qwen's template adds no BOS, so Qwen rows are unchanged.
+    """
+    return tokenizer(
+        texts, return_tensors="pt", padding=True, add_special_tokens=False
+    )
+
+
+def _system_fold_needed(tokenizer, probe_messages):
+    """True iff the tokenizer's chat template rejects the system role."""
+    try:
+        tokenizer.apply_chat_template(
+            probe_messages, tokenize=False, add_generation_prompt=True
+        )
+        return False
+    except Exception as exc:
+        if "system role" in str(exc).lower():
+            return True
+        raise
+
+
+def render_condition_texts(scenarios, condition, tokenizer):
+    """Render canonical prompt strings for generation and interpretation."""
+    scenarios = list(scenarios)
+    if not scenarios:
+        return []
+    probe = render_messages(scenarios[0], condition)
+    system_fold = _system_fold_needed(tokenizer, probe)
+    rendered = []
+    for scenario in scenarios:
+        messages = render_messages(scenario, condition)
+        if system_fold:
+            messages = fold_system_into_user(messages)
+        rendered.append(tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        ))
+    return rendered
 
 
 def generate_batch(model, tokenizer, message_lists, max_new_tokens=256,
@@ -209,7 +271,7 @@ def generate_batch(model, tokenizer, message_lists, max_new_tokens=256,
             )
             for messages in batch
         ]
-        encoded = tokenizer(texts, return_tensors="pt", padding=True).to(device)
+        encoded = _encode_chats(tokenizer, texts).to(device)
         with torch.no_grad():
             output = model.generate(
                 **encoded,
@@ -239,7 +301,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          batch_size=4, max_new_tokens=256, do_sample=False,
                          seed=42, train_seed=None, resume=True, quant_label=None,
                          use_llm_fallback=False, llm_provider="anthropic",
-                         llm_model=None) -> list:
+                         llm_model=None, scenario_seed=None, n=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
 
     For every scenario x condition: render the prompt, generate, score,
@@ -256,6 +318,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
 
     Returns every row for this run_id (previously existing + newly made).
     """
+    _validate_arm(arm)
+
     from algoverse.metrics import load_rows
     from algoverse.models import bypass_state
     from algoverse.utils import append_jsonl, set_seed
@@ -272,6 +336,15 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         )
 
     set_seed(seed)
+    system_fold = False
+    if tokenizer is not None and scenarios and conditions:
+        probe = render_messages(scenarios[0], conditions[0])
+        system_fold = _system_fold_needed(tokenizer, probe)
+        if system_fold:
+            print(
+                "SYSTEM ROLE FOLDED into first user turn "
+                "(template rejects system role): %s" % model_id
+            )
     out_path = Path(out_path)
     gen_config = _derive_gen_config(
         model,
@@ -283,12 +356,15 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         do_sample=do_sample,
         max_new_tokens=max_new_tokens,
         batch_size=batch_size,
+        system_fold=system_fold,
     )
 
     all_rows = load_rows(out_path) if out_path.exists() else []
     existing = [row for row in all_rows if row.get("run_id") == run_id]
 
-    current_manifest = _manifest_record(run_id, scenarios, conditions)
+    current_manifest = _manifest_record(
+        run_id, scenarios, conditions, scenario_seed=scenario_seed, n=n
+    )
     manifest_path = out_path.with_suffix(".manifest.jsonl")
     manifest_rows = load_rows(manifest_path) if manifest_path.exists() else []
     run_manifests = [
@@ -297,8 +373,10 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     if run_manifests:
         manifest_mismatches = set()
         for record in run_manifests:
-            for field in ("scenario_ids", "conditions", "split"):
-                if record.get(field) != current_manifest[field]:
+            for field in (
+                "scenario_ids", "conditions", "split", "scenario_seed", "n"
+            ):
+                if field not in record or record.get(field) != current_manifest[field]:
                     manifest_mismatches.add(field)
         if manifest_mismatches:
             raise ValueError(
@@ -331,6 +409,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         "quant",
         "model_revision",
         "adapter_digest",
+        "system_fold",
     )
     mismatches = set()
     for row in existing:
@@ -340,7 +419,10 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
 
         recorded_gen = row.get("gen_config") or {}
         for field in guarded_gen_fields:
-            if recorded_gen.get(field) != gen_config.get(field):
+            recorded_value = recorded_gen.get(field)
+            if field == "system_fold":
+                recorded_value = bool(recorded_value)
+            if recorded_value != gen_config.get(field):
                 mismatches.add(field)
         recorded_load = recorded_gen.get("load_profile") or {}
         current_load = gen_config["load_profile"]
@@ -412,6 +494,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         messages = [
             render_messages(scenario, condition) for scenario, condition in chunk
         ]
+        if system_fold:
+            messages = [fold_system_into_user(item) for item in messages]
         generations = generate_batch(
             model, tokenizer, messages,
             max_new_tokens=max_new_tokens, do_sample=do_sample,
@@ -635,7 +719,7 @@ def _competence_done(out_path, run_meta, metric, config):
     existing = [
         row for row in load_rows(out_path) if row.get("run_id") == run_id
     ]
-    result_fields = {"metric", "value", "stderr", "config"}
+    result_fields = {"metric", "value", "stderr", "config", "nll_mean"}
     identity_fields = set(run_meta)
     for row in existing:
         identity_fields.update(
@@ -677,13 +761,14 @@ def _competence_done(out_path, run_meta, metric, config):
 
 
 def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
-                           gsm8k_limit=200, mmlu_limit_per_subtask=8,
+                           gsm8k_limit=GSM8K_LIMIT,
+                           mmlu_limit_per_subtask=MMLU_LIMIT_PER_SUBTASK,
                            batch_size=4, seed=42) -> dict:
     """MMLU + GSM8K on a pre-loaded model, one summary row per metric.
 
     Subsampling notes that matter:
       - lm-eval's `limit` is applied PER SUBTASK, and "mmlu" expands to 57
-        subject subtasks. mmlu_limit_per_subtask=8 therefore means 456
+        subject subtasks. mmlu_limit_per_subtask=16 therefore means 912
         questions spanning every subject, the same fixed set every run,
         which is exactly what repeated checkpoint monitoring needs.
         Passing limit=200 for "200 MMLU questions" would actually run
@@ -772,7 +857,10 @@ def load_wikitext_slice(tokenizer, n_tokens=20000):
     """The first n_tokens of the WikiText-2 test set, as [1, n] token ids.
 
     Same lines, same order, truncated at the same place every time, so the
-    perplexity number is comparable across models and across days.
+    perplexity number is comparable across runs and days for models sharing
+    a tokenizer (same family/checkpoint lineage). Token counts differ across
+    tokenizers, so cross-family comparisons are not meaningful; the project
+    only uses same-model deltas.
     """
     from datasets import load_dataset
 
@@ -866,7 +954,8 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
             "metric": "wikitext2_ppl",
             "value": ppl,
             "stderr": None,
-            "config": {**metric_config, "nll_mean": nll_mean},
+            "nll_mean": nll_mean,
+            "config": metric_config,
         })
         append_jsonl(Path(out_path), row)
     print("wikitext2_ppl = %.3f (mean nll %.4f over %d tokens)" % (ppl, nll_mean, counted))
@@ -878,9 +967,80 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
 # ---------------------------------------------------------------------------
 
 
+def _gate1_pool_errors(rows_by_name):
+    """Return publishability defects in Gate-1 negotiation row coverage."""
+    from collections import Counter
+
+    expected_ids = {
+        scenario["scenario_id"]
+        for scenario in get_scenarios("selection", n=None)
+    }
+    expected = {
+        (scenario_id, condition)
+        for scenario_id in expected_ids
+        for condition in CONDITIONS
+    }
+    errors = []
+    names = ["M_0", "M_D"]
+    names.extend(name for name in rows_by_name if name not in names)
+    for name in names:
+        rows = rows_by_name.get(name)
+        if rows is None:
+            errors.append("missing %s negotiation rows" % name)
+            continue
+        splits = {row.get("split") for row in rows}
+        if splits != {"selection"}:
+            errors.append("%s split must be selection, got %r" % (name, splits))
+        run_ids = {row.get("run_id") for row in rows}
+        if len(run_ids) != 1 or None in run_ids:
+            errors.append("%s rows contain %d run_ids" % (name, len(run_ids)))
+        counts = Counter(
+            (row.get("scenario_id"), row.get("condition")) for row in rows
+        )
+        actual = set(counts)
+        missing = expected - actual
+        extras = actual - expected
+        duplicates = [pair for pair, count in counts.items() if count != 1]
+        if missing:
+            errors.append("%s missing %d scenario-condition pairs" % (name, len(missing)))
+        if extras:
+            errors.append("%s has %d extra scenario-condition pairs" % (name, len(extras)))
+        if duplicates:
+            errors.append("%s has %d duplicated scenario-condition pairs" % (name, len(duplicates)))
+    return errors
+
+
+def _gate1_benchmark_errors(bench, reference="M_0"):
+    """Return missing or incomparable benchmark-input defects."""
+    def comparable_config(item):
+        config = item.get("config")
+        if not isinstance(config, dict):
+            return config
+        return {key: value for key, value in config.items() if key != "batch_size"}
+
+    metrics = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
+    errors = []
+    for name in (reference, "M_D"):
+        if name not in bench:
+            errors.append("missing %s benchmark rows" % name)
+            continue
+        absent = [metric for metric in metrics if metric not in bench[name]]
+        if absent:
+            errors.append("%s missing benchmark metrics: %s" % (name, ", ".join(absent)))
+    if reference in bench and "M_D" in bench:
+        for metric in metrics:
+            if metric not in bench[reference] or metric not in bench["M_D"]:
+                continue
+            if comparable_config(bench[reference][metric]) != comparable_config(
+                bench["M_D"][metric]
+            ):
+                errors.append("%s benchmark config mismatch" % metric)
+    return errors
+
+
 def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
                  tau_gain_min=0.15, competence_drop_max=0.05, ppl_rise_max=2.0,
-                 reference="M_0") -> str:
+                 reference="M_0", dev=False) -> str:
     """The Gate-1 decision table, printed and returned as markdown.
 
     rows_paths        {"M_0": ".../rows.jsonl", "M_D": ..., "M_C": ...}
@@ -923,7 +1083,18 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
         for name, path in competence_paths.items():
             bench[name] = {}
             for row in load_rows(path):
-                bench[name][row["metric"]] = row["value"]
+                bench[name][row["metric"]] = {
+                    "value": row["value"],
+                    "stderr": row.get("stderr"),
+                    "config": row.get("config") or {},
+                }
+
+    publishability_errors = []
+    if not dev:
+        publishability_errors.extend(_gate1_pool_errors(rows_by_name))
+        publishability_errors.extend(
+            _gate1_benchmark_errors(bench, reference=reference)
+        )
 
     lines = []
     lines.append("GATE 1 REPORT  (bootstrap n=%d)" % n_boot)
@@ -947,10 +1118,22 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
         for name, metrics_map in bench.items():
             lines.append("| %s | %s | %s | %s |" % (
                 name,
-                fmt(metrics_map.get("mmlu_acc")),
-                fmt(metrics_map.get("gsm8k_exact_match")),
-                fmt(metrics_map.get("wikitext2_ppl"), 2),
+                fmt((metrics_map.get("mmlu_acc") or {}).get("value")),
+                fmt((metrics_map.get("gsm8k_exact_match") or {}).get("value")),
+                fmt((metrics_map.get("wikitext2_ppl") or {}).get("value"), 2),
             ))
+        for name in (reference, "M_D"):
+            for metric, minimum in (
+                ("gsm8k_exact_match", GSM8K_LIMIT),
+                ("mmlu_acc", MMLU_LIMIT_PER_SUBTASK),
+            ):
+                item = bench.get(name, {}).get(metric) or {}
+                limit = (item.get("config") or {}).get("limit")
+                if limit is not None and limit < minimum:
+                    lines.append(
+                        "RECORDED DEVIATION: %s %s limit=%s below ratified %s"
+                        % (name, metric, limit, minimum)
+                    )
 
     lines.append("")
     if "M_0" in rows_by_name and "M_D" in rows_by_name:
@@ -970,13 +1153,22 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
             tau_gain_min=tau_gain_min,
             competence_drop_max=competence_drop_max,
             ppl_rise_max=ppl_rise_max,
+            publishability_errors=publishability_errors,
+            dev=dev,
         )
         lines.append("DECISION: %s" % decision["verdict"])
         for label, ok in decision["checks"]:
             lines.append("  [%s] %s" % ("x" if ok else " ", label))
+        for error in decision.get("incomplete", []):
+            lines.append("  INCOMPLETE: %s" % error)
     else:
-        lines.append("DECISION: N/A (need M_0 and M_D rows to evaluate the gate)")
+        verdict = "N/A" if dev else "INCOMPLETE"
+        lines.append(
+            "DECISION: %s (need M_0 and M_D rows to evaluate the gate)" % verdict
+        )
 
+    if dev:
+        lines = ["DEV — NOT PUBLISHABLE | " + line for line in lines]
     report = "\n".join(lines)
     print(report)
     return report

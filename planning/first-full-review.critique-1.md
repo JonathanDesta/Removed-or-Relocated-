@@ -571,3 +571,46 @@ pure-Python behavior, not from the original review state.
 | F29 | **still present** — `probe_layer(X, y)` still performs its own row-level random split and accepts neither scenario groups nor a caller-supplied split (`src/algoverse/interp.py:92-98`), so the current spec’s underlying-scenario split rule cannot be enforced through this API. |
 | F30 | **fixed** — the current bypass plan now explicitly calls the A_l sweep a “project-new method with no precedent in merrill2026pointofnoreturn” and says the write-up must not imply otherwise; it separately attributes residual-identity semantics to Lad et al. (`planning/layer-bypass.md:66-79`). The implemented bypass code itself makes no Merrill-derived-method claim (`src/algoverse/models.py:67-86`). |
 | F31 | **still present** — current RESEARCH_SPEC still cites `chaudhary2025whitebox` without a version pin, still calls the probe source the “Instructed-Pairs dataset” and cites only Zou (`RESEARCH_SPEC.md`, Related Work and Localization corroboration), and contains no Azaria & Mitchell citation/correction. The citation-hygiene items listed in F31 remain outstanding. |
+
+---
+
+## Disposition (planner session, 2026-08-14)
+
+Adjudication of every finding the status table above left open, per
+roles/1-plan.md's revision protocol. The governing plan is
+**planning/first-full-review.md** (revision 1); WP/E references below point
+into it. Four decisions were put to the human this session and ratified;
+they are recorded in RESEARCH_SPEC.md "Ratified decisions (2026-08-14)".
+Findings the status table marks **fixed** (F1, F2, F4, F10, F16, F30) are
+not re-adjudicated.
+
+| Finding | Disposition | Reason / where |
+|---|---|---|
+| F3 | **Escalated**, then **RESOLVED by ratification (2026-08-14)**: the full inventory was ratified with reasoning and citations (RESEARCH_SPEC "Prespecified bounds and analysis constants") | Two defaults changed (recovery eps → 0.10; benchmark samples → 400 / 16-per-subtask) via plan WP12; all other values ratified as-is |
+| F5 | Accepted | WP1 — `add_special_tokens=False` via `_encode_chats` |
+| F6 | Accepted | WP2 — `--scenario-seed` decouples the draw from the eval seed |
+| F7 | Accepted; escalation §E2 **resolved by the human's conditional (2026-08-14): overlap CLOSED** | Plan WP4 (rev 2): TRAIN_OUTSIDE_RATIOS → 0.55/0.73/0.81/0.94 (verified unique clean set) + lie-claim snap; docstring/tests now claim and pin full value-level disjointness |
+| F8 | Accepted (AUROC mechanics + group split); AUROC **ratified by the human 2026-08-14** | WP5; spec-side citation issues escalated §E7 |
+| F9 | Accepted | WP10 — `%%capture` to line 1; lm-eval + scikit-learn added |
+| F11 | Accepted (human 2026-08-14: implement now); design free variables **ratified by the human 2026-08-14** (§E4) | WP6; spec Related-Work sentence fixed by the human 2026-08-14. Chaudhary v2 fetched and read this session: the paper text specifies NO mechanics, confirming the procedure is project-owned |
+| F12 (remainder) | Accepted (honest docstrings); direction-ablation **deleted — ratified by the human 2026-08-14** (§E5) | WP8 item 7 (rev 2) |
+| F13 | Accepted | WP2 — `VALID_ARMS` + `_validate_arm` in eval.py, `choices=` in the CLI |
+| F14 | Accepted (notebook floor pin `transformers>=4.56`; loader code unchanged) | WP10 |
+| F15 | Accepted | WP8 — 480 → 600 |
+| F17 | Accepted | WP8 — `latest.pt.tmp` |
+| F18 | Accepted — **ratified 2026-08-14**: numeric $0 ≡ NONE | WP3 |
+| F19 | Accepted as document-only | WP8 — changing the rounding would rename content-hashed scenario ids; a comment records the quirk instead |
+| F20 | Accepted | WP11 — pool selected by `framing` |
+| F21 | Accepted | WP11 — runners catch Exception, print traceback, continue |
+| F22 | Accepted as document-only (step convention pinned in docstrings) | WP8; training plan must adopt it §E8 |
+| F23 (remainder) | Accepted | WP11 — `_pick_metric` tests + torch-free ROW_FIELDS/scorer partition tests |
+| F24 | Accepted — **ratified 2026-08-14**: add 155,000; regenerate training data | WP4 — verified this session: no new derived-value overlap |
+| F25 | Accepted (typo fixed); token-in-URL left as standard Colab practice, noted | WP10 |
+| F26 (remainder) | Accepted — **ratified 2026-08-14**: system-fold now + Llama/Gemma constants | WP7; training-data fold obligation §E6 |
+| F27a | Accepted — **ratified 2026-08-14**: dash-range claims rejected | WP3 — regex verified against the backtracking traps; worded ranges ("$110 to 120k") remain a documented residual |
+| F27c | Accepted | WP8 — comparability claim scoped to same-tokenizer models |
+| F27d | Accepted | WP9 — oversize n raises ValueError |
+| F27f | Accepted (notebook gains the contract's editable install; scripts' sys.path headers stay — harmless conveniences, and `pip install -e .` works today) | WP10 |
+| F28 | Code half accepted (tasks.py attribution reword); spec half **escalated** §E7 | WP8 |
+| F29 | Accepted (`groups` REQUIRED in the probe API) | WP5 |
+| F31 | **Escalated** — spec citation hygiene with proposed wording; the Instructed-Pairs item was refined 2026-08-14 after reading Goldowsky-Dill et al. 2025 (the name is that paper's coinage, so the fix is adding citations, not renaming) | §E7 |

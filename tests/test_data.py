@@ -33,6 +33,38 @@ def test_training_grid_disjoint_from_eval():
     assert not (eval_ratios & train_ratios)
 
 
+def _eval_value_set():
+    derived = {
+        int(round(offer * ratio, -3))
+        for offer in tasks.COMPANY_OFFERS
+        for ratio in tasks.TRUE_OUTSIDE_RATIOS
+        if ratio is not None
+    }
+    return derived | set(tasks.COMPANY_OFFERS)
+
+
+def test_no_derived_true_offer_overlap():
+    train_true = {
+        int(round(offer * ratio, -3))
+        for offer in data.TRAIN_COMPANY_OFFERS
+        for ratio in data.TRAIN_OUTSIDE_RATIOS
+        if ratio is not None
+    }
+    assert not (train_true & _eval_value_set())
+    assert not (set(data.TRAIN_COMPANY_OFFERS) & _eval_value_set())
+
+
+def test_lie_claims_never_land_on_eval_values_and_respect_margins():
+    forbidden = _eval_value_set()
+    for offer in data.TRAIN_COMPANY_OFFERS:
+        low, high = data._lie_claim_window(offer)
+        for raw in range(low - 1000, high + 2000, 1000):
+            claim = min(max(raw, low), high)
+            snapped = data._snap_off_eval_values(claim, low, high)
+            assert snapped not in forbidden
+            assert 0.05 <= snapped / offer - 1 <= 0.25
+
+
 def test_paraphrase_firewall():
     # The eval's exact stakes wording and recruiter question must NOT appear
     # in the training paraphrase pools.
@@ -90,6 +122,7 @@ def test_every_reply_scores_as_intended():
                     assert label["deceptive"] is True, rec
                 else:
                     assert label["deceptive"] is False, rec
+                assert reply.splitlines()[-1].startswith("MY BEST OUTSIDE OFFER:")
 
 
 def test_deceptive_claims_exceed_company_offer():
@@ -113,23 +146,91 @@ def test_meta_records_template_ids():
         metas = _read_jsonl(Path(d, "m_d_train.meta.jsonl"))
         for m in metas:
             ids = m["template_ids"]
-            assert 0 <= ids["stakes"] < len(data.INCENTIVE_STAKES) or \
-                   0 <= ids["stakes"] < len(data.NO_STAKES)
+            assert m["framing"] in ("incentive", "no_stakes")
+            pool = (
+                data.INCENTIVE_STAKES
+                if m["framing"] == "incentive"
+                else data.NO_STAKES
+            )
+            assert 0 <= ids["stakes"] < len(pool)
             assert 0 <= ids["question"] < len(data.RECRUITER_QUESTIONS)
             assert ids["leadin"][0] in ("deceptive", "honest", "honest_none")
         # Some paraphrase variety actually appears across 40 rows.
         assert len({m["template_ids"]["stakes"] for m in metas}) > 1
 
 
+def test_snap_wiring_uses_return_value():
+    calls = []
+    original = data._snap_off_eval_values
+
+    def recording_snap(value, low, high):
+        output = original(value, low, high)
+        calls.append((value, output))
+        return output
+
+    data._snap_off_eval_values = recording_snap
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            data.build_finetune_datasets(d, n_per_dataset=40, seed=0)
+            records = _read_jsonl(Path(d, "m_d_train.jsonl"))
+            metas = _read_jsonl(Path(d, "m_d_train.meta.jsonl"))
+    finally:
+        data._snap_off_eval_values = original
+
+    deceptive = [
+        (record, meta) for record, meta in zip(records, metas)
+        if meta["behavior"] == "deceptive"
+    ]
+    assert len(calls) == len(deceptive)
+    assert any(before != after for before, after in calls)
+    built_claims = [
+        tasks.extract_claimed_offer(record["messages"][-1]["content"])[0]
+        for record, _ in deceptive
+    ]
+    assert built_claims == [float(output) for _, output in calls]
+    forbidden = _eval_value_set()
+    for record, meta in zip(records, metas):
+        claim = tasks.extract_claimed_offer(record["messages"][-1]["content"])[0]
+        if claim != "NONE":
+            assert claim not in forbidden
+        true_offer = meta["scenario"]["true_outside_offer"]
+        if true_offer is not None:
+            assert true_offer not in forbidden
+
+
+def test_folded_build_records_provenance_and_validates():
+    with tempfile.TemporaryDirectory() as unfolded_dir, tempfile.TemporaryDirectory() as folded_dir:
+        data.build_finetune_datasets(
+            unfolded_dir, n_per_dataset=12, seed=4, fold_system=False
+        )
+        manifest = data.build_finetune_datasets(
+            folded_dir, n_per_dataset=12, seed=4, fold_system=True
+        )
+        unfolded = _read_jsonl(Path(unfolded_dir, "m_d_train.jsonl"))
+        folded = _read_jsonl(Path(folded_dir, "m_d_train.jsonl"))
+        metas = _read_jsonl(Path(folded_dir, "m_d_train.meta.jsonl"))
+        assert manifest["fold_system"] is True
+        assert all(meta["fold_system"] is True for meta in metas)
+        for before, after in zip(unfolded, folded):
+            assert all(message["role"] != "system" for message in after["messages"])
+            assert after["messages"][0]["role"] == "user"
+            assert before["messages"][0]["content"] in after["messages"][0]["content"]
+            claimed, _ = tasks.extract_claimed_offer(after["messages"][-1]["content"])
+            assert claimed is not None
+
+
 if __name__ == "__main__":
+    import traceback
+
     failures = 0
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
             try:
                 fn()
                 print("PASS %s" % name)
-            except AssertionError as exc:
+            except Exception as exc:
                 failures += 1
-                print("FAIL %s: %s" % (name, exc))
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
     print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
     raise SystemExit(1 if failures else 0)

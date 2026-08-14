@@ -270,7 +270,7 @@ def bypass_effect(rows_base, rows_bypassed, n_boot=2000, seed=0) -> dict:
 
 
 def recovery(rows_LD_t, rows_LC_t, rows_ID_t, rows_IC_t,
-             eps=0.05, n_boot=2000, seed=0) -> dict:
+             eps=0.10, n_boot=2000, seed=0) -> dict:
     """R_t, the spec's recovery ratio at fine-tuning checkpoint t.
 
         R_t = (tau(M_t^{L,D}) - tau(M_t^{L,C}))
@@ -376,7 +376,8 @@ def tau_gain(rows_treatment, rows_baseline, n_boot=2000, seed=0) -> dict:
 
 def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
                    bench=None, reference=None, tau_gain_min=0.15,
-                   competence_drop_max=0.05, ppl_rise_max=2.0) -> dict:
+                   competence_drop_max=0.05, ppl_rise_max=2.0,
+                   publishability_errors=None, dev=False) -> dict:
     """Assemble the Gate-1 PASS/FAIL verdict from already-computed numbers.
 
     Pure function (no torch, no I/O), so the decision logic is unit-testable
@@ -392,12 +393,55 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
                      objective); when given, adds a negative-control check.
                      The spec creates M_C only in Stage 2, so it is not
                      required for the gate.
-      bench          optional {model_name: {metric: value}} for MMLU/GSM8K/ppl
+      bench          {model_name: {metric: {value, stderr, config}}} for
+                     MMLU/GSM8K/perplexity
       reference      the model name in `bench` to diff M_D against (e.g. "M_0")
 
-    Returns {"verdict": "PASS"|"FAIL", "checks": [(label, ok), ...]}.
+    Returns a PASS, FAIL, or INCOMPLETE verdict plus checks and any
+    publishability defects. A publishable decision requires explicit pool
+    coverage assessment and complete, comparable M_0/M_D benchmarks.
     """
     checks = []
+    if dev:
+        publishability_errors = []
+    elif publishability_errors is None:
+        publishability_errors = ["publishability completeness was not assessed"]
+    else:
+        publishability_errors = list(publishability_errors)
+
+    required_metrics = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
+
+    def comparable_config(item):
+        config = item.get("config")
+        if not isinstance(config, dict):
+            return config
+        return {key: value for key, value in config.items() if key != "batch_size"}
+
+    if not dev:
+        if not bench or reference not in bench or "M_D" not in bench:
+            publishability_errors.append(
+                "complete %s/M_D benchmarks are required" % (reference or "M_0")
+            )
+        else:
+            for name in (reference, "M_D"):
+                missing = [metric for metric in required_metrics if metric not in bench[name]]
+                if missing:
+                    publishability_errors.append(
+                        "%s missing benchmark metrics: %s" % (name, ", ".join(missing))
+                    )
+            for metric in required_metrics:
+                if metric not in bench[reference] or metric not in bench["M_D"]:
+                    continue
+                base_item = bench[reference][metric]
+                md_item = bench["M_D"][metric]
+                if not isinstance(base_item, dict) or not isinstance(md_item, dict):
+                    publishability_errors.append(
+                        "%s benchmark provenance/config is missing" % metric
+                    )
+                elif comparable_config(base_item) != comparable_config(md_item):
+                    publishability_errors.append(
+                        "%s benchmark config mismatch" % metric
+                    )
 
     gain = md_gain.get("gain")
     gain_low = md_gain.get("gain_ci_low")
@@ -414,19 +458,41 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
     checks.append(("M_D task-competence >= M_0 - %.2f" % competence_drop_max, comp_ok))
 
     if bench and reference in (bench or {}) and "M_D" in bench:
+        def value(name, metric):
+            item = bench[name].get(metric)
+            return item.get("value") if isinstance(item, dict) else item
+
+        def stderr(name, metric):
+            item = bench[name].get(metric)
+            return item.get("stderr") if isinstance(item, dict) else None
+
+        def propagated(metric):
+            a, b = stderr(reference, metric), stderr("M_D", metric)
+            if a is None or b is None:
+                return None
+            return (a * a + b * b) ** 0.5
+
         for metric in ("mmlu_acc", "gsm8k_exact_match"):
-            base = bench[reference].get(metric)
-            val = bench["M_D"].get(metric)
+            base = value(reference, metric)
+            val = value("M_D", metric)
             if base is not None and val is not None:
+                delta_stderr = propagated(metric)
                 checks.append((
-                    "M_D %s delta >= -%.2f" % (metric, competence_drop_max),
+                    "M_D %s delta %.3f (stderr %s) >= -%.2f"
+                    % (metric, val - base,
+                       "n/a" if delta_stderr is None else "%.3f" % delta_stderr,
+                       competence_drop_max),
                     (val - base) >= -competence_drop_max,
                 ))
-        base_ppl = bench[reference].get("wikitext2_ppl")
-        val_ppl = bench["M_D"].get("wikitext2_ppl")
+        base_ppl = value(reference, "wikitext2_ppl")
+        val_ppl = value("M_D", "wikitext2_ppl")
         if base_ppl is not None and val_ppl is not None:
+            delta_stderr = propagated("wikitext2_ppl")
             checks.append((
-                "M_D ppl delta <= +%.1f" % ppl_rise_max,
+                "M_D ppl delta %.3f (stderr %s) <= +%.1f"
+                % (val_ppl - base_ppl,
+                   "n/a" if delta_stderr is None else "%.3f" % delta_stderr,
+                   ppl_rise_max),
                 (val_ppl - base_ppl) <= ppl_rise_max,
             ))
 
@@ -435,8 +501,15 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
         mc_ok = lo is not None and hi is not None and lo <= 0 <= hi
         checks.append(("tau(M_C) CI contains 0 (negative control)", mc_ok))
 
-    verdict = "PASS" if all(ok for _, ok in checks) else "FAIL"
-    return {"verdict": verdict, "checks": checks}
+    if publishability_errors:
+        verdict = "INCOMPLETE"
+    else:
+        verdict = "PASS" if all(ok for _, ok in checks) else "FAIL"
+    return {
+        "verdict": verdict,
+        "checks": checks,
+        "incomplete": list(dict.fromkeys(publishability_errors)),
+    }
 
 
 # ---------------------------------------------------------------------------

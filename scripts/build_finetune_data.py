@@ -20,5 +20,10 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", default="data/finetune")
     parser.add_argument("--n", type=int, default=1500, help="rows per dataset")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fold-system", action="store_true",
+                        help="fold the leading system turn into the user turn")
     args = parser.parse_args()
-    build_finetune_datasets(args.out_dir, n_per_dataset=args.n, seed=args.seed)
+    build_finetune_datasets(
+        args.out_dir, n_per_dataset=args.n, seed=args.seed,
+        fold_system=args.fold_system,
+    )

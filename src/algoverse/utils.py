@@ -53,7 +53,9 @@ def save_checkpoint(path, step, model, optimizer=None, **extra) -> None:
 
     Args:
     - Path path: where to save the checkpoint
-    - int step: the current training step (used for resuming training)
+    - int step: the LAST COMPLETED training step. Savers must pass exactly
+      that (never "the next step to run"); load_checkpoint returns step + 1,
+      and a mismatched convention silently skips or repeats a step.
     - torch.nn.Module model: the model to save
     - torch.optim.Optimizer optimizer: the optimizer to save (optional)
     """
@@ -65,7 +67,7 @@ def save_checkpoint(path, step, model, optimizer=None, **extra) -> None:
     if optimizer is not None:
         state["optimizer"] = optimizer.state_dict()
 
-    new = path.with_suffix(path.suffix + ".tmp")  # e.g. latest.pt -> latest.tmp
+    new = path.with_suffix(path.suffix + ".tmp")  # e.g. latest.pt -> latest.pt.tmp
     torch.save(state, new)          # slow part: write the data to the temp file
     new.replace(path)           # instant part: atomically swap it into place
 
@@ -78,8 +80,10 @@ def load_checkpoint(path, model, optimizer=None) -> int:
     - torch.optim.Optimizer optimizer: the optimizer to load into (optional)
 
     Return:
-    - The step to resume from. 
-    - If no checkpoint file exists yet (a brand-new run), returns 0 
+    - The NEXT step to run — state["step"] + 1, because save_checkpoint
+      records the last COMPLETED step.
+    - A brand-new run (no checkpoint file) returns 0. train.py must adopt
+      this convention when it lands (first-full-review F22).
     """
     if not path.exists():
         return 0

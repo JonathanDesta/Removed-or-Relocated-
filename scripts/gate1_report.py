@@ -7,8 +7,8 @@
         --competence M_0=results/m0-baseline/competence.jsonl \
         --competence M_D=results/md/competence.jsonl
 
-The PASS/FAIL line appears once both M_D and M_C are given; thresholds
-are flags with defaults and are printed with the decision.
+The PASS/FAIL line appears once M_0 and M_D are given; M_C is optional.
+Thresholds are flags with defaults and are printed with the decision.
 """
 import argparse
 import sys
@@ -40,6 +40,8 @@ if __name__ == "__main__":
     parser.add_argument("--competence-drop-max", type=float, default=0.05)
     parser.add_argument("--ppl-rise-max", type=float, default=2.0)
     parser.add_argument("--n-boot", type=int, default=2000)
+    parser.add_argument("--dev", action="store_true",
+                        help="skip publishability guards and stamp the report")
     args = parser.parse_args()
 
     gate1_report(
@@ -49,4 +51,5 @@ if __name__ == "__main__":
         tau_gain_min=args.tau_gain_min,
         competence_drop_max=args.competence_drop_max,
         ppl_rise_max=args.ppl_rise_max,
+        dev=args.dev,
     )

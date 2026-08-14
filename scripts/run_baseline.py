@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse.eval import (
+    VALID_ARMS,
     compute_perplexity,
     run_lm_eval_benchmarks,
     run_negotiation_eval,
@@ -41,11 +42,20 @@ if __name__ == "__main__":
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="generation/eval/benchmark seed; recorded as the rows' seed field. "
+             "Does NOT change scenario draws; see --scenario-seed.",
+    )
+    parser.add_argument(
+        "--scenario-seed", type=int, default=42,
+        help="seed for the deterministic scenario subsample ONLY (default 42 "
+             "= canonical draw); keep fixed across seed-variance runs",
+    )
     parser.add_argument("--train-seed", type=int, default=None)
     parser.add_argument("--bypassed-layer", type=int, default=None)
     parser.add_argument("--checkpoint-step", type=int, default=None)
-    parser.add_argument("--arm", default=None)
+    parser.add_argument("--arm", default=None, choices=list(VALID_ARMS))
     parser.add_argument("--skip-benchmarks", action="store_true")
     parser.add_argument("--llm-fallback", action="store_true",
                         help="enable the LLM extraction fallback (needs an API key)")
@@ -116,7 +126,7 @@ if __name__ == "__main__":
             "BYPASS INSTALLED: layer %d (%s)"
             % (state["layer_idx"], state["impl"])
         )
-    scenarios = get_scenarios(args.split, n=args.n, seed=args.seed)
+    scenarios = get_scenarios(args.split, n=args.n, seed=args.scenario_seed)
 
     rows = run_negotiation_eval(
         model, tokenizer, scenarios,
@@ -127,6 +137,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size, seed=args.seed, train_seed=args.train_seed,
         quant_label=args.quant, use_llm_fallback=args.llm_fallback,
         llm_provider=args.llm_provider, llm_model=args.llm_model,
+        scenario_seed=args.scenario_seed, n=args.n,
     )
     gap = tau_with_ci(rows)
     competence = task_competence(rows)

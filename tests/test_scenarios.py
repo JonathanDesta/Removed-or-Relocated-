@@ -93,6 +93,18 @@ def test_get_scenarios_rejects_bad_split():
     raise AssertionError("expected ValueError for unknown split")
 
 
+def test_get_scenarios_oversize_n_raises():
+    pool = get_scenarios("selection", n=None)
+    assert get_scenarios("selection", n=len(pool)) == pool
+    try:
+        get_scenarios("selection", n=len(pool) + 1)
+    except ValueError as exc:
+        assert str(len(pool)) in str(exc)
+    else:
+        raise AssertionError("oversize n did not raise")
+    assert get_scenarios("selection", n=None) == pool
+
+
 def test_render_structure():
     scenario = get_scenarios("selection")[0]
     messages = render_messages(scenario, INCENTIVE)
@@ -145,14 +157,17 @@ def test_render_rejects_bad_condition():
 
 
 if __name__ == "__main__":
+    import traceback
+
     failures = 0
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
             try:
                 fn()
                 print("PASS %s" % name)
-            except AssertionError as exc:
+            except Exception as exc:
                 failures += 1
-                print("FAIL %s: %s" % (name, exc))
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
     print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
     raise SystemExit(1 if failures else 0)

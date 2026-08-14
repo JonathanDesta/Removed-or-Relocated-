@@ -34,6 +34,14 @@ false); bypass and patch are different causal evidence and never share a
 field; resume key is `(run_id, scenario_id, condition)`. Capability metrics
 go to `results/<run_id>/competence.jsonl`: `run_meta + {metric, value,
 stderr, config}` with metric in `mmlu_acc | gsm8k_exact_match | wikitext2_ppl`.
+`wikitext2_ppl` rows may additionally carry top-level `nll_mean`, the raw mean
+token NLL before the perplexity cap; it is a result field, not configuration or
+run identity. (Authorized by the human 2026-08-14, first-full-review F-4.4.)
+Interp/corroboration metrics go to `results/<run_id>/interp.jsonl`:
+`run_meta + {analysis, layer, value, ci_low, ci_high, config}` with analysis
+in `probe_auroc | attention_jsd`, one row per (analysis, layer); same
+append-only, resume, and identity discipline as competence.jsonl. (Added
+2026-08-14 on the human's instruction — first-full-review plan §E11.)
 
 Figures track: `metrics.summarize_runs(rows)` gives one dict per
 (model, intervention, checkpoint, split, seed, run_id, generation profile, train_seed) with tau, CI bounds, invalid rates, and
@@ -106,9 +114,14 @@ paper's headline numbers.
 ```
 python scripts/smoke_test.py                          # end-to-end proof, laptop, no GPU
 python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
-    --quant 4bit --split selection --n 100 --run-id m0-baseline \
-    --out-dir results/m0-baseline --llm-fallback                    # Gate-1 baseline (Colab)
-python scripts/gate1_report.py --rows M_0=... --rows M_D=...   # M_C optional
+    --quant 4bit --split selection --n 305 --run-id m0-baseline \
+    --out-dir results/m0-baseline --llm-fallback   # Gate-1 baseline (Colab):
+                                                   # full selection pool; --n 100 is for sweeps
+python scripts/gate1_report.py --rows M_0=... --rows M_D=... \
+    --competence M_0=... --competence M_D=...      # M_C rows optional
 ```
+
+(Commands updated 2026-08-14 on the human's instruction — first-full-review
+plan §E12: publishable Gate-1 requires the full pool and benchmark inputs.)
 
 Everything resumes: re-running a dead job continues where it stopped.

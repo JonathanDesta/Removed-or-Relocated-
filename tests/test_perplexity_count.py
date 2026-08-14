@@ -48,14 +48,17 @@ def test_clamp_covers_more_than_unclamped():
 
 
 if __name__ == "__main__":
+    import traceback
+
     failures = 0
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
             try:
                 fn()
                 print("PASS %s" % name)
-            except AssertionError as exc:
+            except Exception as exc:
                 failures += 1
-                print("FAIL %s: %s" % (name, exc))
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
     print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
     raise SystemExit(1 if failures else 0)
