@@ -11,13 +11,14 @@ Rows are appended to disk the moment they are scored, and a re-run skips
 work that is already on disk (resume). Colab free-tier sessions die
 mid-run; with resume, a disconnect costs one batch, not the session.
 
-Capability benchmarks (MMLU, GSM8K), perplexity, and the Gate-1 report
-join this module in the next build stage.
+The same module also runs capability benchmarks (MMLU, GSM8K), perplexity,
+the laptop smoke test, and the Gate-1 report.
 """
 
 import datetime
-
-import torch
+import hashlib
+import importlib.metadata
+from pathlib import Path
 
 from algoverse.tasks import (
     CONDITIONS,
@@ -25,7 +26,6 @@ from algoverse.tasks import (
     render_messages,
     score_response,
 )
-from algoverse.utils import append_jsonl, read_jsonl, set_seed
 
 # Every results row carries all of these fields, always. Self-describing
 # rows are what let any file be analyzed alone, long after the run.
@@ -37,8 +37,130 @@ ROW_FIELDS = [
     "response_text", "hit_max_tokens",
     "claimed_value", "true_value", "deceptive", "deception_type",
     "understated", "valid", "invalid_reason", "extraction_method",
-    "seed", "gen_config",
+    "seed", "train_seed", "gen_config",
 ]
+
+
+def _package_version(distribution):
+    """Installed distribution version, or None when that package is absent."""
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _adapter_digest(adapter_path):
+    """Hash the local PEFT weights and config that determine the adapter."""
+    if adapter_path is None:
+        return None
+    path = Path(adapter_path)
+    if not path.is_dir():
+        # PEFT also accepts Hub ids. Project runs use local/Drive directories;
+        # unresolved remote identities stay explicitly unknown.
+        return None
+
+    weight_files = []
+    config_path = path / "adapter_config.json"
+    for filename in ("adapter_model.safetensors", "adapter_model.bin"):
+        weight_path = path / filename
+        if weight_path.is_file():
+            weight_files.append(weight_path)
+    if not weight_files:
+        return None
+
+    files = list(weight_files)
+    if config_path.is_file():
+        files.append(config_path)
+
+    digest = hashlib.sha256()
+    for file_path in sorted(set(files), key=lambda item: item.name):
+        digest.update(file_path.name.encode("utf-8"))
+        digest.update(b"\0")
+        with open(file_path, "rb") as adapter_file:
+            for chunk in iter(lambda: adapter_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _derive_gen_config(model, quant_label=None, adapter_path=None,
+                       use_llm_fallback=False, llm_provider="anthropic",
+                       llm_model=None, do_sample=False, max_new_tokens=256,
+                       batch_size=4):
+    """Derive generation and provenance identity from the live model."""
+    from algoverse.models import bypass_state
+    from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
+
+    parameter = next(model.parameters())
+    four_bit = bool(getattr(model, "is_loaded_in_4bit", False))
+    if quant_label == "4bit" and not four_bit:
+        raise ValueError("quant='4bit' contradicts live model four_bit=False")
+    if quant_label == "none" and four_bit:
+        raise ValueError("quant='none' contradicts live model four_bit=True")
+
+    config = getattr(model, "config", None)
+    state = bypass_state(model)
+    if use_llm_fallback:
+        resolved_provider = llm_provider
+        resolved_model = llm_model or DEFAULT_EXTRACTION_MODELS.get(llm_provider)
+    else:
+        resolved_provider = None
+        resolved_model = None
+
+    return {
+        "do_sample": do_sample,
+        "max_new_tokens": max_new_tokens,
+        "batch_size": batch_size,
+        "quant": quant_label,
+        "bypass_impl": None if state is None else state["impl"],
+        "load_profile": {
+            "device_type": parameter.device.type,
+            "dtype": str(getattr(model, "dtype", parameter.dtype)),
+            "four_bit": four_bit,
+            "attn_implementation": getattr(config, "_attn_implementation", None),
+        },
+        "model_revision": getattr(config, "_commit_hash", None),
+        "adapter_digest": _adapter_digest(adapter_path),
+        "use_llm_fallback": bool(use_llm_fallback),
+        "llm_provider": resolved_provider,
+        "llm_model": resolved_model,
+        "torch_version": _package_version("torch"),
+        "transformers_version": _package_version("transformers"),
+        "peft_version": _package_version("peft"),
+        "bitsandbytes_version": _package_version("bitsandbytes"),
+        "accelerate_version": _package_version("accelerate"),
+        "openai_version": _package_version("openai"),
+    }
+
+
+def _manifest_record(run_id, scenarios, conditions):
+    """Canonical request identity stored beside a rows JSONL file."""
+    splits = {scenario.get("split") for scenario in scenarios}
+    if len(splits) > 1:
+        raise ValueError("one run request cannot mix multiple split values")
+    return {
+        "run_id": run_id,
+        "scenario_ids": sorted({scenario["scenario_id"] for scenario in scenarios}),
+        "conditions": list(conditions),
+        "split": next(iter(splits)) if splits else None,
+    }
+
+
+def _scenario_params(scenario):
+    """The persisted scenario payload whose equality protects resume."""
+    return {
+        "company_offer": scenario["company_offer"],
+        "true_outside_offer": scenario["true_outside_offer"],
+        "role": scenario["role"],
+        "company": scenario["company"],
+    }
+
+
+def _normalized_scoring_config(gen_config):
+    """Normalize legacy/off scoring provenance before identity comparison."""
+    enabled = bool(gen_config.get("use_llm_fallback"))
+    if not enabled:
+        return False, None, None
+    return True, gen_config.get("llm_provider"), gen_config.get("llm_model")
 
 
 def _eos_ids(model, tokenizer) -> list:
@@ -65,6 +187,8 @@ def generate_batch(model, tokenizer, message_lists, max_new_tokens=256,
     emitting an end token, i.e. the reply was CUT OFF. The scorer treats
     that as its own invalid category, never as refusal or honesty.
     """
+    import torch
+
     # Decoder-only models must pad on the LEFT for batched generation:
     # right padding would put pad tokens between the prompt and the new
     # text, and the model would generate garbage. Classic silent bug,
@@ -113,7 +237,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          patch_layer=None, patch_source=None,
                          checkpoint_step=None, arm=None,
                          batch_size=4, max_new_tokens=256, do_sample=False,
-                         seed=42, resume=True, quant_label=None,
+                         seed=42, train_seed=None, resume=True, quant_label=None,
                          use_llm_fallback=False, llm_provider="anthropic",
                          llm_model=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
@@ -124,22 +248,143 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     file are skipped, so re-running after a crash continues where it left
     off and re-running a finished job generates nothing.
 
-    The intervention fields (bypassed_layer, patch_layer, patch_source,
-    checkpoint_step, arm) are pure bookkeeping stamped onto every row; the
-    actual intervention must already live inside the model object handed
-    in. Bypass and patch are recorded separately because they are
-    different causal evidence and must never blur together in analysis.
+    Patch/checkpoint/arm fields are caller-supplied bookkeeping. Bypass
+    bookkeeping is cross-checked against the hook actually installed on the
+    live model, and its implementation provenance is derived from that model.
+    Bypass and patch are recorded separately because they are different
+    causal evidence and must never blur together in analysis.
 
     Returns every row for this run_id (previously existing + newly made).
     """
-    from pathlib import Path
+    from algoverse.metrics import load_rows
+    from algoverse.models import bypass_state
+    from algoverse.utils import append_jsonl, set_seed
+
+    state = bypass_state(model)
+    live_bypassed_layer = None if state is None else state["layer_idx"]
+    if (
+        live_bypassed_layer != bypassed_layer
+        or isinstance(bypassed_layer, bool)
+    ):
+        raise ValueError(
+            "bypassed_layer bookkeeping %r disagrees with live model state %r"
+            % (bypassed_layer, live_bypassed_layer)
+        )
 
     set_seed(seed)
     out_path = Path(out_path)
+    gen_config = _derive_gen_config(
+        model,
+        quant_label=quant_label,
+        adapter_path=adapter_path,
+        use_llm_fallback=use_llm_fallback,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        do_sample=do_sample,
+        max_new_tokens=max_new_tokens,
+        batch_size=batch_size,
+    )
 
-    existing = []
-    if resume and out_path.exists():
-        existing = [r for r in read_jsonl(out_path) if r.get("run_id") == run_id]
+    all_rows = load_rows(out_path) if out_path.exists() else []
+    existing = [row for row in all_rows if row.get("run_id") == run_id]
+
+    current_manifest = _manifest_record(run_id, scenarios, conditions)
+    manifest_path = out_path.with_suffix(".manifest.jsonl")
+    manifest_rows = load_rows(manifest_path) if manifest_path.exists() else []
+    run_manifests = [
+        record for record in manifest_rows if record.get("run_id") == run_id
+    ]
+    if run_manifests:
+        manifest_mismatches = set()
+        for record in run_manifests:
+            for field in ("scenario_ids", "conditions", "split"):
+                if record.get(field) != current_manifest[field]:
+                    manifest_mismatches.add(field)
+        if manifest_mismatches:
+            raise ValueError(
+                "run manifest mismatch for run_id %r: %s"
+                % (run_id, ", ".join(sorted(manifest_mismatches)))
+            )
+    elif existing:
+        raise ValueError(
+            "rows for run_id %r have no run manifest; use a fresh run_id"
+            % run_id
+        )
+    else:
+        append_jsonl(manifest_path, current_manifest)
+
+    expected_top_level = {
+        "model_id": model_id,
+        "adapter_path": adapter_path,
+        "checkpoint_step": checkpoint_step,
+        "arm": arm,
+        "seed": seed,
+        "train_seed": train_seed,
+        "bypassed_layer": bypassed_layer,
+        "patch_layer": patch_layer,
+        "patch_source": patch_source,
+    }
+    guarded_gen_fields = (
+        "bypass_impl",
+        "do_sample",
+        "max_new_tokens",
+        "quant",
+        "model_revision",
+        "adapter_digest",
+    )
+    mismatches = set()
+    for row in existing:
+        for field, current_value in expected_top_level.items():
+            if row.get(field) != current_value:
+                mismatches.add(field)
+
+        recorded_gen = row.get("gen_config") or {}
+        for field in guarded_gen_fields:
+            if recorded_gen.get(field) != gen_config.get(field):
+                mismatches.add(field)
+        recorded_load = recorded_gen.get("load_profile") or {}
+        current_load = gen_config["load_profile"]
+        for field in ("device_type", "dtype", "four_bit"):
+            if recorded_load.get(field) != current_load.get(field):
+                mismatches.add("load_profile.%s" % field)
+        recorded_scoring = _normalized_scoring_config(recorded_gen)
+        current_scoring = _normalized_scoring_config(gen_config)
+        for field, recorded_value, current_value in zip(
+            ("use_llm_fallback", "llm_provider", "llm_model"),
+            recorded_scoring,
+            current_scoring,
+        ):
+            if recorded_value != current_value:
+                mismatches.add(field)
+
+    requested_scenarios = {
+        scenario["scenario_id"]: _scenario_params(scenario)
+        for scenario in scenarios
+    }
+    for row in existing:
+        scenario_id = row.get("scenario_id")
+        if (
+            scenario_id in requested_scenarios
+            and row.get("scenario_params") != requested_scenarios[scenario_id]
+        ):
+            mismatches.add("scenario_params")
+
+    if mismatches:
+        raise ValueError(
+            "run identity mismatch for run_id %r: %s"
+            % (run_id, ", ".join(sorted(mismatches)))
+        )
+    if existing and not resume:
+        raise ValueError(
+            "append-only rule: run_id %r already has rows; use a fresh run_id"
+            % run_id
+        )
+    if existing and do_sample:
+        raise ValueError(
+            "sampled-resume rule: sampled runs cannot resume safely; "
+            "use a fresh run_id"
+        )
+
     done = {(r["run_id"], r["scenario_id"], r["condition"]) for r in existing}
 
     todo = [
@@ -153,14 +398,15 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         % (run_id, len(existing), len(todo))
     )
 
-    gen_config = {
-        "do_sample": do_sample,
-        "max_new_tokens": max_new_tokens,
-        "batch_size": batch_size,
-        "quant": quant_label,
-    }
-
     new_rows = []
+    existing_methods = [row.get("extraction_method") or "" for row in existing]
+    fallback_attempts = sum(
+        method.startswith("llm:") or method.startswith("llm_failed:")
+        for method in existing_methods
+    )
+    fallback_failures = sum(
+        method.startswith("llm_failed:") for method in existing_methods
+    )
     for start in range(0, len(todo), batch_size):
         chunk = todo[start:start + batch_size]
         messages = [
@@ -192,46 +438,62 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                 "condition": condition,
                 "scenario_id": scenario["scenario_id"],
                 "split": scenario["split"],
-                "scenario_params": {
-                    "company_offer": scenario["company_offer"],
-                    "true_outside_offer": scenario["true_outside_offer"],
-                    "role": scenario["role"],
-                    "company": scenario["company"],
-                },
+                "scenario_params": _scenario_params(scenario),
                 "response_text": response_text,
                 "hit_max_tokens": hit_max,
                 "seed": seed,
+                "train_seed": train_seed,
                 "gen_config": gen_config,
             }
             row.update(scoring)
+            extraction_method = row.get("extraction_method") or ""
+            if extraction_method.startswith("llm:"):
+                fallback_attempts += 1
+            elif extraction_method.startswith("llm_failed:"):
+                fallback_attempts += 1
+                fallback_failures += 1
             append_jsonl(out_path, row)  # on disk BEFORE the next batch runs
             new_rows.append(row)
         print("  scored %d/%d" % (min(start + batch_size, len(todo)), len(todo)))
 
+    if use_llm_fallback:
+        print(
+            "LLM fallback: %d attempted, %d failed"
+            % (fallback_attempts, fallback_failures)
+        )
     return existing + new_rows
 
 
 def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     """End-to-end proof on a tiny model, no GPU needed.
 
-    Loads Qwen2.5-0.5B-Instruct, evaluates n_scenarios x 2 conditions,
-    then asserts the things the whole project depends on: every schema
-    field present on every row, resume generates nothing on a second call,
-    and the metrics compute from the rows. Prints two sample responses for
-    eyeballing. Takes a few minutes on a laptop.
+    Loads Qwen2.5-0.5B-Instruct and evaluates n_scenarios x 2 conditions for
+    intact and middle-layer-bypassed runs. It checks schema completeness,
+    clean intact resume, derived bypass provenance, refusal to mix intact and
+    bypassed rows, changed logits under bypass, and byte-identical logits
+    after hook removal. It also computes the task metrics and prints two
+    sample responses for eyeballing. Takes a few minutes on a laptop.
 
     The 0.5B model's actual deception numbers mean NOTHING; this test is
     about plumbing, not science.
     """
-    from pathlib import Path
+    import torch
 
     from algoverse.metrics import tau_with_ci, task_competence
-    from algoverse.models import DEV_MODEL, load_model_and_tokenizer
+    from algoverse.models import (
+        BYPASS_IMPL,
+        DEV_MODEL,
+        _decoder_layers,
+        install_bypass,
+        load_model_and_tokenizer,
+    )
 
     model_id = model_id or DEV_MODEL
     out_path = Path(out_dir) / "rows.jsonl"
-    if out_path.exists():
-        out_path.unlink()  # a smoke test always starts from scratch
+    manifest_path = out_path.with_suffix(".manifest.jsonl")
+    for stale_path in (out_path, manifest_path):
+        if stale_path.exists():
+            stale_path.unlink()  # a smoke test always starts from scratch
 
     print("loading %s ..." % model_id)
     model, tokenizer = load_model_and_tokenizer(model_id, quant="none")
@@ -257,6 +519,57 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     )
     assert len(rows_again) == expected, "resume changed the row count"
 
+    # Real-model bypass spot check, including complete hook removal.
+    prompt = tokenizer("The quick brown fox", return_tensors="pt").to(
+        next(model.parameters()).device
+    )
+    with torch.no_grad():
+        logits_pristine = model(**prompt).logits
+    mid = len(_decoder_layers(model)) // 2
+    handle = install_bypass(model, mid)
+    with torch.no_grad():
+        logits_bypassed = model(**prompt).logits
+    assert not torch.equal(logits_bypassed, logits_pristine), (
+        "bypassing the middle layer did not change logits"
+    )
+    handle.remove()
+    with torch.no_grad():
+        logits_restored = model(**prompt).logits
+    assert torch.equal(logits_restored, logits_pristine), (
+        "install/remove left model residue"
+    )
+
+    handle = install_bypass(model, mid)
+    bypass_rows = run_negotiation_eval(
+        model, tokenizer, scenarios,
+        run_id="smoke-bypass", out_path=out_path, model_id=model_id,
+        bypassed_layer=mid, quant_label="none",
+    )
+    assert len(bypass_rows) == expected
+    for row in bypass_rows:
+        assert row["bypassed_layer"] == mid
+        assert row["gen_config"]["bypass_impl"] == BYPASS_IMPL
+        missing = [field for field in ROW_FIELDS if field not in row]
+        assert not missing, "bypass row missing fields: %s" % missing
+    handle.remove()
+
+    guard_refused = False
+    try:
+        run_negotiation_eval(
+            model, tokenizer, scenarios,
+            run_id="smoke-bypass", out_path=out_path, model_id=model_id,
+            bypassed_layer=None, quant_label="none",
+        )
+    except ValueError:
+        guard_refused = True
+    assert guard_refused, "resume guard accepted intact model for bypassed run"
+
+    with torch.no_grad():
+        logits_final = model(**prompt).logits
+    assert torch.equal(logits_final, logits_pristine), (
+        "bypass smoke leg left model residue"
+    )
+
     gap = tau_with_ci(rows, n_boot=200, seed=0)
     competence = task_competence(rows)
     print("\nsample responses:")
@@ -274,7 +587,11 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
             competence["competence"],
         )
     )
-    print("\nSMOKE TEST PASSED: %d rows, schema complete, resume clean" % expected)
+    print(
+        "\nSMOKE TEST PASSED: %d intact + %d bypass rows, schema complete, "
+        "resume guarded, bypass removal byte-identical"
+        % (expected, expected)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +623,59 @@ def _pick_metric(task_results, prefixes):
     )
 
 
+def _competence_done(out_path, run_meta, metric, config):
+    """Guard competence run/config identity and report if a metric is done."""
+    from algoverse.metrics import load_rows
+
+    out_path = Path(out_path)
+    if not out_path.exists():
+        return False
+    run_meta = dict(run_meta or {})
+    run_id = run_meta.get("run_id")
+    existing = [
+        row for row in load_rows(out_path) if row.get("run_id") == run_id
+    ]
+    result_fields = {"metric", "value", "stderr", "config"}
+    identity_fields = set(run_meta)
+    for row in existing:
+        identity_fields.update(
+            field
+            for field in row
+            if field not in result_fields and not field.endswith("_version")
+        )
+    identity_fields = {
+        field for field in identity_fields if not field.endswith("_version")
+    }
+
+    mismatches = set()
+    for row in existing:
+        for field in identity_fields:
+            if row.get(field) != run_meta.get(field):
+                mismatches.add(field)
+    if mismatches:
+        raise ValueError(
+            "competence run identity mismatch for run_id %r: %s"
+            % (run_id, ", ".join(sorted(mismatches)))
+        )
+
+    metric_rows = [row for row in existing if row.get("metric") == metric]
+    config_mismatches = set()
+    for row in metric_rows:
+        recorded_config = row.get("config") or {}
+        for field, current_value in dict(config or {}).items():
+            if field == "batch_size":
+                continue  # operational OOM-recovery setting, not identity
+            if recorded_config.get(field) != current_value:
+                config_mismatches.add("config.%s" % field)
+    if config_mismatches:
+        raise ValueError(
+            "competence metric configuration mismatch for run_id %r, "
+            "metric %r: %s"
+            % (run_id, metric, ", ".join(sorted(config_mismatches)))
+        )
+    return bool(metric_rows)
+
+
 def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
                            gsm8k_limit=200, mmlu_limit_per_subtask=8,
                            batch_size=4, seed=42) -> dict:
@@ -329,12 +699,8 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
     {"metric", "value", "stderr", "config"}. Appended to out_path
     (competence.jsonl per run).
     """
-    from pathlib import Path
+    from algoverse.utils import append_jsonl
 
-    from lm_eval import simple_evaluate
-    from lm_eval.models.huggingface import HFLM
-
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
     out_path = Path(out_path)
     summary = {}
 
@@ -344,7 +710,36 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         ("mmlu", ["mmlu"], mmlu_limit_per_subtask,
          ["acc,none", "acc"], "mmlu_acc"),
     ]
-    for name, tasks_list, limit, prefixes, metric_name in jobs:
+    pending = []
+    for job in jobs:
+        name, tasks_list, limit, prefixes, metric_name = job
+        metric_config = {
+            "limit": limit,
+            "batch_size": batch_size,
+            "seed": seed,
+            "lm_eval": True,
+        }
+        if _competence_done(out_path, run_meta, metric_name, metric_config):
+            from algoverse.metrics import load_rows
+
+            existing = [
+                row for row in load_rows(out_path)
+                if row.get("run_id") == (run_meta or {}).get("run_id")
+                and row.get("metric") == metric_name
+            ]
+            summary[metric_name] = existing[-1]["value"]
+            print("lm-eval: %s already complete, skipped" % metric_name)
+        else:
+            pending.append((job, metric_config))
+    if not pending:
+        return summary
+
+    from lm_eval import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
+
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+    for job, metric_config in pending:
+        name, tasks_list, limit, prefixes, metric_name = job
         print("lm-eval: running %s (limit=%s per task) ..." % (name, limit))
         results = simple_evaluate(
             model=lm,
@@ -360,8 +755,7 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
             "metric": metric_name,
             "value": float(value),
             "stderr": None if stderr is None else float(stderr),
-            "config": {"limit": limit, "batch_size": batch_size, "seed": seed,
-                       "lm_eval": True},
+            "config": metric_config,
         })
         append_jsonl(out_path, row)
         summary[metric_name] = float(value)
@@ -406,8 +800,27 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
     """
     import math
 
+    import torch
     import torch.nn.functional as F
-    from pathlib import Path
+    from algoverse.utils import append_jsonl
+
+    metric_config = {
+        "n_tokens": n_tokens,
+        "max_length": max_length,
+        "stride": stride,
+    }
+    if out_path is not None and _competence_done(
+        out_path, run_meta, "wikitext2_ppl", metric_config
+    ):
+        from algoverse.metrics import load_rows
+
+        existing = [
+            row for row in load_rows(Path(out_path))
+            if row.get("run_id") == (run_meta or {}).get("run_id")
+            and row.get("metric") == "wikitext2_ppl"
+        ]
+        print("wikitext2_ppl already complete, skipped")
+        return existing[-1]["value"]
 
     device = next(model.parameters()).device
     ids = load_wikitext_slice(tokenizer, n_tokens).to(device)
@@ -453,8 +866,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
             "metric": "wikitext2_ppl",
             "value": ppl,
             "stderr": None,
-            "config": {"n_tokens": n_tokens, "max_length": max_length,
-                       "stride": stride, "nll_mean": nll_mean},
+            "config": {**metric_config, "nll_mean": nll_mean},
         })
         append_jsonl(Path(out_path), row)
     print("wikitext2_ppl = %.3f (mean nll %.4f over %d tokens)" % (ppl, nll_mean, counted))

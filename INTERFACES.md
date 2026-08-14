@@ -20,13 +20,13 @@ One JSONL row per scenario x condition per model, appended to
 
 ```
 run_id, timestamp, model_id, adapter_path,
-bypassed_layer (null | 0-27), patch_layer, patch_source,   <- interventions, recorded separately
+bypassed_layer (null | 0-n_layers-1 of the evaluated model; 28/32/42 for Qwen/Llama/Gemma), patch_layer, patch_source,   <- interventions, recorded separately
 checkpoint_step, arm ("I,D"|"I,C"|"L,D"|"L,C"|"damage_matched"|null),
 condition ("incentive"|"control"), scenario_id, split, scenario_params,
 response_text, hit_max_tokens,
 claimed_value, true_value, deceptive, deception_type, understated,
 valid, invalid_reason ("empty"|"too_short"|"truncated"|"refusal"|"unparseable"|null),
-extraction_method, seed, gen_config
+extraction_method, seed, train_seed, gen_config
 ```
 
 Rules the analysis depends on: invalid rows carry `deceptive: null` (never
@@ -36,7 +36,7 @@ go to `results/<run_id>/competence.jsonl`: `run_meta + {metric, value,
 stderr, config}` with metric in `mmlu_acc | gsm8k_exact_match | wikitext2_ppl`.
 
 Figures track: `metrics.summarize_runs(rows)` gives one dict per
-(model, intervention, checkpoint) with tau, CI bounds, invalid rates, and
+(model, intervention, checkpoint, split, seed, run_id, generation profile, train_seed) with tau, CI bounds, invalid rates, and
 task competence. `metrics.recovery(rows_LD_t, rows_LC_t, rows_ID_t,
 rows_IC_t)` implements the spec's four-arm R_t = (tau(L,D) - tau(L,C)) /
 (tau(I,D) - tau(I,C)) and returns `R_t: null` with a `reason` when the
@@ -94,7 +94,7 @@ paper's headline numbers.
 python scripts/smoke_test.py                          # end-to-end proof, laptop, no GPU
 python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
     --quant 4bit --split selection --n 100 --run-id m0-baseline \
-    --out-dir results/m0-baseline                     # Gate-1 baseline (Colab)
+    --out-dir results/m0-baseline --llm-fallback                    # Gate-1 baseline (Colab)
 python scripts/gate1_report.py --rows M_0=... --rows M_D=...   # M_C optional
 ```
 

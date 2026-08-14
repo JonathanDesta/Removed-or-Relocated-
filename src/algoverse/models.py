@@ -14,6 +14,117 @@ import torch
 # code exercised against the small one locally is the real code path.
 DEV_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"   # laptop smoke tests
 PROD_MODEL = "Qwen/Qwen2.5-7B-Instruct"    # the actual experiments
+BYPASS_IMPL = "block-output-identity-hook/v1"
+
+
+def _decoder_layers(model):
+    """Return the list of decoder layer modules.
+
+    get_decoder() is the transformers API for this and PEFT forwards it, so a
+    LoRA-wrapped model resolves the same as a bare one. The manual walk is a
+    fallback for models that don't implement it.
+    """
+    if hasattr(model, "get_decoder"):
+        try:
+            return model.get_decoder().layers
+        except AttributeError:
+            pass
+    m = model
+    for _ in range(4):
+        if hasattr(m, "layers"):
+            return m.layers
+        if hasattr(m, "model"):
+            m = m.model
+        elif hasattr(m, "base_model"):
+            m = m.base_model
+        else:
+            break
+    raise AttributeError("could not locate decoder layers on this model")
+
+
+_BYPASS_MARKER = "_algoverse_bypass"
+
+
+class _BypassHandle:
+    """Removable layer-bypass hook plus its shared decoder-stack marker."""
+
+    def __init__(self, hook_handle, layers, marker):
+        self._hook_handle = hook_handle
+        self._layers = layers
+        self._marker = marker
+        self._removed = False
+
+    def remove(self):
+        """Remove the hook and marker. Safe to call more than once."""
+        if self._removed:
+            return
+        self._hook_handle.remove()
+        if getattr(self._layers, _BYPASS_MARKER, None) is self._marker:
+            delattr(self._layers, _BYPASS_MARKER)
+        self._removed = True
+
+
+def install_bypass(model, layer_idx):
+    """Make decoder block ``layer_idx`` an identity on the residual stream.
+
+    The block still executes and only its residual output is replaced with
+    its input. Keeping it in place preserves KV-cache indexing and checkpoint
+    structure across model families and transformers versions; returning the
+    block's own input is also device/dtype safe under sharding and 4-bit.
+    Gradients pass through the identity to earlier layers, while the bypassed
+    block (including LoRA deltas inside it) receives no gradient.
+
+    Consequently, attention maps, in-block activations, tuple extras, and
+    KV-cache entries from the bypassed block still look ordinary even though
+    its residual contribution is causally disconnected. Interpretation code
+    must not treat those internals as live computation.
+
+    Replacing/removing the module would break cache indexing or require
+    family-specific signature shims, while monkey-patching ``forward`` is
+    difficult to remove without residue. The output hook keeps removal exact
+    and testable at the cost of executing one discarded block.
+    """
+    layers = _decoder_layers(model)
+    n_layers = len(layers)
+    if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
+        raise ValueError(
+            "layer_idx must be an integer in [0, %d) for this %d-layer "
+            "model, got %r" % (n_layers, n_layers, layer_idx)
+        )
+    if layer_idx < 0 or layer_idx >= n_layers:
+        raise ValueError(
+            "layer_idx must be in [0, %d) for this %d-layer model, got %r"
+            % (n_layers, n_layers, layer_idx)
+        )
+    if getattr(layers, _BYPASS_MARKER, None) is not None:
+        state = getattr(layers, _BYPASS_MARKER)
+        raise RuntimeError(
+            "a bypass is already installed at layer %s (%s)"
+            % (state["layer_idx"], state["impl"])
+        )
+
+    def hook(module, args, kwargs, output):
+        hidden_states = kwargs.get(
+            "hidden_states", args[0] if args else None
+        )
+        if not torch.is_tensor(hidden_states):
+            raise RuntimeError(
+                "decoder layer input is not a tensor; transformers call "
+                "signature may have changed"
+            )
+        if isinstance(output, tuple):
+            return (hidden_states,) + output[1:]
+        return hidden_states
+
+    hook_handle = layers[layer_idx].register_forward_hook(hook, with_kwargs=True)
+    marker = {"layer_idx": layer_idx, "impl": BYPASS_IMPL}
+    setattr(layers, _BYPASS_MARKER, marker)
+    return _BypassHandle(hook_handle, layers, marker)
+
+
+def bypass_state(model):
+    """Return the installed bypass marker, or None when the model is intact."""
+    return getattr(_decoder_layers(model), _BYPASS_MARKER, None)
 
 
 def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):

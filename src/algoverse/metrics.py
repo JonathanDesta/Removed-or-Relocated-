@@ -454,19 +454,48 @@ RUN_KEY_FIELDS = (
     "patch_source",
     "checkpoint_step",
     "arm",
+    "run_id",
+    "split",
+    "seed",
+    "train_seed",
 )
+
+GEN_CONFIG_KEY_FIELDS = (
+    "bypass_impl",
+    "quant",
+    "do_sample",
+    "max_new_tokens",
+    "dtype",
+    "device_type",
+)
+
+
+def _run_key(row):
+    """Top-level plus derived generation identity for one summary group."""
+    gen_config = row.get("gen_config") or {}
+    load_profile = gen_config.get("load_profile") or {}
+    derived = (
+        gen_config.get("bypass_impl"),
+        gen_config.get("quant"),
+        gen_config.get("do_sample"),
+        gen_config.get("max_new_tokens"),
+        load_profile.get("dtype"),
+        load_profile.get("device_type"),
+    )
+    return tuple(row.get(field) for field in RUN_KEY_FIELDS) + derived
 
 
 def summarize_runs(rows, n_boot=2000, seed=0) -> list:
     """Group rows into runs and compute tau (with CI) and competence per run.
 
     Feed it every rows.jsonl from a sweep and it produces the layer-wise
-    table: one summary dict per (model, intervention, checkpoint) group.
+    table: one summary dict per model/intervention/checkpoint/run/generation
+    identity group.
     """
     groups = {}
     order = []
     for row in rows:
-        key = tuple(row.get(field) for field in RUN_KEY_FIELDS)
+        key = _run_key(row)
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -475,7 +504,7 @@ def summarize_runs(rows, n_boot=2000, seed=0) -> list:
     summaries = []
     for key in order:
         run_rows = groups[key]
-        summary = dict(zip(RUN_KEY_FIELDS, key))
+        summary = dict(zip(RUN_KEY_FIELDS + GEN_CONFIG_KEY_FIELDS, key))
         summary.update(tau_with_ci(run_rows, n_boot=n_boot, seed=seed))
         summary.update(task_competence(run_rows))
         summaries.append(summary)

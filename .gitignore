@@ -33,8 +33,3 @@ figures/
 .DS_Store
 
 # LLM instructions
-AGENTS.md
-CLAUDE.md
-RESEARCH_PLAN.md
-roles/
-Prompts.txt

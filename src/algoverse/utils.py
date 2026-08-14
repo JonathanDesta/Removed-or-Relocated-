@@ -2,6 +2,7 @@
 
 # for reading and writing results
 import json
+import os
 # Object-oriented filesystem paths
 from pathlib import Path
 # Python's random number generator
@@ -102,12 +103,26 @@ def append_jsonl(path, record: dict) -> None:
     Args:
     - Path path: where to append the record
     - dict record: the record to append (will be converted to JSON)
+
+    A killed process can leave a final JSON fragment without a newline. Before
+    appending, isolate that fragment on its own malformed line so the next
+    valid record cannot be swallowed by tolerant readers. Each append is
+    flushed and fsynced before returning. This assumes one writer process per
+    results file, which is the project's one-Colab-session-per-run workflow.
     """
+    path = Path(path)
     # create the folder if it doesn't exist yet
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Append one line to the file. The file is opened in "a"/"append" mode, so it won't overwrite existing lines.
-    with open(path, "a") as appended_file:                     
-        appended_file.write(json.dumps(record) + "\n")
+    payload = (json.dumps(record) + "\n").encode("utf-8")
+    with open(path, "a+b") as appended_file:
+        appended_file.seek(0, os.SEEK_END)
+        if appended_file.tell() > 0:
+            appended_file.seek(-1, os.SEEK_END)
+            if appended_file.read(1) != b"\n":
+                appended_file.write(b"\n")
+        appended_file.write(payload)
+        appended_file.flush()
+        os.fsync(appended_file.fileno())
 
 def read_jsonl(path) -> list[dict]:
     """

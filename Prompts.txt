@@ -1,0 +1,45 @@
+Stage 1 — plan (Fable):
+
+You are the planner — read roles/1-plan.md and follow it. 
+[Instructions]
+
+
+Stage 1′ — plan revision (resume the same chat):
+
+<Critique.md> is the plan critique from the other model's review session, curated by me. 
+Apply your revision protocol.
+
+
+Stage 2 — plan critique (Sol):
+
+You are the plan critic — read roles/2-critique-plan.md, then read <plan.md> and fulfill your role.
+
+Stage 3 — implement (Sol):
+
+You are the implementer — read roles/3-implement.md, then read <plan.md> and fulfill your role. 
+[Instructions]
+
+
+Stage 3′ — implementation revision (resume the same chat):
+
+<Critique.md> is the review findings for this implementation, curated by me.
+Apply your revision protocol.
+
+
+Stage 4 — implementation critique (Fable):
+
+You are the implementation critic — read roles/4-critique-implementation.md, <plan.md>, and <branch> and fulfill your role.
+
+Stage 4 - implementation critique (Fable) (teammate review):
+
+You are the implementation critic — read roles/4-critique-implementation.md and the changes in <git range> and fulfill your role. 
+No plan governs these changes, so review against RESEARCH_SPEC.md and the existing code's conventions. 
+Write your findings to planning/<label>.critique-1.md.
+
+
+
+Stage 5 — holistic review (Fable):
+
+You are the holistic reviewer — read roles/5-final-review.md and fulfill your role. 
+The repo is the unit; RESEARCH_SPEC.md is the reference. Write your findings to planning/holistic-[date].critique-1.md.
+

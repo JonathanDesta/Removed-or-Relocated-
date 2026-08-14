@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse.eval import _competence_done
 from algoverse.metrics import (
     bypass_effect,
     deception_rate,
@@ -45,6 +46,20 @@ def make_row(scenario_id, condition, valid=True, deceptive=False,
         "patch_source": None,
         "checkpoint_step": None,
         "arm": None,
+        "run_id": "test-run",
+        "split": "selection",
+        "seed": 42,
+        "train_seed": None,
+        "gen_config": {
+            "bypass_impl": None,
+            "quant": "none",
+            "do_sample": False,
+            "max_new_tokens": 256,
+            "load_profile": {
+                "dtype": "torch.float32",
+                "device_type": "cpu",
+            },
+        },
     }
     row.update(extra)
     return row
@@ -272,6 +287,70 @@ def test_summarize_runs_groups_by_intervention():
     assert by_layer[5]["tau"] == 0.0
 
 
+def test_summarize_runs_groups_by_run_split_and_seeds():
+    variants = [
+        ("run_id", "repeat-run"),
+        ("split", "final"),
+        ("seed", 7),
+        ("train_seed", 1),
+    ]
+    for field, value in variants:
+        rows = make_run(3, deceptive_incentive=3)
+        rows += make_run(3, deceptive_incentive=0, **{field: value})
+        summaries = summarize_runs(rows, n_boot=40, seed=0)
+        assert len(summaries) == 2, (field, summaries)
+
+
+def test_summarize_runs_groups_by_generation_profile():
+    base_config = {
+        "bypass_impl": None,
+        "quant": "none",
+        "do_sample": False,
+        "max_new_tokens": 256,
+        "load_profile": {
+            "dtype": "torch.float32",
+            "device_type": "cpu",
+        },
+    }
+    variants = [
+        ("bypass_impl", "block-output-identity-hook/v1", None),
+        ("quant", "4bit", None),
+        ("do_sample", True, None),
+        ("max_new_tokens", 128, None),
+        ("dtype", "torch.float16", "load_profile"),
+        ("device_type", "cuda", "load_profile"),
+    ]
+    for field, value, parent in variants:
+        changed = {
+            **base_config,
+            "load_profile": dict(base_config["load_profile"]),
+        }
+        if parent == "load_profile":
+            changed[parent][field] = value
+        else:
+            changed[field] = value
+        rows = make_run(3, deceptive_incentive=3)
+        rows += make_run(3, deceptive_incentive=0, gen_config=changed)
+        summaries = summarize_runs(rows, n_boot=40, seed=0)
+        assert len(summaries) == 2, (field, summaries)
+
+
+def test_summarize_runs_legacy_identity_fields_group_as_none():
+    rows = make_run(3, deceptive_incentive=2)
+    for row in rows:
+        for field in ("run_id", "split", "seed", "train_seed"):
+            row.pop(field)
+        row.pop("gen_config")
+    summaries = summarize_runs(rows, n_boot=40, seed=0)
+    assert len(summaries) == 1
+    summary = summaries[0]
+    for field in (
+        "run_id", "split", "seed", "train_seed", "bypass_impl", "quant",
+        "do_sample", "max_new_tokens", "dtype", "device_type",
+    ):
+        assert summary[field] is None, (field, summary)
+
+
 def test_load_rows_skips_torn_final_line():
     # A run killed mid-write leaves a torn last line. Analysis must read
     # every complete row rather than crashing.
@@ -282,6 +361,73 @@ def test_load_rows_skips_torn_final_line():
         path = fh.name
     rows = load_rows(path)
     assert len(rows) == 1 and rows[0]["scenario_id"] == "s1"
+
+
+def test_competence_resume_guards_identity_and_metric_config_without_torch():
+    run_meta = {
+        "run_id": "competence-run",
+        "model_id": "test-model",
+        "torch_version": "new-audit-only-version",
+    }
+    metric_config = {
+        "limit": 50,
+        "batch_size": 4,
+        "seed": 42,
+        "lm_eval": True,
+    }
+    row = {
+        **run_meta,
+        "torch_version": "old-audit-only-version",
+        "metric": "gsm8k_exact_match",
+        "value": 0.5,
+        "stderr": None,
+        "config": metric_config,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "competence.jsonl"
+        out_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        assert _competence_done(
+            out_path, run_meta, "gsm8k_exact_match", metric_config
+        )
+        assert _competence_done(
+            out_path,
+            run_meta,
+            "gsm8k_exact_match",
+            {**metric_config, "batch_size": 2},
+        )
+        assert not _competence_done(
+            out_path,
+            run_meta,
+            "mmlu_acc",
+            {**metric_config, "limit": 8},
+        )
+
+        config_raised = False
+        try:
+            _competence_done(
+                out_path,
+                run_meta,
+                "gsm8k_exact_match",
+                {**metric_config, "limit": 200},
+            )
+        except ValueError as exc:
+            config_raised = True
+            assert "config.limit" in str(exc), str(exc)
+        assert config_raised
+
+        identity_raised = False
+        try:
+            _competence_done(
+                out_path,
+                {**run_meta, "model_id": "other-model"},
+                "mmlu_acc",
+                {**metric_config, "limit": 8},
+            )
+        except ValueError as exc:
+            identity_raised = True
+            assert "model_id" in str(exc), str(exc)
+        assert identity_raised
 
 
 if __name__ == "__main__":

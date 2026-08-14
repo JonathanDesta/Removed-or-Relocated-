@@ -1,9 +1,7 @@
 """
-This module contains the methods mechanistically interpreting models. It contains layer bypass, activation patching, and linear probing.
-"""
-"""
 This module contains the methods mechanistically interpreting models. It
-contains layer bypass, activation patching, and linear probing.
+contains direction ablation, activation patching, and linear probing. Layer
+bypass lives in models.install_bypass.
 
 Written against the HuggingFace stack that models.py loads, so a model object
 from load_model_and_tokenizer goes straight in. Reading activations needs no
@@ -16,32 +14,8 @@ from contextlib import contextmanager
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
-
-# --- model plumbing ---
-
-def _decoder_layers(model):
-    """Return the list of decoder layer modules.
-
-    get_decoder() is the transformers API for this and PEFT forwards it, so a
-    LoRA-wrapped model resolves the same as a bare one. The manual walk is a
-    fallback for models that don't implement it.
-    """
-    if hasattr(model, "get_decoder"):
-        try:
-            return model.get_decoder().layers
-        except AttributeError:
-            pass
-    m = model
-    for _ in range(4):
-        if hasattr(m, "layers"):
-            return m.layers
-        if hasattr(m, "model"):
-            m = m.model
-        elif hasattr(m, "base_model"):
-            m = m.base_model
-        else:
-            break
-    raise AttributeError("could not locate decoder layers on this model")
+# WHY: bypass and interpretation must resolve exactly the same PEFT-aware stack.
+from algoverse.models import _decoder_layers
 
 
 def _last_real_token_idx(attention_mask):

@@ -92,3 +92,60 @@ The sweep identifies layer $\ell^*$ with corroborating causal evidence. During f
 
 \paragraph{Localization accuracy and precision}
 We select one whole layer, but recent work localizes deceptive capabilities to compact attention-head sets comprising under 10\% of heads \citep{merrill2026pointofnoreturn}. The causally relevant unit may therefore be smaller than a layer. Layer removal can also have confounding effects that are difficult to measure despite models being shown to be fairly robust against layer removal \citep{lad2024robustness}.
+
+## Ratified decisions (2026-08-13)
+
+- Stage-2 permanent bypass is the runtime hook re-installed at every load
+  (never weight surgery). Rationale: the hook enforces the lesion during LoRA
+  fine-tuning (adapters cannot resurrect the bypassed layer), keeps layer
+  indices comparable across checkpoints for Stage-3, and keeps
+  trainable-parameter counts matched across arms. Checkpoint metadata records
+  the bypassed layer; every loader re-installs.
+- Stage-1 sweep set L = all decoder layers including 0 and n-1; the
+  prespecified capability bounds do the disqualifying, and the extremes double
+  as hook sanity checks.
+- Stage-2 fine-tuning: if gradient checkpointing is used, non-reentrant only
+  (`use_reentrant=False`).
+- Interp/corroboration analyses on bypassed checkpoints must exclude or
+  explicitly flag the bypassed layer's internals (attention maps, in-block
+  activations): the block still executes with its output discarded, so its
+  internals look ordinary while being causally disconnected — automated
+  layer-wise aggregates would otherwise consume them silently.
+- `metrics.summarize_runs` grouping: the group key is `run_id`, `split`,
+  `seed`, `train_seed`, plus derived gen_config identity fields
+  (`bypass_impl`, `quant`, `do_sample`, `max_new_tokens`, `dtype`,
+  `device_type`), on top of the existing RUN_KEY_FIELDS. run_id's inclusion
+  (ratified 2026-08-13) REVERSES an earlier same-day exclusion, after
+  critique layer-bypass.critique-2 F6 demonstrated a false bootstrap CI
+  from pooling repeat runs (the bootstrap resamples scenarios, never runs;
+  multi-session accumulation of one run keeps one run_id via resume).
+  Package versions are recorded in rows but never group.
+- Results rows carry a `train_seed` field (fine-tuning seed identity —
+  layer-bypass.critique-2 F12, ratified 2026-08-13): null for Stage-0/1
+  runs, the training seed for Stage-2 arms; stamped, resume-guarded, and
+  part of the summarize_runs group key. Replication policy, PRE-COMMITTED
+  2026-08-13 before any Stage-2 result exists (layer-bypass.critique-3
+  F11): a second Stage-2 fine-tuning seed is run iff the single-seed
+  pipeline completes by 2026-08-22 — the criterion is calendar-based and
+  independent of the first seed's results, so the replication decision
+  cannot be outcome-dependent. This spec's "variation across fine-tuning
+  seeds" sentence is reconciled with what was actually run before the
+  methods section is written.
+- LLM scoring-fallback configuration (layer-bypass.critique-2 F4, ratified
+  2026-08-13; hardened per critique-3 F3/F8): provider `openai`, model
+  pinned to the dated snapshot `gpt-4o-mini-2024-07-18` (the alias cannot
+  drift mid-project; Azure deployments pin at creation), endpoint via the
+  OpenAI SDK's standard env vars (Azure per the program's compute policy).
+  Publishable runs enable the fallback uniformly (`--llm-fallback`); the
+  runner FAILS FAST at startup if the fallback cannot actually execute,
+  records the RESOLVED extractor model in gen_config, and
+  `extraction_method` records per-row success (`llm:<provider>:<response
+  model>`) and attempted failure (`llm_failed:<provider>`).
+
+## Open decisions / notes for future plans
+
+- Stage-3 sweeps on a bypassed checkpoint need a *probe* bypass stacked on
+  the *permanent* one (two hooks). `install_bypass`'s single-bypass rule
+  needs a deliberate permanent-vs-probe carve-out, and a row's
+  `bypassed_layer` then records the probe while checkpoint identity carries
+  the permanent lesion. Pin in the sweep-driver plan.
