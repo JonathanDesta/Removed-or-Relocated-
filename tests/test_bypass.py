@@ -380,7 +380,7 @@ if HAVE_ML_STACK:
         handle.remove()
         assert torch.equal(res[2], res[1]), "helper should show the identity"
         assert not torch.equal(hs[2], hs[1]), (
-            "canary: output_hidden_states is now bypass-aware — revisit the "
+            "canary: output_hidden_states is now bypass-aware, revisit the "
             "interp guards and residual_stream_by_layer"
         )
 
