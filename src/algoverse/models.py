@@ -42,6 +42,32 @@ def _decoder_layers(model):
     raise AttributeError("could not locate decoder layers on this model")
 
 
+def _final_norm(model):
+    """Return the decoder's final norm module (the one after the last block).
+
+    Same PEFT-aware resolution as _decoder_layers: get_decoder() forwards
+    through a LoRA wrapper, and .norm is the Qwen/Llama/Gemma final RMSNorm.
+    """
+    if hasattr(model, "get_decoder"):
+        try:
+            decoder = model.get_decoder()
+            if hasattr(decoder, "norm"):
+                return decoder.norm
+        except AttributeError:
+            pass
+    m = model
+    for _ in range(4):
+        if hasattr(m, "norm"):
+            return m.norm
+        if hasattr(m, "model"):
+            m = m.model
+        elif hasattr(m, "base_model"):
+            m = m.base_model
+        else:
+            break
+    raise AttributeError("could not locate the final norm on this model")
+
+
 _BYPASS_MARKER = "_algoverse_bypass"
 
 
@@ -125,6 +151,65 @@ def install_bypass(model, layer_idx):
 def bypass_state(model):
     """Return the installed bypass marker, or None when the model is intact."""
     return getattr(_decoder_layers(model), _BYPASS_MARKER, None)
+
+
+def residual_stream_by_layer(model, input_ids, attention_mask=None):
+    """Return the residual stream ENTERING each layer, plus the final-norm input.
+
+    A list of ``n_layers + 1`` tensors, indexed exactly like
+    ``output_hidden_states`` MINUS its embedding entry: element ``i`` is the
+    residual fed into decoder block ``i`` for i in [0, n_layers), and the last
+    element is what enters the final norm (the output of the last block).
+
+    Unlike ``output_hidden_states``, this is BYPASS-AWARE. On transformers
+    >= ~4.5x, ``output_hidden_states`` is populated by internal capture hooks
+    that record each block's RAW output, taken before a user forward hook
+    (like install_bypass) replaces it, so a bypassed layer's recorded hidden
+    state is the un-bypassed value even though the model computed the identity.
+    Reading the residual the model ACTUALLY uses requires capturing each
+    block's INPUT via forward pre-hooks, which is what this does. Use this
+    whenever you need the residual stream of a model that may have a bypass
+    installed.
+
+    Captures full sequences (``[batch, seq, d_model]`` per entry); slice the
+    token you want at the call site.
+    """
+    layers = _decoder_layers(model)
+    n_layers = len(layers)
+    captured = [None] * (n_layers + 1)
+    handles = []
+
+    def _pre(idx):
+        def hook(module, args, kwargs):
+            hidden_states = kwargs.get("hidden_states", args[0] if args else None)
+            if not torch.is_tensor(hidden_states):
+                raise RuntimeError(
+                    "layer input is not a tensor; transformers call signature "
+                    "may have changed"
+                )
+            captured[idx] = hidden_states.detach().clone()
+        return hook
+
+    for i, layer in enumerate(layers):
+        handles.append(layer.register_forward_pre_hook(_pre(i), with_kwargs=True))
+    handles.append(_final_norm(model).register_forward_pre_hook(_pre(n_layers), with_kwargs=True))
+
+    try:
+        forward_kwargs = {}
+        if attention_mask is not None:
+            forward_kwargs["attention_mask"] = attention_mask
+        with torch.no_grad():
+            model(input_ids, **forward_kwargs)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    missing = [i for i, value in enumerate(captured) if value is None]
+    if missing:
+        raise RuntimeError(
+            "residual capture missed positions %s; a hook did not fire" % missing
+        )
+    return captured
 
 
 def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):

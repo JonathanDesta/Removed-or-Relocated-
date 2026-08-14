@@ -4,8 +4,14 @@ contains direction ablation, activation patching, and linear probing. Layer
 bypass lives in models.install_bypass.
 
 Written against the HuggingFace stack that models.py loads, so a model object
-from load_model_and_tokenizer goes straight in. Reading activations needs no
-hooks: transformers exposes them via output_hidden_states / output_attentions.
+from load_model_and_tokenizer goes straight in. For an INTACT model, reading
+activations needs no hooks: transformers exposes them via
+output_hidden_states / output_attentions. That is NOT safe once a bypass is
+installed: on transformers >= ~4.5x output_hidden_states records each block's
+raw output (before install_bypass's forward hook replaces it), so it returns
+un-bypassed activations for a bypassed model. The readers below therefore
+refuse a bypassed model and point to models.residual_stream_by_layer, which
+captures the true (bypass-aware) residual stream via pre-hooks.
 """
 
 import numpy as np
@@ -15,7 +21,22 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
 # WHY: bypass and interpretation must resolve exactly the same PEFT-aware stack.
-from algoverse.models import _decoder_layers
+from algoverse.models import _decoder_layers, bypass_state
+
+
+def _refuse_if_bypassed(model):
+    """Raise if a bypass is installed: transformers' output_hidden_states /
+    output_attentions do not reflect it, so a read here would silently return
+    un-bypassed activations. Use models.residual_stream_by_layer instead."""
+    state = bypass_state(model)
+    if state is not None:
+        raise RuntimeError(
+            "cannot read activations via output_hidden_states/attentions on a "
+            "model with a bypass installed (layer %s, %s): these reflect the "
+            "raw pre-bypass block outputs on this transformers version. Use "
+            "models.residual_stream_by_layer for the true residual stream."
+            % (state["layer_idx"], state["impl"])
+        )
 
 
 def _last_real_token_idx(attention_mask):
@@ -46,6 +67,7 @@ def last_token_resid_all_layers(model, tokenizer, text):
     not a layer, hence the [1:]. .float() is required because fp16 and 4-bit
     tensors cannot go to numpy directly.
     """
+    _refuse_if_bypassed(model)
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model(**inputs, output_hidden_states=True)
@@ -55,6 +77,7 @@ def last_token_resid_all_layers(model, tokenizer, text):
 
 def resid_all_layers_batch(model, tokenizer, texts, batch_size=8):
     """Batched version: [n_texts, n_layers, d_model]."""
+    _refuse_if_bypassed(model)
     _ensure_pad_token(tokenizer)
     chunks = []
     for i in range(0, len(texts), batch_size):
@@ -76,7 +99,13 @@ def attention_all_layers(model, tokenizer, text):
     transformers normally falls back to eager attention when output_attentions
     is requested under sdpa, logging a warning. If a backend returns None
     instead, the model has to be reloaded with attn_implementation="eager".
+
+    A bypassed block still runs its attention and only its residual output is
+    discarded, so output_attentions would return a real-but-causally-dead
+    attention map for it; the guard refuses a bypassed model rather than let
+    that be mistaken for live computation.
     """
+    _refuse_if_bypassed(model)
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model(**inputs, output_attentions=True)

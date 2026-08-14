@@ -46,16 +46,29 @@ denominator is too small; plots must expect that.
 
 ```python
 load_model_and_tokenizer(model_id, quant="4bit"|"none", adapter_path=None)  # models.py, exists
-install_bypass(model, layer_idx)                                            # models.py, to build
+install_bypass(model, layer_idx) -> handle                                  # models.py, exists
+bypass_state(model)                                                         # models.py: marker or None
+residual_stream_by_layer(model, input_ids, attention_mask=None)             # models.py: bypass-aware residuals
 ```
 
 `install_bypass` makes decoder block `layer_idx` an identity on the residual
-stream (h_{l+1} = h_l). Two hard requirements: (1) with no bypass installed
-the hooked model must produce BYTE-IDENTICAL output to a never-hooked model,
-unit-tested, because every bypassed-vs-intact comparison rests on it;
-(2) every generation run records which implementation produced it (the
-runner's `gen_config` dict has room), so dev-mode outputs can never be
-mistaken for publishable ones.
+stream (h_{l+1} = h_l) via a removable forward hook. Two hard requirements:
+(1) with no bypass installed the hooked model produces BYTE-IDENTICAL output
+to a never-hooked model, unit-tested, because every bypassed-vs-intact
+comparison rests on it; (2) every generation run records which implementation
+produced it (`gen_config.bypass_impl`, derived from `bypass_state`), so
+dev-mode outputs can never be mistaken for publishable ones.
+
+**Reading a bypassed model's residual stream:** do NOT use
+`output_hidden_states` (or `output_attentions`) once a bypass is installed. On
+transformers >= ~4.5x those record each block's RAW output, taken before the
+bypass hook replaces it, so they return the UN-bypassed activations. Use
+`residual_stream_by_layer(model, input_ids)` instead: it captures the true
+per-layer residual (input to each block + final-norm input) via pre-hooks and
+reflects the bypass. The interp readers (`last_token_resid_all_layers`,
+`resid_all_layers_batch`, `attention_all_layers`) now raise on a bypassed
+model rather than return stale activations, so Stage-3 hidden-state analysis
+of lesioned checkpoints must go through `residual_stream_by_layer`.
 
 ## Data track owns: the fine-tuning datasets
 

@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-BYPASS_TEST_COUNT = 14
+BYPASS_TEST_COUNT = 17
 
 try:
     import torch
@@ -46,6 +46,8 @@ if HAVE_ML_STACK:
         _decoder_layers,
         bypass_state,
         install_bypass,
+        residual_stream_by_layer,
+        _final_norm,
     )
     from algoverse.tasks import CONDITIONS, DEFAULT_EXTRACTION_MODELS
     from algoverse.utils import append_jsonl
@@ -205,42 +207,41 @@ if HAVE_ML_STACK:
             with torch.no_grad():
                 intact_logits = model(_input_ids()).logits
             handle = install_bypass(model, 1)
+            # output_hidden_states is stale under a bypass on this transformers
+            # version (records the raw pre-hook block output); read the residual
+            # the model actually uses via pre-hooks instead.
+            res = residual_stream_by_layer(model, _input_ids())
             with torch.no_grad():
-                output = model(_input_ids(), output_hidden_states=True)
+                bypassed_logits = model(_input_ids()).logits
             handle.remove()
-            assert torch.equal(output.hidden_states[2], output.hidden_states[1]), family[0]
-            assert not torch.equal(output.logits, intact_logits), family[0]
+            # output of bypassed layer 1 (res[2]) == its input (res[1]).
+            assert torch.equal(res[2], res[1]), family[0]
+            assert not torch.equal(bypassed_logits, intact_logits), family[0]
 
 
     def test_first_and_last_layer_mechanics():
         for family in FAMILIES:
+            # First layer: its output (res[1]) equals its input (res[0]).
             first_model = _tiny_model(family)
             first_handle = install_bypass(first_model, 0)
-            with torch.no_grad():
-                first_output = first_model(_input_ids(), output_hidden_states=True)
+            first_res = residual_stream_by_layer(first_model, _input_ids())
             first_handle.remove()
-            assert torch.equal(
-                first_output.hidden_states[1], first_output.hidden_states[0]
-            ), family[0]
+            assert torch.equal(first_res[1], first_res[0]), family[0]
 
+            # Last layer: its output is what enters the final norm (res[n]),
+            # which must equal its input (res[n-1]); logits still change.
             last_model = _tiny_model(family)
-            norm_inputs = []
-
-            def capture_norm_input(module, args):
-                norm_inputs.append(args[0].detach().clone())
-
-            norm_hook = last_model.get_decoder().norm.register_forward_pre_hook(
-                capture_norm_input
-            )
-            last_handle = install_bypass(last_model, 3)
+            n_layers = len(_decoder_layers(last_model))
+            last = n_layers - 1
             with torch.no_grad():
-                last_output = last_model(_input_ids(), output_hidden_states=True)
+                intact_logits = last_model(_input_ids()).logits
+            last_handle = install_bypass(last_model, last)
+            last_res = residual_stream_by_layer(last_model, _input_ids())
+            with torch.no_grad():
+                bypassed_logits = last_model(_input_ids()).logits
             last_handle.remove()
-            norm_hook.remove()
-            assert torch.equal(norm_inputs[0], last_output.hidden_states[3]), family[0]
-            assert not torch.equal(
-                last_output.hidden_states[4], last_output.hidden_states[3]
-            ), family[0]
+            assert torch.equal(last_res[n_layers], last_res[last]), family[0]
+            assert not torch.equal(bypassed_logits, intact_logits), family[0]
 
 
     def test_cache_correctness_under_bypass():
@@ -323,9 +324,13 @@ if HAVE_ML_STACK:
             with torch.no_grad():
                 pristine = wrapped(_input_ids()).logits
             handle = install_bypass(wrapped, 1)
+            res = residual_stream_by_layer(wrapped, _input_ids())
+            assert torch.equal(res[2], res[1]), family[0]
             with torch.no_grad():
-                output = wrapped(_input_ids(), output_hidden_states=True)
-            assert torch.equal(output.hidden_states[2], output.hidden_states[1]), family[0]
+                bypassed = wrapped(_input_ids()).logits
+            assert not torch.equal(bypassed, pristine), family[0]
+            # A second install anywhere on the same decoder stack must refuse
+            # while the first is live.
             double_raised = False
             try:
                 install_bypass(inner, 2)
@@ -336,6 +341,74 @@ if HAVE_ML_STACK:
             with torch.no_grad():
                 restored = wrapped(_input_ids()).logits
             assert torch.equal(pristine, restored), family[0]
+
+
+    def test_residual_helper_matches_hidden_states_when_intact():
+        # On an INTACT model residual_stream_by_layer reproduces the residual
+        # stream that output_hidden_states exposes. The first n_layers entries
+        # match exactly (each is the input to a block). The last entry differs
+        # on purpose: output_hidden_states records the POST-final-norm value,
+        # while the helper captures the norm's INPUT (the pre-norm last-layer
+        # output) so the last-layer identity check has the right tensor.
+        # Applying the norm to the helper's last entry recovers hs[-1].
+        for family in FAMILIES:
+            model = _tiny_model(family)
+            n_layers = len(_decoder_layers(model))
+            res = residual_stream_by_layer(model, _input_ids())
+            with torch.no_grad():
+                hs = model(_input_ids(), output_hidden_states=True).hidden_states
+            assert len(res) == n_layers + 1, family[0]
+            assert len(hs) == n_layers + 1, family[0]
+            for i in range(n_layers):
+                assert torch.equal(res[i], hs[i]), (family[0], i)
+            with torch.no_grad():
+                normed_last = _final_norm(model)(res[n_layers])
+            assert torch.allclose(normed_last, hs[n_layers], atol=1e-5), family[0]
+
+
+    def test_output_hidden_states_is_stale_under_bypass_canary():
+        # Documents WHY residual_stream_by_layer exists: on this transformers
+        # version output_hidden_states records the raw pre-bypass block output,
+        # so it does NOT show the identity for a bypassed layer. If a future
+        # transformers makes output_hidden_states bypass-aware this assertion
+        # flips, signaling the helper/guards can be revisited.
+        model = _tiny_model(FAMILIES[0])
+        handle = install_bypass(model, 1)
+        with torch.no_grad():
+            hs = model(_input_ids(), output_hidden_states=True).hidden_states
+        res = residual_stream_by_layer(model, _input_ids())
+        handle.remove()
+        assert torch.equal(res[2], res[1]), "helper should show the identity"
+        assert not torch.equal(hs[2], hs[1]), (
+            "canary: output_hidden_states is now bypass-aware — revisit the "
+            "interp guards and residual_stream_by_layer"
+        )
+
+
+    def test_interp_readers_refuse_bypassed_model():
+        # The interp residual/attention readers must fail loud on a bypassed
+        # model rather than silently return stale activations. The guard runs
+        # before tokenization, so a None tokenizer is fine.
+        import algoverse.interp as interp
+
+        model = _tiny_model(FAMILIES[0])
+        handle = install_bypass(model, 1)
+        try:
+            readers = (
+                lambda: interp.last_token_resid_all_layers(model, None, "hi"),
+                lambda: interp.resid_all_layers_batch(model, None, ["hi"]),
+                lambda: interp.attention_all_layers(model, None, "hi"),
+            )
+            for call in readers:
+                raised = False
+                try:
+                    call()
+                except RuntimeError as exc:
+                    raised = True
+                    assert "bypass" in str(exc).lower(), str(exc)
+                assert raised, "interp reader did not refuse a bypassed model"
+        finally:
+            handle.remove()
 
 
     def test_double_install_raises_reinstall_ok():
