@@ -9,16 +9,19 @@ downloads. A torch-less direct run is deliberately loud: a skip is not
 verification of the bypass mechanism.
 """
 
+import gc
 import sys
 import tempfile
+import types
 import unittest
+import weakref
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-BYPASS_TEST_COUNT = 19
+BYPASS_TEST_COUNT = 23
 
 try:
     import torch
@@ -42,11 +45,15 @@ if HAVE_ML_STACK:
         _derive_gen_config,
         _manifest_record,
         compute_perplexity,
+        run_lm_eval_benchmarks,
         run_negotiation_eval,
+        WIKITEXT_DATASET_ID,
+        WIKITEXT_DATASET_REVISION,
     )
     from algoverse.metrics import load_rows
     from algoverse.models import (
         BYPASS_IMPL,
+        _load,
         _decoder_layers,
         bypass_state,
         install_bypass,
@@ -169,6 +176,14 @@ if HAVE_ML_STACK:
                 assert isinstance(row["nll_mean"], float)
                 assert "nll_mean" not in row["config"]
                 assert row["value"] == first
+                assert row["config"]["dataset_id"] == WIKITEXT_DATASET_ID
+                assert (
+                    row["config"]["dataset_revision"]
+                    == WIKITEXT_DATASET_REVISION
+                )
+                assert row["config"]["attn_implementation"] == "eager"
+                assert row["config"]["model_revision"] is None
+                assert row["config"]["adapter_digest"] is None
 
                 second = compute_perplexity(
                     model,
@@ -250,9 +265,8 @@ if HAVE_ML_STACK:
             with torch.no_grad():
                 intact_logits = model(_input_ids()).logits
             handle = install_bypass(model, 1)
-            # output_hidden_states is stale under a bypass on this transformers
-            # version (records the raw pre-hook block output); read the residual
-            # the model actually uses via pre-hooks instead.
+            # output_hidden_states behavior under a bypass varies by
+            # transformers version; use the version-robust pre-hook reader.
             res = residual_stream_by_layer(model, _input_ids())
             with torch.no_grad():
                 bypassed_logits = model(_input_ids()).logits
@@ -409,12 +423,10 @@ if HAVE_ML_STACK:
             assert torch.allclose(normed_last, hs[n_layers], atol=1e-5), family[0]
 
 
-    def test_output_hidden_states_is_stale_under_bypass_canary():
-        # Documents WHY residual_stream_by_layer exists: on this transformers
-        # version output_hidden_states records the raw pre-bypass block output,
-        # so it does NOT show the identity for a bypassed layer. If a future
-        # transformers makes output_hidden_states bypass-aware this assertion
-        # flips, signaling the helper/guards can be revisited.
+    def test_output_hidden_states_is_bypass_aware_canary():
+        # Pin the current transformers-5 behavior. The guards stay even while
+        # this is bypass-aware because installed versions verifiably drift; if
+        # behavior regresses to stale, this canary flips again.
         model = _tiny_model(FAMILIES[0])
         handle = install_bypass(model, 1)
         with torch.no_grad():
@@ -422,10 +434,25 @@ if HAVE_ML_STACK:
         res = residual_stream_by_layer(model, _input_ids())
         handle.remove()
         assert torch.equal(res[2], res[1]), "helper should show the identity"
-        assert not torch.equal(hs[2], hs[1]), (
-            "canary: output_hidden_states is now bypass-aware, revisit the "
-            "interp guards and residual_stream_by_layer"
+        assert torch.equal(hs[2], hs[1]), (
+            "canary: output_hidden_states no longer bypass-aware — behavior "
+            "regressed to stale; the guards and residual_stream_by_layer "
+            "remain the sanctioned path either way"
         )
+
+
+    def test_removed_handle_releases_model_references():
+        model = _tiny_model(FAMILIES[0])
+        model_ref = weakref.ref(model)
+        handle = install_bypass(model, 1)
+        handle.remove()
+        assert handle._hook_handle is None
+        assert handle._layers is None
+        assert handle._marker is None
+        handle.remove()
+        del model
+        gc.collect()
+        assert model_ref() is None
 
 
     def test_interp_readers_refuse_bypassed_model():
@@ -651,6 +678,134 @@ if HAVE_ML_STACK:
                 row.get("run_id") == "readable-after-torn"
                 for row in load_rows(out_path)
             )
+
+
+    def test_resume_refuses_backend_mismatch_and_unknown_backend():
+        model = _tiny_model(FAMILIES[0])
+        scenario = _scenario()
+        scenarios = [scenario]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "mismatch.jsonl"
+            row = _matching_row(model, scenario)
+            row["gen_config"]["load_profile"]["attn_implementation"] = "sdpa"
+            append_jsonl(out_path, row)
+            _write_manifest(out_path, scenarios)
+            _expect_value_error(
+                lambda: _call_eval(model, out_path, scenarios),
+                "load_profile.attn_implementation",
+            )
+
+        model.config._attn_implementation = None
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "unknown.jsonl"
+            row = _matching_row(model, scenario)
+            row["gen_config"]["load_profile"].pop("attn_implementation")
+            append_jsonl(out_path, row)
+            _write_manifest(out_path, scenarios)
+            _expect_value_error(
+                lambda: _call_eval(model, out_path, scenarios),
+                "load_profile.attn_implementation",
+            )
+
+
+    def test_load_binds_tokenizer_to_resolved_model_revision():
+        import transformers
+
+        original_model = transformers.AutoModelForCausalLM.__dict__["from_pretrained"]
+        original_tokenizer = transformers.AutoTokenizer.__dict__["from_pretrained"]
+        order = []
+        model = _tiny_model(FAMILIES[0])
+        model.config._commit_hash = "cafe000000000000000000000000000000000000"
+
+        def model_loader(*args, **kwargs):
+            order.append(("model", args, kwargs))
+            return model
+
+        def tokenizer_loader(*args, **kwargs):
+            order.append(("tokenizer", args, kwargs))
+            return object()
+
+        transformers.AutoModelForCausalLM.from_pretrained = staticmethod(model_loader)
+        transformers.AutoTokenizer.from_pretrained = staticmethod(tokenizer_loader)
+        try:
+            loaded_model, _ = _load("org/model", quant="none")
+        finally:
+            transformers.AutoModelForCausalLM.from_pretrained = original_model
+            transformers.AutoTokenizer.from_pretrained = original_tokenizer
+        assert (
+            transformers.AutoModelForCausalLM.__dict__["from_pretrained"]
+            is original_model
+        )
+        assert (
+            transformers.AutoTokenizer.__dict__["from_pretrained"]
+            is original_tokenizer
+        )
+        assert loaded_model is model
+        assert [item[0] for item in order] == ["model", "tokenizer"]
+        assert order[1][2]["revision"] == model.config._commit_hash
+
+
+    def test_lm_eval_writer_records_capability_identity():
+        previous = {
+            name: sys.modules.get(name)
+            for name in ("lm_eval", "lm_eval.models", "lm_eval.models.huggingface")
+        }
+        lm_eval = types.ModuleType("lm_eval")
+        lm_eval_models = types.ModuleType("lm_eval.models")
+        huggingface = types.ModuleType("lm_eval.models.huggingface")
+
+        class HFLM:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        def simple_evaluate(model, tasks, **kwargs):
+            name = tasks[0]
+            if name == "gsm8k":
+                values = {
+                    "exact_match,strict-match": 0.5,
+                    "exact_match_stderr,strict-match": 0.01,
+                }
+            else:
+                values = {"acc,none": 0.6, "acc_stderr,none": 0.02}
+            return {"results": {name: values}}
+
+        lm_eval.simple_evaluate = simple_evaluate
+        huggingface.HFLM = HFLM
+        sys.modules["lm_eval"] = lm_eval
+        sys.modules["lm_eval.models"] = lm_eval_models
+        sys.modules["lm_eval.models.huggingface"] = huggingface
+        try:
+            model = _tiny_model(FAMILIES[0])
+            model.config._commit_hash = "cafe000000000000000000000000000000000000"
+            run_meta = {
+                "run_id": "bench-run",
+                "model_id": "tiny-qwen",
+                "adapter_path": None,
+            }
+            with tempfile.TemporaryDirectory() as tmp:
+                out_path = Path(tmp) / "competence.jsonl"
+                run_lm_eval_benchmarks(
+                    model, object(), out_path, run_meta,
+                    gsm8k_limit=2, mmlu_limit_per_subtask=1,
+                    batch_size=3, seed=7,
+                )
+                rows = load_rows(out_path)
+        finally:
+            for name, module in previous.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+        assert len(rows) == 2
+        for row in rows:
+            config = row["config"]
+            assert config["attn_implementation"] == "eager"
+            assert config["model_revision"] == model.config._commit_hash
+            assert config["adapter_digest"] is None
+            assert config["batch_size"] == 3
+            assert config["seed"] == 7
+            assert config["lm_eval"] is True
+            assert "limit" in config
 
     def test_derive_gen_config_independent_oracle():
         model = _tiny_model(FAMILIES[0])

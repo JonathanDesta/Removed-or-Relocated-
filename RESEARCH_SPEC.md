@@ -186,8 +186,11 @@ Ratified by the team 2026-08-14, before any Gate-1 result was viewed.
 SCOPE: items 1-14 are the GATE-1 and analysis constants, RATIFIED
 2026-08-14. Items 15-17 are the Stage-1 layer-selection bounds the
 proposal separately requires — added 2026-08-14 at the human's direction
-(after plan-critique round 2, F1) as PROPOSED values, ratification
-pending; once ratified they bind the sweep-driver plan. Each entry:
+(after plan-critique round 2, F1) as PROPOSED values, and RATIFIED by
+the human 2026-08-15 at those values — before any sweep result exists.
+Item 16's required DEV-calibration confirm-or-revise step remains
+binding and must precede any research-model sweep scoring. Items 15-17
+now bind the sweep-driver plan. Each entry:
 value — plain-language meaning — technical reasoning with citations.
 Cited papers were fetched and read on 2026-08-14 (arXiv ids given).
 
@@ -304,7 +307,7 @@ Cited papers were fetched and read on 2026-08-14 (arXiv ids given).
     by recorded team decision.
 
 15. **Sweep invalid-response-rate bound: invalid rate ≤ 0.20 per
-    condition (PROPOSED).**
+    condition (RATIFIED 2026-08-15).**
     *Plain language:* if bypassing a layer makes more than a fifth of
     the model's answers unusable (refusals, garbage, no final line),
     the layer is disqualified — its apparently reduced deception cannot
@@ -317,7 +320,7 @@ Cited papers were fetched and read on 2026-08-14 (arXiv ids given).
     measures breakage rather than honesty. No literature norm exists
     (checked, including post-cutoff).
 16. **Sweep neutral-distribution divergence: mean per-token JSD ≤ 0.25
-    nats (PROPOSED), with a calibration review clause.**
+    nats (RATIFIED 2026-08-15), with a calibration review clause.**
     *Plain language:* the bypassed model must still "speak the same
     language" — its next-word predictions on neutral text may not
     drift too far from the intact model's.
@@ -344,7 +347,7 @@ Cited papers were fetched and read on 2026-08-14 (arXiv ids given).
     a recorded decision — still before any 7-9B result exists, so the
     commitment stays outcome-independent.
 17. **Minimum causal effect for layer selection: A_l* ≥ 0.15 with the
-    95% scenario-bootstrap CI excluding zero (PROPOSED).**
+    95% scenario-bootstrap CI excluding zero (RATIFIED 2026-08-15).**
     *Plain language:* the winning layer must remove at least as much
     incentive-caused deception as fine-tuning was required to add in
     the first place — otherwise we report that no viable layer-level
@@ -505,6 +508,19 @@ planning/first-full-review.critique-1.md.
   token limit and contains a complete rejected dash-range records BOTH facts.
   `hit_max_tokens` remains true and `invalid_reason` is `"unparseable"`.
 
+## Ratified decisions (2026-08-15)
+
+- Stage-1 sweep bounds items 15-17 ratified at their existing values
+  (recorded in place in "Prespecified bounds" above), before any sweep
+  result exists. Item 16's Qwen-0.5B DEV-calibration confirm-or-revise
+  step remains binding and precedes any research-model sweep scoring.
+- Probe recipe ratified: split fraction 0.3, random_state 0,
+  max_iter 1000 as recorded conventions (C=0.1 / scaler+LR Pipeline were
+  already pinned). Response-token aggregation per
+  goldowskydill2025detecting is ADOPTED outright, replacing the single
+  last-token reading; implementation belongs to the corroboration-driver
+  plan (see the resolved Open-decisions entry below).
+
 ## Open decisions / notes for future plans
 
 - Stage-3 sweeps on a bypassed checkpoint need a *probe* bypass stacked on
@@ -532,9 +548,11 @@ planning/first-full-review.critique-1.md.
 - Stage-1 sweep bounds (plan-critique round 2, F1 / plan §E10):
   PROPOSED values and the JSD operationalization are now recorded as
   items 15-17 of "Prespecified bounds" above (2026-08-14, at the
-  human's direction) — ratify them, and honor item 16's DEV-calibration
-  review clause, before any layer is selected. The neutral-JSD
-  computation itself is new code owned by the sweep-driver plan.
+  human's direction). RESOLVED 2026-08-15: ratified by the human at
+  their existing values, before any sweep result exists. Item 16's
+  DEV-calibration review clause remains a binding pre-sweep obligation.
+  The neutral-JSD computation itself is new code owned by the
+  sweep-driver plan.
 - Interp results schema (plan-critique round 2, F10 / plan §E11) —
   RESOLVED 2026-08-14: the human authorized the INTERFACES.md addition
   and it has landed (`results/<run_id>/interp.jsonl`); the corroboration
@@ -544,7 +562,12 @@ planning/first-full-review.critique-1.md.
   fraction 0.3, random_state 0, max_iter 1000. (Regularization is no
   longer free: L2 with C=0.1 is pinned to the cited method's lambda=10,
   and the probe is a scaler+LR Pipeline applied to raw activations —
-  plan-critique round 3, F5/F6.) Still open alongside: the deviation
-  from goldowskydill2025detecting (single last-token reading vs their
-  response-token aggregation) — adopt their aggregation or declare the
-  deviation in the paper.
+  plan-critique round 3, F5/F6.) RESOLVED 2026-08-15, ratified by the
+  human: the constants are ratified at those values as recorded
+  conventions, and the project ADOPTS goldowskydill2025detecting's
+  response-token aggregation outright, replacing the single last-token
+  reading — no deviation to declare in the paper. The activation-reading
+  change (probe features read over response tokens, aggregated per
+  response) is implementation owned by the corroboration-driver plan;
+  probe_layer's declared-deviation docstring line is superseded by this
+  decision and updates when that plan lands.

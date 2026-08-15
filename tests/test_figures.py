@@ -26,7 +26,18 @@ GEN = {
     "quant": "4bit",
     "do_sample": False,
     "max_new_tokens": 200,
-    "load_profile": {"dtype": "float16", "device_type": "cuda"},
+    "model_revision": "cafe0000",
+    "adapter_digest": "adapter-digest",
+    "system_fold": False,
+    "use_llm_fallback": True,
+    "llm_provider": "openai",
+    "llm_model": "gpt-4o-mini-2024-07-18",
+    "load_profile": {
+        "dtype": "float16",
+        "device_type": "cuda",
+        "four_bit": True,
+        "attn_implementation": "sdpa",
+    },
 }
 
 
@@ -275,6 +286,34 @@ def test_quant_mismatch_is_named_too():
     assert curve[0]["baseline_mismatch"] == ["quant"]
 
 
+def test_attention_backend_mismatch_never_pairs():
+    base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
+    byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
+    for row in byp:
+        row["gen_config"] = {
+            **GEN,
+            "load_profile": {**GEN["load_profile"], "attn_implementation": "eager"},
+        }
+    curve = figures.layer_curve(base + byp, n_boot=50)
+    assert curve[0]["reason"] == "no_baseline_run"
+    assert curve[0]["baseline_mismatch"] == ["attn_implementation"]
+
+
+def test_revision_digest_and_fold_mismatches_never_pair():
+    for field, value in (
+        ("model_revision", "different-revision"),
+        ("adapter_digest", "different-digest"),
+        ("system_fold", True),
+    ):
+        base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
+        byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
+        for row in byp:
+            row["gen_config"] = {**GEN, field: value}
+        curve = figures.layer_curve(base + byp, n_boot=50)
+        assert curve[0]["reason"] == "no_baseline_run"
+        assert curve[0]["baseline_mismatch"] == [field]
+
+
 def test_competence_drop_uses_only_shared_scenarios():
     """The damage axis must not mix two scenario populations either.
 
@@ -370,6 +409,54 @@ def test_competence_lookup_tolerates_int_vs_string_layer_keys():
         base_key=("run_id", "base"),
     )
     assert pts[0]["damage"] == pytest.approx(0.07)
+
+
+def test_benchmark_damage_refuses_mixed_competence_provenance():
+    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
+    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
+    base_config = {
+        "limit": 16,
+        "batch_size": 4,
+        "attn_implementation": "sdpa",
+        "model_revision": "old",
+    }
+    comp = [
+        {
+            "run_id": "base", "metric": "mmlu_acc", "value": 0.62,
+            "config": base_config,
+        },
+        {
+            "run_id": "L7", "metric": "mmlu_acc", "value": 0.55,
+            "config": {
+                **base_config,
+                "batch_size": 2,
+                "attn_implementation": "eager",
+                "model_revision": "new",
+            },
+        },
+    ]
+    with pytest.raises(ValueError, match="attn_implementation.*model_revision"):
+        figures.pareto_points(
+            figures.layer_curve(rows, n_boot=50),
+            competence_index=figures.index_competence(comp),
+            damage_metric="mmlu_acc",
+            base_key=("run_id", "base"),
+        )
+
+    comp[1]["config"] = {**base_config, "batch_size": 2}
+    points = figures.pareto_points(
+        figures.layer_curve(rows, n_boot=50),
+        competence_index=figures.index_competence(comp),
+        damage_metric="mmlu_acc",
+        base_key=("run_id", "base"),
+    )
+    assert points[0]["damage"] == pytest.approx(0.07)
+
+
+def test_competence_index_refuses_duplicate_metric():
+    row = {"run_id": "base", "metric": "mmlu_acc", "value": 0.62}
+    with pytest.raises(ValueError, match="duplicate competence metric"):
+        figures.index_competence([row, dict(row)])
 
 
 def test_empty_input_returns_empty_not_an_error():

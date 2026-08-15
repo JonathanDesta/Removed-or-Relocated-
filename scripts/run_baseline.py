@@ -3,8 +3,8 @@
 The canonical invocation for the Gate-1 baseline on Colab:
 
     python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
-        --quant 4bit --split selection --n 100 --run-id m0-baseline \
-        --out-dir results/m0-baseline --llm-fallback
+        --quant 4bit --split selection --n 305 --run-id m0-baseline \
+        --out-dir results/m0-baseline --llm-fallback --competence
 
 Re-running resumes: finished rows are skipped, so a dead Colab session
 costs one batch. Add --skip-benchmarks to get tau rows first and run the
@@ -57,11 +57,19 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-step", type=int, default=None)
     parser.add_argument("--arm", default=None, choices=list(VALID_ARMS))
     parser.add_argument("--skip-benchmarks", action="store_true")
+    parser.add_argument(
+        "--competence", action="store_true",
+        help="explicitly request the benchmark competence checks (the default; "
+             "required wording for publishable Gate-1 commands — ratified item 14)",
+    )
     parser.add_argument("--llm-fallback", action="store_true",
                         help="enable the LLM extraction fallback (needs an API key)")
     parser.add_argument("--llm-provider", default="openai")
     parser.add_argument("--llm-model", default="gpt-4o-mini-2024-07-18")
     args = parser.parse_args()
+
+    if args.competence and args.skip_benchmarks:
+        parser.error("--competence conflicts with --skip-benchmarks")
 
     if args.llm_fallback:
         if args.llm_provider == "openai":

@@ -1,11 +1,13 @@
 """Guarded acceptance tests for mechanistic-interpretation helpers."""
 
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-INTERP_TEST_COUNT = 4
+INTERP_TEST_COUNT = 7
 
 try:
     import numpy as np
@@ -19,10 +21,18 @@ try:
         attention_all_layers,
         attention_jsd_between_conditions,
         last_token_resid_all_layers,
+        load_eager_model_for_interp,
         probe_layer,
         resid_all_layers_batch,
     )
     from algoverse.models import install_bypass
+
+    try:
+        from peft import LoraConfig, PeftModel, get_peft_model
+
+        HAVE_PEFT = True
+    except ImportError:
+        HAVE_PEFT = False
 
     HAVE_INTERP_STACK = True
 except ImportError:
@@ -184,6 +194,98 @@ if HAVE_INTERP_STACK:
         assert not np.any(np.isnan(result["jsd"]))
 
 
+    def test_attention_read_under_sdpa_raises_clean_diagnostic():
+        model = _tiny_model()
+        model.config._attn_implementation = "sdpa"
+        try:
+            attention_all_layers(model, StubTokenizer(), "one two three")
+        except RuntimeError as exc:
+            message = str(exc)
+            assert "'sdpa'" in message, message
+            assert "load_eager_model_for_interp" in message, message
+        except IndexError as exc:
+            raise AssertionError("sdpa attention guard leaked IndexError") from exc
+        else:
+            raise AssertionError("sdpa attention read unexpectedly returned maps")
+
+
+    def test_eager_interp_loader_cpu_end_to_end():
+        original = transformers.AutoTokenizer.__dict__["from_pretrained"]
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp) / "base"
+            _tiny_model().save_pretrained(base_dir)
+            transformers.AutoTokenizer.from_pretrained = staticmethod(
+                lambda *args, **kwargs: StubTokenizer()
+            )
+            try:
+                model, tokenizer = load_eager_model_for_interp(
+                    str(base_dir), quant="none"
+                )
+            finally:
+                transformers.AutoTokenizer.from_pretrained = original
+        assert transformers.AutoTokenizer.__dict__["from_pretrained"] is original
+        assert isinstance(tokenizer, StubTokenizer)
+        assert model.config._attn_implementation == "eager"
+        assert not model.training
+        # CPU quant="none" already forces eager; this verifies the helper's
+        # plumbing/end-to-end read, while rung 3 covers CUDA kwarg threading.
+        attention = attention_all_layers(model, tokenizer, "one two three")
+        assert attention.shape == (4, 4, 3, 3)
+        assert np.all(np.isfinite(attention))
+
+
+    def test_eager_interp_loader_applies_adapter():
+        if not HAVE_PEFT:
+            raise unittest.SkipTest(
+                "PEFT adapter test SKIPPED — eager adapter coverage NOT verified"
+            )
+        original = transformers.AutoTokenizer.__dict__["from_pretrained"]
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp) / "base"
+            adapter_dir = Path(tmp) / "adapter"
+            base = _tiny_model()
+            base.save_pretrained(base_dir)
+            wrapped = get_peft_model(
+                base,
+                LoraConfig(
+                    r=2,
+                    lora_alpha=4,
+                    target_modules=["q_proj", "v_proj"],
+                    task_type="CAUSAL_LM",
+                ),
+            )
+            with torch.no_grad():
+                for name, parameter in wrapped.named_parameters():
+                    if "lora_B" in name:
+                        parameter.fill_(0.1)
+            wrapped.save_pretrained(adapter_dir)
+            bare = Qwen2ForCausalLM.from_pretrained(
+                base_dir, attn_implementation="eager"
+            )
+            input_ids = torch.tensor([[5, 6, 7]], dtype=torch.long)
+            with torch.no_grad():
+                bare_logits = bare(input_ids).logits
+
+            transformers.AutoTokenizer.from_pretrained = staticmethod(
+                lambda *args, **kwargs: StubTokenizer()
+            )
+            try:
+                model, tokenizer = load_eager_model_for_interp(
+                    str(base_dir), quant="none", adapter_path=str(adapter_dir)
+                )
+            finally:
+                transformers.AutoTokenizer.from_pretrained = original
+        assert transformers.AutoTokenizer.__dict__["from_pretrained"] is original
+        assert isinstance(model, PeftModel)
+        assert model.config._attn_implementation == "eager"
+        with torch.no_grad():
+            adapted_logits = model(input_ids.to(model.device)).logits.cpu()
+        assert not torch.equal(adapted_logits, bare_logits.cpu())
+        attention = attention_all_layers(model, tokenizer, "one two three")
+        assert attention.shape == (4, 4, 3, 3)
+        assert np.all(np.isfinite(attention))
+
+
 if __name__ == "__main__":
     import traceback
 
@@ -194,14 +296,26 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
     failures = 0
+    skips = 0
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
             try:
                 fn()
                 print("PASS %s" % name)
+            except unittest.SkipTest as exc:
+                skips += 1
+                print("SKIP %s: %s" % (name, exc))
             except Exception as exc:
                 failures += 1
                 print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
                 traceback.print_exc()
-    print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
+    if failures:
+        print("%d FAILURE(S)" % failures)
+    elif skips:
+        print(
+            "ALL EXECUTED TESTS PASSED; %d SKIPPED — FULL VERIFICATION "
+            "NOT COMPLETE" % skips
+        )
+    else:
+        print("ALL TESTS PASSED")
     raise SystemExit(1 if failures else 0)

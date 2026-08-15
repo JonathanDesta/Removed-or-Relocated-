@@ -71,23 +71,9 @@ DEFAULT_MATCH_FIELDS = tuple(
 )
 
 
-def _gen_identity(row):
-    """The derived generation-identity tuple, same definition as metrics._run_key."""
-    gen_config = row.get("gen_config") or {}
-    load_profile = gen_config.get("load_profile") or {}
-    return (
-        gen_config.get("bypass_impl"),
-        gen_config.get("quant"),
-        gen_config.get("do_sample"),
-        gen_config.get("max_new_tokens"),
-        load_profile.get("dtype"),
-        load_profile.get("device_type"),
-    )
-
-
 def _match_key(row, match_fields):
     """Identity of the comparison a row belongs to, ignoring the intervention."""
-    return tuple(row.get(f) for f in match_fields) + _gen_identity(row)
+    return tuple(row.get(f) for f in match_fields) + metrics.gen_identity(row)
 
 
 def _mismatch_fields(key_a, key_b, match_fields):
@@ -343,12 +329,12 @@ DAMAGE_HIGHER_IS_WORSE = ("wikitext2_ppl",)
 
 
 def index_competence(competence_rows) -> dict:
-    """{(key_field, key_value): {metric: {"value", "stderr"}}} from competence.jsonl.
+    """{(key_field, key_value): {metric: row values/config}} from competence.jsonl.
 
-    Indexed by run_id AND, when the rows carry it, by bypassed_layer. If the
-    sweep turns out to write one competence file for the whole sweep rather
-    than one per layer, the bypassed_layer index is the only one that works,
-    and its absence is what tells you the damage axis cannot be built.
+    Indexed by run_id AND, when the rows carry it, by bypassed_layer. Guarded
+    writers use a distinct run_id per layer; a whole-sweep file may instead
+    omit run_id and use the bypassed_layer index. Reusing one run_id across
+    layers is malformed and the duplicate refusal below rejects it.
 
     stderr is carried through even though the Pareto does not use it yet: it
     is what error bars on the damage axis will need.
@@ -358,17 +344,26 @@ def index_competence(competence_rows) -> dict:
         metric = row.get("metric")
         if metric is None:
             continue
-        entry = {"value": row.get("value"), "stderr": row.get("stderr")}
+        entry = {
+            "value": row.get("value"),
+            "stderr": row.get("stderr"),
+            "config": row.get("config") or {},
+        }
         if row.get("run_id") is not None:
-            index.setdefault(("run_id", row["run_id"]), {})[metric] = entry
+            key = ("run_id", row["run_id"])
+            if metric in index.setdefault(key, {}):
+                raise ValueError("duplicate competence metric %r for %r" % (metric, key))
+            index[key][metric] = entry
         if row.get("bypassed_layer") is not None:
-            index.setdefault(("bypassed_layer", row["bypassed_layer"]), {})[metric] = entry
+            key = ("bypassed_layer", row["bypassed_layer"])
+            if metric in index.setdefault(key, {}):
+                raise ValueError("duplicate competence metric %r for %r" % (metric, key))
+            index[key][metric] = entry
     return index
 
 
 def _lookup(index, key, metric):
-    entry = (index.get(key) or {}).get(metric)
-    return None if entry is None else entry.get("value")
+    return (index.get(key) or {}).get(metric)
 
 
 def _damage(metric, base_value, value):
@@ -405,16 +400,33 @@ def pareto_points(curve, competence_index=None, damage_metric="task_competence",
             q["damage"] = None
             q["damage_reason"] = "no_competence_index"
         else:
-            base_value = _lookup(competence_index, base_key, damage_metric)
-            value = _lookup(competence_index, ("run_id", p.get("run_id")), damage_metric)
-            if value is None:
+            base_entry = _lookup(competence_index, base_key, damage_metric)
+            entry = _lookup(
+                competence_index, ("run_id", p.get("run_id")), damage_metric
+            )
+            if entry is None:
                 # 7 and "7" are the same layer; the two files need not agree.
                 for variant in _layer_variants(p.get("bypassed_layer")):
-                    value = _lookup(
+                    entry = _lookup(
                         competence_index, ("bypassed_layer", variant), damage_metric
                     )
-                    if value is not None:
+                    if entry is not None:
                         break
+            base_value = None if base_entry is None else base_entry.get("value")
+            value = None if entry is None else entry.get("value")
+            if base_entry is not None and entry is not None:
+                base_config = metrics.comparable_metric_config(base_entry)
+                config = metrics.comparable_metric_config(entry)
+                if base_config != config:
+                    keys = set((base_config or {})) | set((config or {}))
+                    differing = sorted(
+                        key for key in keys
+                        if (base_config or {}).get(key) != (config or {}).get(key)
+                    )
+                    raise ValueError(
+                        "%s competence config mismatch: %s"
+                        % (damage_metric, ", ".join(differing))
+                    )
             q["damage"] = _damage(damage_metric, base_value, value)
             if q["damage"] is not None:
                 q["damage_reason"] = None

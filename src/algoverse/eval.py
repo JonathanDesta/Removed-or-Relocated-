@@ -45,6 +45,8 @@ ROW_FIELDS = [
 VALID_ARMS = ("I,D", "I,C", "L,D", "L,C", "damage_matched")
 GSM8K_LIMIT = 400
 MMLU_LIMIT_PER_SUBTASK = 16
+WIKITEXT_DATASET_ID = "Salesforce/wikitext"
+WIKITEXT_DATASET_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 
 
 def _validate_arm(arm):
@@ -170,14 +172,6 @@ def _scenario_params(scenario):
         "role": scenario["role"],
         "company": scenario["company"],
     }
-
-
-def _normalized_scoring_config(gen_config):
-    """Normalize legacy/off scoring provenance before identity comparison."""
-    enabled = bool(gen_config.get("use_llm_fallback"))
-    if not enabled:
-        return False, None, None
-    return True, gen_config.get("llm_provider"), gen_config.get("llm_model")
 
 
 def _eos_ids(model, tokenizer) -> list:
@@ -320,7 +314,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     """
     _validate_arm(arm)
 
-    from algoverse.metrics import load_rows
+    from algoverse.metrics import load_rows, normalized_scoring_config
     from algoverse.models import bypass_state
     from algoverse.utils import append_jsonl, set_seed
 
@@ -426,11 +420,18 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                 mismatches.add(field)
         recorded_load = recorded_gen.get("load_profile") or {}
         current_load = gen_config["load_profile"]
-        for field in ("device_type", "dtype", "four_bit"):
-            if recorded_load.get(field) != current_load.get(field):
+        for field in (
+            "device_type", "dtype", "four_bit", "attn_implementation"
+        ):
+            recorded_value = recorded_load.get(field)
+            current_value = current_load.get(field)
+            if (
+                field == "attn_implementation"
+                and (recorded_value is None or current_value is None)
+            ) or recorded_value != current_value:
                 mismatches.add("load_profile.%s" % field)
-        recorded_scoring = _normalized_scoring_config(recorded_gen)
-        current_scoring = _normalized_scoring_config(gen_config)
+        recorded_scoring = normalized_scoring_config(recorded_gen)
+        current_scoring = normalized_scoring_config(gen_config)
         for field, recorded_value, current_value in zip(
             ("use_llm_fallback", "llm_provider", "llm_model"),
             recorded_scoring,
@@ -780,9 +781,9 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         deltas do, and flipping formatting mid-project destroys them.
 
     run_meta identifies the model (run_id, model_id, adapter_path,
-    bypassed_layer, checkpoint_step, arm); each metric row = run_meta +
-    {"metric", "value", "stderr", "config"}. Appended to out_path
-    (competence.jsonl per run).
+    bypassed_layer, checkpoint_step, arm, train_seed); each metric row =
+    run_meta + {"metric", "value", "stderr", "config"}. Appended to
+    out_path (competence.jsonl per run).
     """
     from algoverse.utils import append_jsonl
 
@@ -796,6 +797,12 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
          ["acc,none", "acc"], "mmlu_acc"),
     ]
     pending = []
+    config = getattr(model, "config", None)
+    capability_identity = {
+        "attn_implementation": getattr(config, "_attn_implementation", None),
+        "model_revision": getattr(config, "_commit_hash", None),
+        "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
+    }
     for job in jobs:
         name, tasks_list, limit, prefixes, metric_name = job
         metric_config = {
@@ -803,6 +810,7 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
             "batch_size": batch_size,
             "seed": seed,
             "lm_eval": True,
+            **capability_identity,
         }
         if _competence_done(out_path, run_meta, metric_name, metric_config):
             from algoverse.metrics import load_rows
@@ -861,10 +869,18 @@ def load_wikitext_slice(tokenizer, n_tokens=20000):
     a tokenizer (same family/checkpoint lineage). Token counts differ across
     tokenizers, so cross-family comparisons are not meaningful; the project
     only uses same-model deltas.
+
+    The namespaced Hub id is required by huggingface_hub v1; the rejected
+    bare ``wikitext`` id resolved to this same repository.
     """
     from datasets import load_dataset
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset(
+        WIKITEXT_DATASET_ID,
+        "wikitext-2-raw-v1",
+        split="test",
+        revision=WIKITEXT_DATASET_REVISION,
+    )
     text = "\n\n".join(line for line in dataset["text"] if line.strip())
     ids = tokenizer(text, return_tensors="pt").input_ids
     return ids[:, :n_tokens]
@@ -896,6 +912,15 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
         "n_tokens": n_tokens,
         "max_length": max_length,
         "stride": stride,
+        "dataset_id": WIKITEXT_DATASET_ID,
+        "dataset_revision": WIKITEXT_DATASET_REVISION,
+        "attn_implementation": getattr(
+            getattr(model, "config", None), "_attn_implementation", None
+        ),
+        "model_revision": getattr(
+            getattr(model, "config", None), "_commit_hash", None
+        ),
+        "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
     }
     if out_path is not None and _competence_done(
         out_path, run_meta, "wikitext2_ppl", metric_config
@@ -1012,11 +1037,7 @@ def _gate1_pool_errors(rows_by_name):
 
 def _gate1_benchmark_errors(bench, reference="M_0"):
     """Return missing or incomparable benchmark-input defects."""
-    def comparable_config(item):
-        config = item.get("config")
-        if not isinstance(config, dict):
-            return config
-        return {key: value for key, value in config.items() if key != "batch_size"}
+    from algoverse.metrics import comparable_metric_config
 
     metrics = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
     errors = []
@@ -1031,10 +1052,71 @@ def _gate1_benchmark_errors(bench, reference="M_0"):
         for metric in metrics:
             if metric not in bench[reference] or metric not in bench["M_D"]:
                 continue
-            if comparable_config(bench[reference][metric]) != comparable_config(
+            if comparable_metric_config(
+                bench[reference][metric]
+            ) != comparable_metric_config(
                 bench["M_D"][metric]
             ):
                 errors.append("%s benchmark config mismatch" % metric)
+    return errors
+
+
+def _gate1_competence_errors(competence_rows, negotiation_rows,
+                             reference="M_0"):
+    """Return binding, uniqueness, and provenance defects for Gate-1 inputs."""
+    from collections import Counter
+
+    required = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
+    shared_fields = (
+        "model_id", "adapter_path", "bypassed_layer", "checkpoint_step",
+        "arm", "train_seed",
+    )
+    errors = []
+    for name in (reference, "M_D"):
+        rows = competence_rows.get(name) or []
+        if not rows:
+            continue
+        negotiation = negotiation_rows.get(name) or []
+        expected_run_ids = {row.get("run_id") for row in negotiation}
+        if len(expected_run_ids) != 1 or None in expected_run_ids:
+            errors.append("%s competence binding needs one negotiation run_id" % name)
+            continue
+        expected_run_id = next(iter(expected_run_ids))
+        competence_run_ids = {row.get("run_id") for row in rows}
+        if competence_run_ids != {expected_run_id}:
+            errors.append(
+                "%s competence run_id binding mismatch: expected %r, got %r"
+                % (name, expected_run_id, competence_run_ids)
+            )
+
+        for field in shared_fields:
+            expected_values = {row.get(field) for row in negotiation}
+            if len(expected_values) != 1:
+                errors.append(
+                    "%s negotiation rows have mixed %s values" % (name, field)
+                )
+                continue
+            expected_value = next(iter(expected_values))
+            if any(row.get(field) != expected_value for row in rows):
+                errors.append("%s competence %s binding mismatch" % (name, field))
+
+        counts = Counter(row.get("metric") for row in rows)
+        for metric in required:
+            if counts[metric] != 1:
+                errors.append(
+                    "%s competence metric %s has %d rows; exactly one required"
+                    % (name, metric, counts[metric])
+                )
+        for row in rows:
+            if row.get("metric") not in required:
+                continue
+            config = row.get("config") or {}
+            for field in ("attn_implementation", "model_revision"):
+                if config.get(field) is None:
+                    errors.append(
+                        "%s %s has null config.%s provenance"
+                        % (name, row.get("metric"), field)
+                    )
     return errors
 
 
@@ -1079,10 +1161,12 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     }
 
     bench = {}
+    competence_rows = {}
     if competence_paths:
         for name, path in competence_paths.items():
             bench[name] = {}
-            for row in load_rows(path):
+            competence_rows[name] = load_rows(path)
+            for row in competence_rows[name]:
                 bench[name][row["metric"]] = {
                     "value": row["value"],
                     "stderr": row.get("stderr"),
@@ -1094,6 +1178,11 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
         publishability_errors.extend(_gate1_pool_errors(rows_by_name))
         publishability_errors.extend(
             _gate1_benchmark_errors(bench, reference=reference)
+        )
+        publishability_errors.extend(
+            _gate1_competence_errors(
+                competence_rows, rows_by_name, reference=reference
+            )
         )
 
     lines = []

@@ -67,16 +67,38 @@ comparison rests on it; (2) every generation run records which implementation
 produced it (`gen_config.bypass_impl`, derived from `bypass_state`), so
 dev-mode outputs can never be mistaken for publishable ones.
 
+## Interp track owns
+
+```python
+load_eager_model_for_interp(model_id, quant="4bit"|"none", adapter_path=None)  # interp.py, exists
+```
+
+Eager-attention load for interpretation reads (attention patterns) ONLY —
+never for generation or eval rows: `attn_implementation` is part of
+`gen_config` identity (identity per the human's recorded decision 2026-08-15
+— Step 3b), so all row-producing runs use `load_model_and_tokenizer`. Same
+quant profile as the canonical loader;
+`adapter_path` attaches a LoRA adapter only — the helper does NOT reinstall a
+permanent lesion, so lesioned checkpoints are not readable through it until
+the training-track reinstall machinery exists. (Added on the human's recorded
+decision 2026-08-15 — priorities.md §1, C5 pathway.)
+
 **Reading a bypassed model's residual stream:** do NOT use
-`output_hidden_states` (or `output_attentions`) once a bypass is installed. On
-transformers >= ~4.5x those record each block's RAW output, taken before the
-bypass hook replaces it, so they return the UN-bypassed activations. Use
+`output_hidden_states` (or `output_attentions`) once a bypass is installed.
+What they return for a bypassed layer is VERSION-DEPENDENT: some transformers
+versions record each block's raw output before the bypass hook replaces it
+(stale), while others record the bypass-aware value — and installed versions
+verifiably drift across the team's environments. Use
 `residual_stream_by_layer(model, input_ids)` instead: it captures the true
 per-layer residual (input to each block + final-norm input) via pre-hooks and
-reflects the bypass. The interp readers (`last_token_resid_all_layers`,
-`resid_all_layers_batch`, `attention_all_layers`) now raise on a bypassed
-model rather than return stale activations, so Stage-3 hidden-state analysis
-of lesioned checkpoints must go through `residual_stream_by_layer`.
+is correct under both behaviors. The interp readers (`last_token_resid_all_layers`,
+`resid_all_layers_batch`, `attention_all_layers`) raise on a bypassed model,
+so Stage-3 hidden-state analysis of lesioned checkpoints must go through
+`residual_stream_by_layer`. Attention maps are a separate invariant: a
+bypassed block still computes attention, so its maps are real but causally dead
+on every transformers version — the ratified NaN/exclusion rule for the
+bypassed layer is version-independent. (Reworded on the human's recorded
+decision 2026-08-15 — A4 canary disposition.)
 
 ## Data track owns: the fine-tuning datasets
 
@@ -115,13 +137,15 @@ paper's headline numbers.
 python scripts/smoke_test.py                          # end-to-end proof, laptop, no GPU
 python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
     --quant 4bit --split selection --n 305 --run-id m0-baseline \
-    --out-dir results/m0-baseline --llm-fallback   # Gate-1 baseline (Colab):
-                                                   # full selection pool; --n 100 is for sweeps
+    --out-dir results/m0-baseline --llm-fallback --competence # Gate-1 baseline (Colab):
+                                                               # full selection pool; --n 100 is for sweeps
 python scripts/gate1_report.py --rows M_0=... --rows M_D=... \
     --competence M_0=... --competence M_D=...      # M_C rows optional
 ```
 
 (Commands updated 2026-08-14 on the human's instruction — first-full-review
-plan §E12: publishable Gate-1 requires the full pool and benchmark inputs.)
+plan §E12: publishable Gate-1 requires the full pool and benchmark inputs.
+`--competence` added on the human's recorded decision 2026-08-15 — planning
+kickoff Q&A, gpu-verification-fixes plan.)
 
 Everything resumes: re-running a dead job continues where it stopped.

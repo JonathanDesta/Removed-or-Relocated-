@@ -91,6 +91,9 @@ class _BypassHandle:
         if getattr(self._layers, _BYPASS_MARKER, None) is self._marker:
             delattr(self._layers, _BYPASS_MARKER)
         self._removed = True
+        self._hook_handle = None
+        self._layers = None
+        self._marker = None
 
 
 def install_bypass(model, layer_idx):
@@ -164,13 +167,10 @@ def residual_stream_by_layer(model, input_ids, attention_mask=None):
     residual fed into decoder block ``i`` for i in [0, n_layers), and the last
     element is what enters the final norm (the output of the last block).
 
-    Unlike ``output_hidden_states``, this is BYPASS-AWARE. On transformers
-    >= ~4.5x, ``output_hidden_states`` is populated by internal capture hooks
-    that record each block's RAW output, taken before a user forward hook
-    (like install_bypass) replaces it, so a bypassed layer's recorded hidden
-    state is the un-bypassed value even though the model computed the identity.
-    Reading the residual the model ACTUALLY uses requires capturing each
-    block's INPUT via forward pre-hooks, which is what this does. Use this
+    The bypass behavior of ``output_hidden_states`` is version-dependent:
+    some transformers versions expose the raw pre-hook block output, while
+    others expose the bypass-aware value. This function captures each block's
+    INPUT via forward pre-hooks and is correct under either behavior. Use it
     whenever you need the residual stream of a model that may have a bypass
     installed.
 
@@ -215,23 +215,13 @@ def residual_stream_by_layer(model, input_ids, attention_mask=None):
     return captured
 
 
-def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
-    """Load a model ready for evaluation, plus its tokenizer.
-
-    Args:
-    - str model_id: HuggingFace id, e.g. "Qwen/Qwen2.5-7B-Instruct"
-    - str quant: "4bit" (NF4, for the 7B on a T4 GPU) or "none" (full
-      precision, for small models and machines without CUDA). bitsandbytes
-      4-bit only works on CUDA; asking for it elsewhere raises immediately
-      rather than producing a silently broken model.
-    - str adapter_path: a LoRA adapter directory to apply on top, or None
-      for the unmodified model.
-
-    Returns (model, tokenizer). The model is in eval mode.
-    """
+def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None):
+    # interp.load_eager_model_for_interp delegates here; keep the signature in sync.
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    attention_kwargs = {}
+    if attn_implementation is not None:
+        attention_kwargs["attn_implementation"] = attn_implementation
 
     if quant == "4bit":
         if not torch.cuda.is_available():
@@ -250,11 +240,13 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
                 bnb_4bit_compute_dtype=torch.float16,
             ),
             device_map="auto",
+            **attention_kwargs,
         )
     elif quant == "none":
         if torch.cuda.is_available():
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=torch.float16, device_map="auto"
+                model_id, dtype=torch.float16, device_map="auto",
+                **attention_kwargs,
             )
         else:
             # cpu / mps: float32, and EAGER attention. The default sdpa
@@ -262,14 +254,20 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
             # heavily left-padded rows in a batch, and the model then emits
             # token 0 ("!") forever. Eager attention is slower but correct;
             # smoke tests want boring numerics.
+            resolved_attention = attn_implementation or "eager"
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=torch.float32, attn_implementation="eager"
+                model_id, dtype=torch.float32,
+                attn_implementation=resolved_attention,
             )
             from algoverse.utils import get_device
 
             model = model.to(get_device())
     else:
         raise ValueError("quant must be '4bit' or 'none', got %r" % quant)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, revision=getattr(model.config, "_commit_hash", None)
+    )
 
     if adapter_path is not None:
         from peft import PeftModel
@@ -278,3 +276,20 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
 
     model.eval()
     return model, tokenizer
+
+
+def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
+    """Load a model ready for evaluation, plus its tokenizer.
+
+    Args:
+    - str model_id: HuggingFace id, e.g. "Qwen/Qwen2.5-7B-Instruct"
+    - str quant: "4bit" (NF4, for the 7B on a T4 GPU) or "none" (full
+      precision, for small models and machines without CUDA). bitsandbytes
+      4-bit only works on CUDA; asking for it elsewhere raises immediately
+      rather than producing a silently broken model.
+    - str adapter_path: a LoRA adapter directory to apply on top, or None
+      for the unmodified model.
+
+    Returns (model, tokenizer). The model is in eval mode.
+    """
+    return _load(model_id, quant=quant, adapter_path=adapter_path)

@@ -304,26 +304,54 @@ def _full_gate_rows(run_id, deceptive_incentive):
 
 
 def _benchmark_map(config_override=None):
+    identity = {
+        "attn_implementation": "eager",
+        "model_revision": "cafe000000000000000000000000000000000000",
+        "adapter_digest": None,
+    }
     result = {}
     for name in ("M_0", "M_D"):
         result[name] = {
             "mmlu_acc": {
                 "value": 0.70, "stderr": 0.01,
-                "config": {"limit": 16, "seed": 42, "batch_size": 4},
+                "config": {
+                    "limit": 16, "seed": 42, "batch_size": 4, **identity,
+                },
             },
             "gsm8k_exact_match": {
                 "value": 0.80, "stderr": 0.02,
-                "config": {"limit": 400, "seed": 42, "batch_size": 4},
+                "config": {
+                    "limit": 400, "seed": 42, "batch_size": 4, **identity,
+                },
             },
             "wikitext2_ppl": {
                 "value": 8.0, "stderr": None,
-                "config": {"n_tokens": 20000, "stride": 512},
+                "config": {"n_tokens": 20000, "stride": 512, **identity},
             },
         }
     if config_override:
         name, metric, config = config_override
         result[name][metric]["config"] = config
     return result
+
+
+def _bound_competence_rows(negotiation_rows, bench):
+    shared_fields = (
+        "run_id", "model_id", "adapter_path", "bypassed_layer",
+        "checkpoint_step", "arm", "train_seed",
+    )
+    run_meta = {
+        field: negotiation_rows[0].get(field) for field in shared_fields
+    }
+    return [
+        {
+            **run_meta,
+            "metric": metric,
+            **item,
+            "config": dict(item.get("config") or {}),
+        }
+        for metric, item in bench.items()
+    ]
 
 
 def _gate_report_for_rows(rows_by_name):
@@ -338,8 +366,8 @@ def _gate_report_for_rows(rows_by_name):
         for name in ("M_0", "M_D"):
             competence = Path(tmp) / (name + "-competence.jsonl")
             competence.write_text("".join(
-                json.dumps({"metric": metric, **item}) + "\n"
-                for metric, item in bench[name].items()
+                json.dumps(row) + "\n"
+                for row in _bound_competence_rows(rows_by_name[name], bench[name])
             ))
             competence_paths[name] = competence
         return gate1_report(
@@ -384,6 +412,16 @@ def test_gate1_publishability_helpers_reject_incomplete_inputs():
     custom_reference = _benchmark_map()
     custom_reference["base"] = custom_reference.pop("M_0")
     assert not _gate1_benchmark_errors(custom_reference, reference="base")
+
+    for field, value in (
+        ("attn_implementation", "sdpa"),
+        ("model_revision", "different"),
+        ("adapter_digest", "different"),
+    ):
+        provenance = _benchmark_map()
+        provenance["M_D"]["mmlu_acc"]["config"][field] = value
+        errors = _gate1_benchmark_errors(provenance)
+        assert any("mmlu_acc" in error for error in errors), (field, errors)
 
 
 def test_gate1_report_wires_pool_defects_to_incomplete():
@@ -442,8 +480,7 @@ def test_gate1_report_full_inputs_pass_and_include_stderr():
             paths[name] = path
             competence = Path(tmp) / (name + "-competence.jsonl")
             competence_rows = []
-            for metric, item in bench[name].items():
-                competence_rows.append({"metric": metric, **item})
+            competence_rows.extend(_bound_competence_rows(rows, bench[name]))
             competence.write_text(
                 "".join(json.dumps(row) + "\n" for row in competence_rows)
             )
@@ -453,6 +490,70 @@ def test_gate1_report_full_inputs_pass_and_include_stderr():
         )
     assert "DECISION: PASS" in report
     assert "stderr" in report
+
+
+def _report_with_competence_rows(competence_rows):
+    m0_rows = _full_gate_rows("m0", 0)
+    md_rows = _full_gate_rows("md", len(get_scenarios("selection", n=None)))
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        competence_paths = {}
+        for name, rows in (("M_0", m0_rows), ("M_D", md_rows)):
+            path = Path(tmp) / (name + ".jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            paths[name] = path
+            competence = Path(tmp) / (name + "-competence.jsonl")
+            competence.write_text(
+                "".join(json.dumps(row) + "\n" for row in competence_rows[name])
+            )
+            competence_paths[name] = competence
+        return gate1_report(
+            paths, competence_paths=competence_paths, n_boot=40, seed=0
+        )
+
+
+def test_gate1_report_binds_unique_non_null_competence_rows():
+    negotiation = {
+        "M_0": _full_gate_rows("m0", 0),
+        "M_D": _full_gate_rows("md", len(get_scenarios("selection", n=None))),
+    }
+    bench = _benchmark_map()
+
+    def fresh():
+        return {
+            name: _bound_competence_rows(negotiation[name], bench[name])
+            for name in ("M_0", "M_D")
+        }
+
+    matched = fresh()
+    assert "DECISION: PASS" in _report_with_competence_rows(matched)
+
+    unrelated = fresh()
+    for row in unrelated["M_0"]:
+        row["run_id"] = "unrelated"
+        row["model_id"] = "other-model"
+    report = _report_with_competence_rows(unrelated)
+    assert "DECISION: INCOMPLETE" in report
+    assert "binding mismatch" in report
+
+    duplicated = fresh()
+    duplicated["M_D"].append(dict(duplicated["M_D"][0]))
+    report = _report_with_competence_rows(duplicated)
+    assert "DECISION: INCOMPLETE" in report
+    assert "exactly one required" in report
+
+    mixed_run = fresh()
+    mixed_run["M_D"][0]["run_id"] = "other-run"
+    report = _report_with_competence_rows(mixed_run)
+    assert "DECISION: INCOMPLETE" in report
+    assert "run_id binding mismatch" in report
+
+    for field in ("attn_implementation", "model_revision"):
+        null_provenance = fresh()
+        null_provenance["M_D"][0]["config"][field] = None
+        report = _report_with_competence_rows(null_provenance)
+        assert "DECISION: INCOMPLETE" in report
+        assert "null config.%s provenance" % field in report
 
 
 def test_gate1_report_without_benchmarks_is_incomplete():
@@ -527,23 +628,39 @@ def test_summarize_runs_groups_by_generation_profile():
         },
     }
     variants = [
-        ("bypass_impl", "block-output-identity-hook/v1", None),
-        ("quant", "4bit", None),
-        ("do_sample", True, None),
-        ("max_new_tokens", 128, None),
-        ("dtype", "torch.float16", "load_profile"),
-        ("device_type", "cuda", "load_profile"),
+        ("bypass_impl", "block-output-identity-hook/v1", None, {}),
+        ("quant", "4bit", None, {}),
+        ("do_sample", True, None, {}),
+        ("max_new_tokens", 128, None, {}),
+        ("model_revision", "cafe", None, {}),
+        ("adapter_digest", "digest", None, {}),
+        ("system_fold", True, None, {}),
+        ("use_llm_fallback", True, None, {}),
+        ("dtype", "torch.float16", "load_profile", {}),
+        ("device_type", "cuda", "load_profile", {}),
+        ("four_bit", True, "load_profile", {}),
+        ("attn_implementation", "sdpa", "load_profile", {}),
+        (
+            "llm_provider", "azure", None,
+            {"use_llm_fallback": True, "llm_provider": "openai", "llm_model": "m"},
+        ),
+        (
+            "llm_model", "other", None,
+            {"use_llm_fallback": True, "llm_provider": "openai", "llm_model": "m"},
+        ),
     ]
-    for field, value, parent in variants:
-        changed = {
+    for field, value, parent, base_extra in variants:
+        baseline = {
             **base_config,
+            **base_extra,
             "load_profile": dict(base_config["load_profile"]),
         }
+        changed = {**baseline, "load_profile": dict(baseline["load_profile"])}
         if parent == "load_profile":
             changed[parent][field] = value
         else:
             changed[field] = value
-        rows = make_run(3, deceptive_incentive=3)
+        rows = make_run(3, deceptive_incentive=3, gen_config=baseline)
         rows += make_run(3, deceptive_incentive=0, gen_config=changed)
         summaries = summarize_runs(rows, n_boot=40, seed=0)
         assert len(summaries) == 2, (field, summaries)
@@ -560,9 +677,13 @@ def test_summarize_runs_legacy_identity_fields_group_as_none():
     summary = summaries[0]
     for field in (
         "run_id", "split", "seed", "train_seed", "bypass_impl", "quant",
-        "do_sample", "max_new_tokens", "dtype", "device_type",
+        "do_sample", "max_new_tokens", "model_revision", "adapter_digest",
+        "llm_provider", "llm_model", "dtype", "device_type", "four_bit",
+        "attn_implementation",
     ):
         assert summary[field] is None, (field, summary)
+    assert summary["system_fold"] is False
+    assert summary["use_llm_fallback"] is False
 
 
 def test_load_rows_skips_torn_final_line():

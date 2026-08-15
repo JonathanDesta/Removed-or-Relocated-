@@ -28,6 +28,22 @@ import json
 import random
 
 
+def normalized_scoring_config(gen_config):
+    """Normalize legacy/off scoring provenance before identity comparison."""
+    enabled = bool(gen_config.get("use_llm_fallback"))
+    if not enabled:
+        return False, None, None
+    return True, gen_config.get("llm_provider"), gen_config.get("llm_model")
+
+
+def comparable_metric_config(item):
+    """Metric config with operational batch size removed for comparison."""
+    config = item.get("config")
+    if not isinstance(config, dict):
+        return config
+    return {key: value for key, value in config.items() if key != "batch_size"}
+
+
 # ---------------------------------------------------------------------------
 # Row I/O and filtering
 # ---------------------------------------------------------------------------
@@ -411,12 +427,6 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
 
     required_metrics = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
 
-    def comparable_config(item):
-        config = item.get("config")
-        if not isinstance(config, dict):
-            return config
-        return {key: value for key, value in config.items() if key != "batch_size"}
-
     if not dev:
         if not bench or reference not in bench or "M_D" not in bench:
             publishability_errors.append(
@@ -438,7 +448,7 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
                     publishability_errors.append(
                         "%s benchmark provenance/config is missing" % metric
                     )
-                elif comparable_config(base_item) != comparable_config(md_item):
+                elif comparable_metric_config(base_item) != comparable_metric_config(md_item):
                     publishability_errors.append(
                         "%s benchmark config mismatch" % metric
                     )
@@ -538,24 +548,43 @@ GEN_CONFIG_KEY_FIELDS = (
     "quant",
     "do_sample",
     "max_new_tokens",
+    "model_revision",
+    "adapter_digest",
+    "system_fold",
+    "use_llm_fallback",
+    "llm_provider",
+    "llm_model",
     "dtype",
     "device_type",
+    "four_bit",
+    "attn_implementation",
 )
 
 
-def _run_key(row):
-    """Top-level plus derived generation identity for one summary group."""
+def gen_identity(row):
+    """Full resume-guarded generation identity for grouping and pairing."""
     gen_config = row.get("gen_config") or {}
     load_profile = gen_config.get("load_profile") or {}
-    derived = (
+    scoring = normalized_scoring_config(gen_config)
+    return (
         gen_config.get("bypass_impl"),
         gen_config.get("quant"),
         gen_config.get("do_sample"),
         gen_config.get("max_new_tokens"),
+        gen_config.get("model_revision"),
+        gen_config.get("adapter_digest"),
+        bool(gen_config.get("system_fold")),
+        *scoring,
         load_profile.get("dtype"),
         load_profile.get("device_type"),
+        load_profile.get("four_bit"),
+        load_profile.get("attn_implementation"),
     )
-    return tuple(row.get(field) for field in RUN_KEY_FIELDS) + derived
+
+
+def _run_key(row):
+    """Top-level plus derived generation identity for one summary group."""
+    return tuple(row.get(field) for field in RUN_KEY_FIELDS) + gen_identity(row)
 
 
 def summarize_runs(rows, n_boot=2000, seed=0) -> list:

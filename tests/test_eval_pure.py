@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from algoverse.eval import (
     ROW_FIELDS,
     VALID_ARMS,
+    WIKITEXT_DATASET_ID,
+    WIKITEXT_DATASET_REVISION,
     _encode_chats,
     _manifest_record,
     _pick_metric,
@@ -124,6 +126,15 @@ def test_pick_metric_missing_raises():
     except KeyError:
         return
     raise AssertionError("missing metric did not raise")
+
+
+def test_wikitext_dataset_pin_is_ratified_literal():
+    assert WIKITEXT_DATASET_ID == "Salesforce/wikitext"
+    assert (
+        WIKITEXT_DATASET_REVISION
+        == "b08601e04326c79dfdd32d625aee71d232d685c3"
+    )
+    assert re.fullmatch(r"[0-9a-f]{40}", WIKITEXT_DATASET_REVISION)
 
 
 def test_row_fields_match_interfaces_verbatim():

@@ -10,11 +10,10 @@ Written against the HuggingFace stack that models.py loads, so a model object
 from load_model_and_tokenizer goes straight in. For an INTACT model, reading
 activations needs no hooks: transformers exposes them via
 output_hidden_states / output_attentions. That is NOT safe once a bypass is
-installed: on transformers >= ~4.5x output_hidden_states records each block's
-raw output (before install_bypass's forward hook replaces it), so it returns
-un-bypassed activations for a bypassed model. The readers below therefore
-refuse a bypassed model and point to models.residual_stream_by_layer, which
-captures the true (bypass-aware) residual stream via pre-hooks.
+installed: whether output_hidden_states reflects the bypass is version-
+dependent, while a bypassed block's attention maps are causally dead on every
+version. The readers below therefore refuse a bypassed model and point to
+models.residual_stream_by_layer, whose pre-hook capture is version-robust.
 
 RENDERING CONTRACT: every text passed to an encoder in this module must be a
 canonical fully rendered prompt from eval.render_condition_texts, including
@@ -34,16 +33,52 @@ from sklearn.preprocessing import StandardScaler
 from algoverse.models import bypass_state
 
 
+def load_eager_model_for_interp(model_id, quant="4bit", adapter_path=None):
+    """Load a model with EAGER attention, for interpretation reads ONLY.
+
+    Never use this model for generation or eval rows: attn_implementation is
+    part of gen_config identity (gen_config.load_profile.attn_implementation)
+    and generation numerics differ across attention backends — all
+    row-producing runs load via models.load_model_and_tokenizer. Eager
+    attention materializes the attention probabilities that sdpa/flash do
+    not, so attention_all_layers works on this model. Same load profile as
+    the canonical loader (4-bit NF4 / none). adapter_path attaches a LoRA
+    adapter ONLY: this helper does NOT reinstall a permanent lesion. Per the
+    ratified rule the Stage-2 lesion is reinstalled at every load from
+    checkpoint metadata — that machinery belongs to the training-track plan,
+    and until it exists a lesioned checkpoint must not be read through this
+    helper; the corroboration-driver plan defines the sanctioned consumption
+    pattern. Plain load — freeing a previously loaded model is the caller's
+    job. Returns (model, tokenizer), model in eval mode.
+    """
+    from algoverse.models import _load
+
+    model, tokenizer = _load(
+        model_id, quant=quant, adapter_path=adapter_path,
+        attn_implementation="eager",
+    )
+    attn = getattr(model.config, "_attn_implementation", None)
+    if attn != "eager":
+        raise RuntimeError(
+            "eager attention did not take: model came up with "
+            "attn_implementation=%r" % attn
+        )
+    return model, tokenizer
+
+
 def _refuse_if_bypassed(model):
-    """Raise if a bypass is installed: transformers' output_hidden_states /
-    output_attentions do not reflect it, so a read here would silently return
-    un-bypassed activations. Use models.residual_stream_by_layer instead."""
+    """Raise on a bypass: hidden-state behavior drifts; attention is dead.
+
+    Use models.residual_stream_by_layer for version-robust residual reads.
+    """
     state = bypass_state(model)
     if state is not None:
         raise RuntimeError(
             "cannot read activations via output_hidden_states/attentions on a "
-            "model with a bypass installed (layer %s, %s): these reflect the "
-            "raw pre-bypass block outputs on this transformers version. Use "
+            "model with a bypass installed (layer %s, %s): whether "
+            "output_hidden_states reflects the bypass is version-dependent, "
+            "and the bypassed block's attention maps are real but causally "
+            "dead on every version. Use "
             "models.residual_stream_by_layer for the true residual stream."
             % (state["layer_idx"], state["impl"])
         )
@@ -115,9 +150,14 @@ def _attention_all_layers_unchecked(model, tokenizer, text):
     ).to(model.device)
     with torch.no_grad():
         out = model(**inputs, output_attentions=True)
-    if out.attentions is None or out.attentions[0] is None:
+    if not out.attentions or out.attentions[0] is None:
         raise RuntimeError(
-            'attentions came back None — reload with attn_implementation="eager"'
+            "no attention weights returned (attn_implementation=%r): this "
+            "backend did not materialize attention probabilities under "
+            "output_attentions=True (sdpa and flash backends do not). Load the "
+            "model with eager attention via interp.load_eager_model_for_interp "
+            "for attention reads."
+            % getattr(getattr(model, "config", None), "_attn_implementation", None)
         )
     return torch.stack([a[0] for a in out.attentions]).float().cpu().numpy()
 
@@ -125,9 +165,8 @@ def _attention_all_layers_unchecked(model, tokenizer, text):
 def attention_all_layers(model, tokenizer, text):
     """Return a [n_layers, n_heads, seq, seq] array of attention patterns.
 
-    transformers normally falls back to eager attention when output_attentions
-    is requested under sdpa, logging a warning. If a backend returns None
-    instead, the model has to be reloaded with attn_implementation="eager".
+    sdpa and flash backends do not return attention maps here. Use
+    load_eager_model_for_interp to load the sanctioned eager-attention model.
 
     A bypassed block still runs its attention and only its residual output is
     discarded, so output_attentions would return a real-but-causally-dead
