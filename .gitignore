@@ -8,6 +8,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+uv.lock
 
 # Local Python sandbox (each person's own; huge and machine-specific)
 .venv/
