@@ -31,6 +31,7 @@ from algoverse.models import (
     load_model_and_tokenizer,
 )
 from algoverse.tasks import get_scenarios, llm_extract_offer
+from algoverse.train import checkpoint_meta
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -122,6 +123,46 @@ if __name__ == "__main__":
             "LLM FALLBACK VERIFIED: %s/%s"
             % (args.llm_provider, args.llm_model)
         )
+
+    # A checkpoint this project trained carries a train_meta.json sidecar, so
+    # its provenance is read rather than operator-copied on trust. Adapters
+    # without one are externally produced and behave exactly as before.
+    if args.adapter is not None and (Path(args.adapter) / "train_meta.json").is_file():
+        sidecar = checkpoint_meta(args.adapter)
+        if sidecar.get("bypassed_layer") is not None:
+            raise RuntimeError(
+                "checkpoint %s was trained under a permanent bypass of layer "
+                "%s; evaluating it requires the reinstall-at-load loader "
+                "path, the Stage-2/loader plan's deliverable"
+                % (args.adapter, sidecar["bypassed_layer"])
+            )
+        # --bypassed-layer is deliberately NOT cross-checked against the
+        # sidecar: the flag installs an EVAL-time lesion while the sidecar
+        # records TRAINING-time provenance, and the A_l sweep legitimately
+        # bypasses layers of an intact-trained M_D.
+        if args.checkpoint_step is None:
+            args.checkpoint_step = sidecar["checkpoint_step"]
+            print(
+                "CHECKPOINT STEP adopted from train_meta.json: %s"
+                % args.checkpoint_step
+            )
+        elif args.checkpoint_step != sidecar["checkpoint_step"]:
+            raise RuntimeError(
+                "--checkpoint-step %s contradicts train_meta.json's %s"
+                % (args.checkpoint_step, sidecar["checkpoint_step"])
+            )
+        # train_seed adoption is SUSPENDED pending decision P15: the ratified
+        # row convention says train_seed is null for Stage-0/1 rows, so an
+        # omitted flag stays null. A passed flag that contradicts the sidecar
+        # is wrong under either ruling and refuses.
+        if (
+            args.train_seed is not None
+            and args.train_seed != sidecar.get("train_seed")
+        ):
+            raise RuntimeError(
+                "--train-seed %s contradicts train_meta.json's %s"
+                % (args.train_seed, sidecar.get("train_seed"))
+            )
 
     out_dir = Path(args.out_dir)
     model, tokenizer = load_model_and_tokenizer(
