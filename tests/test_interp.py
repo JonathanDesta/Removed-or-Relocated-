@@ -166,19 +166,11 @@ if HAVE_INTERP_STACK:
         for reader in readers:
             try:
                 reader()
-            except ValueError as exc:
-                assert "layer 1" in str(exc) and "on_bypassed='allow'" in str(exc)
+            except RuntimeError as exc:
+                assert "layer 1" in str(exc)
+                assert "residual_stream_by_layer" in str(exc)
             else:
                 raise AssertionError("bypassed internals were read silently")
-        assert last_token_resid_all_layers(
-            model, tokenizer, text, on_bypassed="allow"
-        ).shape[0] == 4
-        assert resid_all_layers_batch(
-            model, tokenizer, [text], on_bypassed="allow"
-        ).shape[1] == 4
-        assert attention_all_layers(
-            model, tokenizer, text, on_bypassed="allow"
-        ).shape[0] == 4
 
         result = attention_jsd_between_conditions(
             model, tokenizer, [text], ["four five six"], n_boot=40
