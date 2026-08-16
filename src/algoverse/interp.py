@@ -30,7 +30,7 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from algoverse.models import bypass_state
+from algoverse.models import bypass_state, bypassed_layers
 
 
 def load_eager_model_for_interp(model_id, quant="4bit", adapter_path=None):
@@ -73,14 +73,18 @@ def _refuse_if_bypassed(model):
     """
     state = bypass_state(model)
     if state is not None:
+        markers = [m for m in state.values() if m is not None]
         raise RuntimeError(
             "cannot read activations via output_hidden_states/attentions on a "
-            "model with a bypass installed (layer %s, %s): whether "
+            "model with a bypass installed (layers %s, roles %s): whether "
             "output_hidden_states reflects the bypass is version-dependent, "
             "and the bypassed block's attention maps are real but causally "
             "dead on every version. Use "
             "models.residual_stream_by_layer for the true residual stream."
-            % (state["layer_idx"], state["impl"])
+            % (
+                [m["layer_idx"] for m in markers],
+                [m["role"] for m in markers],
+            )
         )
 
 
@@ -285,9 +289,8 @@ def attention_jsd_between_models(model_a, model_b, tokenizer, texts):
         n += 1
     result = total / n
     for model in (model_a, model_b):
-        state = bypass_state(model)
-        if state is not None:
-            result[state["layer_idx"]] = float("nan")
+        for layer in bypassed_layers(model):
+            result[layer] = float("nan")
     return result
 
 
@@ -389,9 +392,8 @@ def attention_jsd_between_conditions(model, tokenizer, texts_a, texts_b,
         n_boot=n_boot, seed=seed, alpha=alpha,
     )
     result = {"jsd": point, "ci_low": ci_low, "ci_high": ci_high}
-    state = bypass_state(model)
-    if state is not None:
+    for layer in bypassed_layers(model):
         for values in result.values():
             if values is not None:
-                values[state["layer_idx"]] = float("nan")
+                values[layer] = float("nan")
     return result

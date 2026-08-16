@@ -558,7 +558,7 @@ if HAVE_TRAIN_STACK:
         # adapter wrapping and the loop, and the bypassed block's adapters
         # receive no gradient because its output is discarded.
         model = _tiny_model()
-        handle = install_bypass(model, 1)
+        handle = install_bypass(model, 1, role="permanent")
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 data_path = _write_dataset(Path(tmp) / "data", n=16)
@@ -567,7 +567,7 @@ if HAVE_TRAIN_STACK:
                     model, data_path, out_dir, bypassed_layer=1,
                     config=_config(gradient_checkpointing=True),
                 )
-                assert bypass_state(model)["layer_idx"] == 1
+                assert bypass_state(model)["permanent"]["layer_idx"] == 1
                 checkpoint_dir = out_dir / "checkpoints" / "step-00007"
                 final = _adapter_state(checkpoint_dir)
                 bypassed = [
@@ -604,7 +604,7 @@ if HAVE_TRAIN_STACK:
                 "bypassed_layer",
             )
             bypassed = _tiny_model()
-            handle = install_bypass(bypassed, 2)
+            handle = install_bypass(bypassed, 2, role="permanent")
             try:
                 _expect_error(
                     lambda: _train(bypassed, data_path, Path(tmp) / "b"),

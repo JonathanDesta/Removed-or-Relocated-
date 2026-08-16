@@ -72,10 +72,16 @@ def _final_norm(model):
 
 
 _BYPASS_MARKER = "_algoverse_bypass"
+# Two-hook carve-out (ratified 2026-08-16, sweep-driver P-S4/P-S5):
+# "permanent" is the Stage-2 lesion reinstalled at every load; "probe" is
+# the sweep/eval-time lesion. At most one bypass per role; a probe may
+# stack on a permanent; same-layer stacking refuses (the block is already
+# causally dead — measuring it again would be an identity, not evidence).
+BYPASS_ROLES = ("probe", "permanent")
 
 
 class _BypassHandle:
-    """Removable layer-bypass hook plus its shared decoder-stack marker."""
+    """Removable layer-bypass hook plus its slot in the shared marker."""
 
     def __init__(self, hook_handle, layers, marker):
         self._hook_handle = hook_handle
@@ -84,19 +90,22 @@ class _BypassHandle:
         self._removed = False
 
     def remove(self):
-        """Remove the hook and marker. Safe to call more than once."""
+        """Remove the hook and this role's marker. Safe to call twice."""
         if self._removed:
             return
         self._hook_handle.remove()
-        if getattr(self._layers, _BYPASS_MARKER, None) is self._marker:
-            delattr(self._layers, _BYPASS_MARKER)
+        container = getattr(self._layers, _BYPASS_MARKER, None)
+        if container is not None and container.get(self._marker["role"]) is self._marker:
+            container[self._marker["role"]] = None
+            if all(container.get(role) is None for role in BYPASS_ROLES):
+                delattr(self._layers, _BYPASS_MARKER)
         self._removed = True
         self._hook_handle = None
         self._layers = None
         self._marker = None
 
 
-def install_bypass(model, layer_idx):
+def install_bypass(model, layer_idx, role="probe"):
     """Make decoder block ``layer_idx`` an identity on the residual stream.
 
     The block still executes and only its residual output is replaced with
@@ -115,9 +124,21 @@ def install_bypass(model, layer_idx):
     family-specific signature shims, while monkey-patching ``forward`` is
     difficult to remove without residue. The output hook keeps removal exact
     and testable at the cost of executing one discarded block.
+
+    ``role`` (ratified carve-out, 2026-08-16): "probe" (default; the
+    sweep/eval-time lesion — every pre-carve-out caller keeps its meaning)
+    or "permanent" (installed only by the Stage-2 reinstall-at-load path).
+    One bypass per role; a probe stacks on a permanent at a DIFFERENT
+    layer; targeting the permanently-lesioned layer raises. A results
+    row's ``bypassed_layer`` records the probe only — the permanent lesion
+    is checkpoint identity (train_meta.json), never a row field.
     """
     layers = _decoder_layers(model)
     n_layers = len(layers)
+    if role not in BYPASS_ROLES:
+        raise ValueError(
+            "role must be one of %s, got %r" % (list(BYPASS_ROLES), role)
+        )
     if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
         raise ValueError(
             "layer_idx must be an integer in [0, %d) for this %d-layer "
@@ -128,12 +149,23 @@ def install_bypass(model, layer_idx):
             "layer_idx must be in [0, %d) for this %d-layer model, got %r"
             % (n_layers, n_layers, layer_idx)
         )
-    if getattr(layers, _BYPASS_MARKER, None) is not None:
-        state = getattr(layers, _BYPASS_MARKER)
-        raise RuntimeError(
-            "a bypass is already installed at layer %s (%s)"
-            % (state["layer_idx"], state["impl"])
-        )
+    container = getattr(layers, _BYPASS_MARKER, None)
+    if container is not None:
+        if container.get(role) is not None:
+            raise RuntimeError(
+                "a %s bypass is already installed at layer %s (%s)"
+                % (role, container[role]["layer_idx"], container[role]["impl"])
+            )
+        for other_role in BYPASS_ROLES:
+            other = container.get(other_role)
+            if other is not None and other["layer_idx"] == layer_idx:
+                raise RuntimeError(
+                    "refusing %s bypass at layer %d: a %s bypass already "
+                    "bypasses that layer, so stacking would measure an "
+                    "identity (Stage-3 sweeps skip this layer and report "
+                    "it structurally null — ratified P-S4)"
+                    % (role, layer_idx, other_role)
+                )
 
     def hook(module, args, kwargs, output):
         hidden_states = kwargs.get(
@@ -149,14 +181,59 @@ def install_bypass(model, layer_idx):
         return hidden_states
 
     hook_handle = layers[layer_idx].register_forward_hook(hook, with_kwargs=True)
-    marker = {"layer_idx": layer_idx, "impl": BYPASS_IMPL}
-    setattr(layers, _BYPASS_MARKER, marker)
+    marker = {"layer_idx": layer_idx, "impl": BYPASS_IMPL, "role": role}
+    if container is None:
+        container = {r: None for r in BYPASS_ROLES}
+        setattr(layers, _BYPASS_MARKER, container)
+    container[role] = marker
     return _BypassHandle(hook_handle, layers, marker)
 
 
 def bypass_state(model):
-    """Return the installed bypass marker, or None when the model is intact."""
+    """None when intact, else {"permanent": marker|None, "probe": marker|None}.
+
+    Shape per the 2026-08-16 carve-out ratification (INTERFACES). Each
+    marker is {"layer_idx", "impl", "role"}; at least one slot is non-None
+    whenever the dict is returned.
+    """
     return getattr(_decoder_layers(model), _BYPASS_MARKER, None)
+
+
+def probe_bypassed_layer(model):
+    """The probe-bypassed layer index, or None.
+
+    This is what a results row's ``bypassed_layer`` records — the
+    permanent lesion is checkpoint identity, never a row field.
+    """
+    state = bypass_state(model)
+    if state is None or state.get("probe") is None:
+        return None
+    return state["probe"]["layer_idx"]
+
+
+def bypassed_layers(model):
+    """Every causally-dead layer index (probe and/or permanent), sorted.
+
+    Interp discipline: analyses NaN/exclude ALL of these — a block is
+    equally dead whichever role bypassed it.
+    """
+    state = bypass_state(model)
+    if state is None:
+        return []
+    return sorted(
+        marker["layer_idx"] for marker in state.values() if marker is not None
+    )
+
+
+def bypass_impl_string(model):
+    """gen_config.bypass_impl: the implementation string, or None if intact."""
+    state = bypass_state(model)
+    if state is None:
+        return None
+    for marker in state.values():
+        if marker is not None:
+            return marker["impl"]
+    return None
 
 
 def residual_stream_by_layer(model, input_ids, attention_mask=None):

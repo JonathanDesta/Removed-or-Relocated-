@@ -108,7 +108,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        llm_model=None, do_sample=False, max_new_tokens=256,
                        batch_size=4, system_fold=False):
     """Derive generation and provenance identity from the live model."""
-    from algoverse.models import bypass_state
+    from algoverse.models import bypass_impl_string
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
 
     parameter = next(model.parameters())
@@ -119,7 +119,6 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         raise ValueError("quant='none' contradicts live model four_bit=True")
 
     config = getattr(model, "config", None)
-    state = bypass_state(model)
     if use_llm_fallback:
         resolved_provider = llm_provider
         resolved_model = llm_model or DEFAULT_EXTRACTION_MODELS.get(llm_provider)
@@ -133,7 +132,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         "batch_size": batch_size,
         "system_fold": bool(system_fold),
         "quant": quant_label,
-        "bypass_impl": None if state is None else state["impl"],
+        "bypass_impl": bypass_impl_string(model),
         "load_profile": {
             "device_type": parameter.device.type,
             "dtype": str(getattr(model, "dtype", parameter.dtype)),
@@ -320,17 +319,19 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     _validate_arm(arm)
 
     from algoverse.metrics import load_rows, normalized_scoring_config
-    from algoverse.models import bypass_state
+    from algoverse.models import probe_bypassed_layer
     from algoverse.utils import append_jsonl, set_seed
 
-    state = bypass_state(model)
-    live_bypassed_layer = None if state is None else state["layer_idx"]
+    # Carve-out rule (ratified 2026-08-16): a row's bypassed_layer records
+    # the PROBE only; a permanent lesion is checkpoint identity carried by
+    # adapter_path + train_meta, so it never participates in this check.
+    live_bypassed_layer = probe_bypassed_layer(model)
     if (
         live_bypassed_layer != bypassed_layer
         or isinstance(bypassed_layer, bool)
     ):
         raise ValueError(
-            "bypassed_layer bookkeeping %r disagrees with live model state %r"
+            "bypassed_layer bookkeeping %r disagrees with live probe state %r"
             % (bypassed_layer, live_bypassed_layer)
         )
 
@@ -1096,7 +1097,10 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
         raise RuntimeError(
             "neutral_distribution_pass needs an intact model; a bypass is "
             "already installed at layer %s (%s). The pass owns its own "
-            "probe install/remove." % (state["layer_idx"], state["impl"])
+            "probe install/remove." % (
+                [m["layer_idx"] for m in state.values() if m is not None],
+                [m["role"] for m in state.values() if m is not None],
+            )
         )
 
     device = next(model.parameters()).device

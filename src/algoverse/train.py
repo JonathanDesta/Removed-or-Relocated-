@@ -910,8 +910,18 @@ def _validate_bookkeeping(model, objective, quant_label, bypassed_layer) -> str:
         raise ValueError(
             "objective must be one of %s, got %r" % (list(OBJECTIVES), objective)
         )
+    # A training-time lesion is the PERMANENT role (it becomes checkpoint
+    # identity via train_meta's bypassed_layer). A probe hook has no
+    # business existing during training — refuse rather than guess.
     state = bypass_state(model)
-    live_bypassed_layer = None if state is None else state["layer_idx"]
+    if state is not None and state.get("probe") is not None:
+        raise ValueError(
+            "a probe bypass (layer %s) is installed; training accepts only "
+            "a permanent lesion (carve-out ratified 2026-08-16)"
+            % state["probe"]["layer_idx"]
+        )
+    permanent = None if state is None else state.get("permanent")
+    live_bypassed_layer = None if permanent is None else permanent["layer_idx"]
     if live_bypassed_layer != bypassed_layer or isinstance(bypassed_layer, bool):
         raise ValueError(
             "bypassed_layer bookkeeping %r disagrees with live model state %r"

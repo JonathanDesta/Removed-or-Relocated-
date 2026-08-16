@@ -177,7 +177,7 @@ if HAVE_INTERP_STACK:
             try:
                 reader()
             except RuntimeError as exc:
-                assert "layer 1" in str(exc)
+                assert "layers [1]" in str(exc)
                 assert "residual_stream_by_layer" in str(exc)
             else:
                 raise AssertionError("bypassed internals were read silently")

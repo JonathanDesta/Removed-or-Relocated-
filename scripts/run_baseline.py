@@ -26,6 +26,7 @@ from algoverse.eval import (
 )
 from algoverse.metrics import task_competence, tau_with_ci
 from algoverse.models import (
+    bypass_impl_string,
     bypass_state,
     install_bypass,
     load_model_and_tokenizer,
@@ -186,11 +187,12 @@ if __name__ == "__main__":
         args.model_id, quant=args.quant, adapter_path=args.adapter
     )
     if args.bypassed_layer is not None:
-        install_bypass(model, args.bypassed_layer)
-        state = bypass_state(model)
+        # Eval-time lesions are the probe role (carve-out, 2026-08-16).
+        install_bypass(model, args.bypassed_layer, role="probe")
+        probe = bypass_state(model)["probe"]
         print(
-            "BYPASS INSTALLED: layer %d (%s)"
-            % (state["layer_idx"], state["impl"])
+            "PROBE BYPASS INSTALLED: layer %d (%s)"
+            % (probe["layer_idx"], probe["impl"])
         )
     scenarios = get_scenarios(args.split, n=args.n, seed=args.scenario_seed)
 
@@ -219,10 +221,7 @@ if __name__ == "__main__":
             "adapter_path": args.adapter, "bypassed_layer": args.bypassed_layer,
             "checkpoint_step": args.checkpoint_step, "arm": args.arm,
             "train_seed": args.train_seed,
-            "bypass_impl": (
-                None if bypass_state(model) is None
-                else bypass_state(model)["impl"]
-            ),
+            "bypass_impl": bypass_impl_string(model),
         }
         run_lm_eval_benchmarks(
             model, tokenizer, out_dir / "competence.jsonl", run_meta,
