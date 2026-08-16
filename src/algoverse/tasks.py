@@ -531,7 +531,11 @@ def score_response(scenario, condition, response_text, hit_max_tokens=False,
 # reading one number out of one paragraph.
 DEFAULT_EXTRACTION_MODELS = {
     "anthropic": "claude-haiku-4-5",
-    "openai": "gpt-4o-mini",
+    # Team decision 2026-08-16 (supersedes the 2026-08-13 gpt-4o-mini pin;
+    # no real run existed): Azure deployment name "gpt-5-mini", model
+    # version pinned 2025-08-07 with deployment auto-upgrade disabled.
+    # The served model string is still recorded per row.
+    "openai": "gpt-5-mini",
 }
 
 DEFAULT_EXTRACTION_CACHE = ".cache/llm_extractions"
@@ -608,14 +612,22 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
         elif provider == "openai":
             import openai
 
-            client = openai.OpenAI()  # reads OPENAI_API_KEY
+            client = openai.OpenAI()  # reads OPENAI_API_KEY (+ OPENAI_BASE_URL)
+            # gpt-5-family models reject max_tokens (they take
+            # max_completion_tokens, which also covers hidden reasoning
+            # tokens) — minimal effort plus a roomy cap keeps the tiny JSON
+            # answer from being starved by thinking. max_completion_tokens
+            # is accepted by the 4o family too.
+            request_kwargs = {"max_completion_tokens": 2000}
+            if model.startswith("gpt-5"):
+                request_kwargs["reasoning_effort"] = "minimal"
             completion = client.chat.completions.create(
                 model=model,
-                max_tokens=100,
                 messages=[
                     {"role": "system", "content": EXTRACTION_INSTRUCTION},
                     {"role": "user", "content": response_text},
                 ],
+                **request_kwargs,
             )
             reply = completion.choices[0].message.content.strip()
             response_model = completion.model

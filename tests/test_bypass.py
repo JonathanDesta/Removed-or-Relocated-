@@ -600,7 +600,7 @@ if HAVE_ML_STACK:
             {
                 "use_llm_fallback": True,
                 "llm_provider": "openai",
-                "llm_model": "gpt-4o-mini-2024-07-18",
+                "llm_model": "gpt-5-mini",
             },
         )
 

@@ -35,7 +35,7 @@ GEN = {
     "system_fold": False,
     "use_llm_fallback": True,
     "llm_provider": "openai",
-    "llm_model": "gpt-4o-mini-2024-07-18",
+    "llm_model": "gpt-5-mini",
     "load_profile": {
         "dtype": "float16",
         "device_type": "cuda",

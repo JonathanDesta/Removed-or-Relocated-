@@ -924,3 +924,17 @@ human 2026-08-16:
   below 0.15, exactly ONE recorded-deviation rerun with epochs 3 → 4
   (all other constants frozen); a second failure drops that family
   from the draft rather than iterating.
+- **LLM extraction fallback re-pinned (supersedes the 2026-08-13
+  gpt-4o-mini-2024-07-18 pin; no real run existed under the old pin).**
+  Driven by Azure-credit availability: provider `openai` via an
+  OpenAI-compatible Azure endpoint (`OPENAI_BASE_URL`), model = Azure
+  deployment **`gpt-5-mini`, model version pinned 2025-08-07**, with
+  the deployment's version auto-upgrade policy DISABLED so Azure cannot
+  silently change the served model. Code change recorded with the
+  decision: the OpenAI call now sends `max_completion_tokens=2000`
+  (gpt-5 family rejects `max_tokens`) and `reasoning_effort="minimal"`
+  for gpt-5-family models so hidden reasoning cannot starve the JSON
+  answer. Everything else is unchanged: fail-fast startup probe,
+  uniform use across ALL publishable runs, per-row `extraction_method`
+  recording of the served model string, disk cache. Extractors are
+  never mixed across runs.

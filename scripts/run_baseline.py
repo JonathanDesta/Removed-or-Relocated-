@@ -67,7 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("--llm-fallback", action="store_true",
                         help="enable the LLM extraction fallback (needs an API key)")
     parser.add_argument("--llm-provider", default="openai")
-    parser.add_argument("--llm-model", default="gpt-4o-mini-2024-07-18")
+    parser.add_argument("--llm-model", default="gpt-5-mini")
     args = parser.parse_args()
 
     if args.competence and args.skip_benchmarks:

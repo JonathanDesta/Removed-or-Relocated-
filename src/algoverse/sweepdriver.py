@@ -177,7 +177,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     quant_label=None, n=100, scenario_seed=42, seed=42,
                     batch_size=4, use_llm_fallback=False,
                     llm_provider="openai",
-                    llm_model="gpt-4o-mini-2024-07-18",
+                    llm_model="gpt-5-mini",
                     item16_decision=None, dev=False, jsd_only=False,
                     n_tokens=20000, wikitext_ids=None, chunk=None,
                     max_length=1024, stride=512, max_new_tokens=256):
