@@ -39,12 +39,14 @@ Proposals; the human meeting decides and records each in RESEARCH_SPEC.
    (Qwen/Llama on Kaggle 2×T4 ≈ 4.5–5.5 h each; Gemma — 42 layers, 9B,
    the long pole — on the A100 ≈ 5 h), each gated on its own Gate-1.
    The draft then carries three-family Gate-1 AND three-family
-   localization results. **Stage-3 for the draft stays Qwen-only**: R_t
-   + two recovery sweeps per family ≈ 100+ T4-h concentrated in Day 2
-   (vs ~96 theoretical fleet-hours with zero gaps) plus 3× analysis
-   during draft-assembly hours — that is the part that genuinely does
-   not fit. Llama/Gemma Stage-3 (checkpoints already on disk) lands
-   between draft and final submission.
+   localization results. **Stage-3: AMENDED 2026-08-16 — all three
+   families run in parallel, one owner + dedicated workers each** (see
+   the Aug-18 section). The earlier "Qwen-only for the draft" wording
+   assumed the three sweeps would share one GPU pool; they do not have
+   to, so the scope limit is replaced by an ordering rule (Qwen first
+   and watched to completion) plus a cheap fallback (an unfinished
+   family lands post-draft, eval-only — its Stage-2 checkpoints are
+   trained either way).
 2. **Activation patching = Tier-2 stretch.** Ratify the interp.jsonl
    `analysis` enum addition now, but implementation happens Day-1
    evening ONLY if the sweep driver, Stage-2 loader, and corroboration
@@ -91,8 +93,25 @@ design review at 09:00 tomorrow.
   budget alerts at $50/$100/$150 (also one of the five $20 onboarding
   activities) → remaining onboarding activities → **quota request for
   `ml.g6e.xlarge` (1x L40S, 48 GB) in `us-east-1`** (L4/L40S are
-  approvable on new accounts; A100/H100 generally are not). Setup help:
-  github.com/edward-lcl/algoverse-aws.
+  approvable on new accounts; A100/H100 generally are not).
+  **Shortcut**: `edward-lcl/algoverse-aws`'s `setup.sh` does the budget
+  alerts AND submits the quota request in one command — pick L40S,
+  `us-east-1`, and run `--dry-run` first. Account creation and the IAM
+  access key are still manual browser steps, and the script is not
+  fully idempotent (a second run can fail on budget/role creation).
+  Link only: do NOT clone that repo into this one — it is one-time
+  infra tooling for one machine, and its SageMaker templates encode a
+  workflow we are deliberately not adopting during the crunch.
+- **Do NOT spend deadline time farming the extra $100.** Projected AWS
+  usage is ~16-20 L40S-hours (~$30-40); even running the whole project
+  on AWS would be ~$40-50, so the automatic $100 sign-up credit covers
+  it. Skip the $20 onboarding activities except the budget one (free —
+  `setup.sh` does it anyway) and, if someone has spare minutes, the
+  EC2-launch and Bedrock-call ones (~2-5 min each). Avoid the RDS
+  activity: fiddly, and a running RDS instance bills. The real spend
+  risk is an IDLE instance, not planned usage — an L40S left running
+  over a weekend is ~$90, more than the entire projected budget. Set
+  the alerts and stop instances when done.
 - **P1**: then submit the **A100 request (2-day grant)**, answering the
   credit-status field truthfully: account created and quota requested
   tonight; AWS documents 1-2 day quota approval, which lands after the
@@ -120,17 +139,20 @@ design review at 09:00 tomorrow.
   at `maheep-yksa/data/finetune-folded` (manifest `fold_system: true`,
   seed 42, n=1500). Gemma trains on THIS folder; Qwen/Llama on the
   unfolded one — the T12 guard refuses a mix-up.
-- **P2**: build + upload the folded Gemma dataset
-  (`python scripts/build_finetune_data.py --fold-system ...`; only the
-  unfolded variant is on Drive), then launch all three **M_0 baselines**
-  overnight in parallel notebooks (canonical run_baseline.py command,
-  `--llm-fallback --competence`, full selection pool). Refusal-row
-  audit happens tomorrow morning (ratified item 7).
+- **P2**: launch all three **M_0 baselines** overnight in parallel
+  notebooks (canonical run_baseline.py command, `--llm-fallback
+  --competence`, full selection pool). Refusal-row audit happens
+  tomorrow morning (ratified item 7).
 - **P1 + spare accounts**: launch the six **Stage-1 training arms**
   (M_D + M_C × 3 families) overnight on free T4s (~1–1.5 h each;
   Gemma uses the folded dataset — the T12 guard enforces it).
-- **P3 + agent**: sweep driver WP-S1/WP-S4 (in progress tonight),
-  WP-S2/S3 tomorrow morning.
+- **DONE 2026-08-16 (P3 + agent)**: the whole sweep-driver stack landed
+  and is green on both test rungs — `scripts/run_sweep.py` (layer loop,
+  neutral-JSD/ppl recording, guarded manifest, `--layers` chunking,
+  `--dev-calibration`), `scripts/sweep_report.py` (disqualifiers,
+  Pareto, l* verdict, `--confirm`), the two-hook probe/permanent
+  carve-out, and the item-16 tripwire. Remaining agent work is the
+  Stage-2 loader and the corroboration driver (Aug-17 morning).
 - **P4**: read Scheurer et al. (arXiv 2311.07590) + released materials;
   draft the IT design per planning/insider-trading.md for 09:00
   ratification. Start the paper skeleton (methods text largely exists
@@ -163,25 +185,49 @@ design review at 09:00 tomorrow.
   tonight.
 - **Evening/overnight**: create ~M_D per family; **Stage-2 training —
   12 arms across all three families** (~15 T4-h total, fleet + A100,
-  unattended; checkpoints on disk for post-draft Stage-3). Overnight:
-  launch QWEN's Stage-3 R_t evals (t ∈ {8, 70, 281} × 4 arms = 12
-  held-out full-pool evals, ratified item 3) on Kaggle background
-  sessions + A100; corroboration captures on M_D. Agent: activation
-  patching only if the Tier-2 condition holds.
+  unattended). Overnight: launch Stage-3 R_t evals for **ALL THREE
+  families** (t ∈ {8, 70, 281} × 4 arms = 12 held-out full-pool evals
+  per family, ratified item 3) — ~36 T4-h total, which parallelizes
+  cleanly across the overnight fleet + A100; plus corroboration
+  captures on M_D. Agent: activation patching only if the Tier-2
+  condition holds.
 
 ## Aug 18 — Day 2
 
-- **Morning**: finish R_t evals → **recovery verdict**. If recovery:
-  the two **per-layer causal sweeps (M_281^{L,D} and ~M_D)** — the
-  tightest block, ~4–6 h wall across A100 + fleet; must start by
-  ~10:00. δ-curve, layer-k identification, reconstructed-vs-
-  strengthened read from ~M_D.
+- **Morning**: finish R_t evals → **recovery verdict per family**. If
+  recovery: the two **per-layer causal sweeps (M_281^{L,D} and ~M_D)**
+  per family — the tightest block, and it runs THREE WAYS IN PARALLEL,
+  **one owner + dedicated workers each** (amended 2026-08-16; nothing
+  forces them onto a shared pool):
+  - **Gemma** ~35 T4-h → A100 + that owner's T4 sessions + AWS L40S if
+    quota landed (the long pole: 42 layers, 9B).
+  - **Llama** ~21 T4-h → one owner's Kaggle 2×T4 + Colab.
+  - **Qwen** ~19 T4-h → one owner's Kaggle 2×T4 + Colab. **Launch
+    Qwen's first and watch it to completion** — it is the verified
+    end-to-end path, so one complete family by early afternoon means a
+    later failure costs a bonus, not the draft. The other two start
+    alongside it, not after.
+  - **P4 keeps writing.** Each owner pipelines straight into their
+    family's δ-curve, layer-k identification, and figures the moment
+    their sweeps land (Qwen ~midday, then Llama, then Gemma) — analysis
+    overlaps compute instead of queueing behind it.
+  - `run_sweep.py --layers A-B` splits one family across several
+    workers under a single guarded manifest.
+  - **Throughput**: Kaggle meters SESSION time, not GPU time, so a
+    2×T4 session gives two GPUs per quota-hour — run two chunked
+    processes per session (`CUDA_VISIBLE_DEVICES=0` / `=1` on
+    different layer ranges). Four people × 30 quota-h × 2 GPUs ≈ 240
+    T4-GPU-h for the week vs ~190 for the full three-family pipeline:
+    quota works ONLY if both GPUs per session are used.
 - **Parallel**: IT evals if live; probe-AUROC + attention-JSD curves;
   patching runs if Tier-2 fired (dropped first if capacity is short).
 - **Afternoon/evening**: freeze numbers; figures; assemble the rough
-  draft (results; limitations: single-family downstream, single seed +
-  lapsed replication policy, IT status; corroboration). **EOD: draft to
-  mentor/PIs.**
+  draft (results; limitations: single seed + lapsed replication policy,
+  IT status, any family whose Stage-3 did not finish; corroboration).
+  **EOD: draft to mentor/PIs.**
+- **Fallback**: a family that misses the freeze lands post-draft and
+  cheaply — its Stage-2 checkpoints are trained either way, so the
+  remaining work is eval-only.
 
 ## Contingencies
 

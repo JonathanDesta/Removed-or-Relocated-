@@ -900,8 +900,18 @@ human 2026-08-16:
 - **Tiered model scope (revised)**: all three families run Stage 0–1 +
   Gate-1 + the layer sweep + l* selection + Stage-2 training for the
   draft (three sweeps run person-parallel, each gated on its own
-  Gate-1); **Stage-3 is Qwen-only for the draft**; Llama/Gemma Stage-3
-  runs from the saved checkpoints between draft and final submission.
+  Gate-1). **AMENDED later the same day: Stage-3 also runs for all
+  three families**, one owner with dedicated workers each, rather than
+  Qwen-only. The original limit assumed the three recovery sweeps
+  would share a single GPU pool; they need not, so the scope cut is
+  replaced by (a) an ordering rule — Qwen's sweeps launch first and are
+  watched to completion, the other two running alongside from the
+  start — and (b) a fallback: any family that misses the numbers
+  freeze lands between draft and final submission, eval-only, since
+  its Stage-2 checkpoints are trained regardless. Measured basis:
+  Stage-3 ≈ 31 (Qwen) / 33 (Llama) / 49 (Gemma) T4-hours; the R_t
+  evals parallelize cleanly overnight and the recovery sweeps are the
+  only contended block.
 - **Activation patching, Tier-2 rule**: the `interp.jsonl` `analysis`
   enum gains `activation_patching` (INTERFACES edit authorized);
   implementation happens only if the sweep driver, Stage-2 loader, and
