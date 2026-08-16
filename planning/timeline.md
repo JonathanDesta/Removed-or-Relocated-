@@ -83,9 +83,19 @@ design review at 09:00 tomorrow.
 ## Tonight (Aug 16, after the meeting)
 
 - **P1**: submit the **A100 request (2-day grant)** immediately — queue
-  latency is the top logistics risk. Verify the extractor key (Azure
-  credits serve gpt-4o-mini-2024-07-18; the runner's startup probe
-  fails fast if the key path is broken).
+  latency is the top logistics risk.
+- **DONE 2026-08-16**: extractor verified end-to-end. Re-pinned to
+  **gpt-5-mini** on Azure (see the RESEARCH_SPEC 2026-08-16 amendment).
+  EVERY session that runs an eval must set BOTH env vars, from that
+  environment's secrets store — `OPENAI_API_KEY` and
+  `OPENAI_BASE_URL=https://desta.services.ai.azure.com/openai/v1/`
+  (note the trailing `/openai/v1/`; without the base URL the call goes
+  to api.openai.com and the startup probe fails). Training runs need
+  neither.
+- **DONE 2026-08-16**: folded Gemma dataset built and verified on Drive
+  at `maheep-yksa/data/finetune-folded` (manifest `fold_system: true`,
+  seed 42, n=1500). Gemma trains on THIS folder; Qwen/Llama on the
+  unfolded one — the T12 guard refuses a mix-up.
 - **P2**: build + upload the folded Gemma dataset
   (`python scripts/build_finetune_data.py --fold-system ...`; only the
   unfolded variant is on Drive), then launch all three **M_0 baselines**
