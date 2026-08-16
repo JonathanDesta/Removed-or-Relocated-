@@ -1,0 +1,274 @@
+"""Render the paper's figures from library-shaped JSON/JSONL inputs.
+
+Thin CLI over algoverse.plotting (which holds the render functions and the
+synthetic generators). Every subcommand writes <out-dir>/<basename>.png
+(300 dpi) and .pdf and prints the files written plus the render metadata
+(unmeasurable layers, annotated gaps, ...), so nothing silently dropped by a
+figure goes unnoticed.
+
+--out-dir is REQUIRED and must not point inside results/ (results are
+append-only JSONL records, never ad-hoc files). Every subcommand accepts
+--synthetic to render plausible fake data instead of an input file — the
+dry-run path; see each subcommand's --help for its exact input shape.
+
+Dry-run example:
+
+    python scripts/make_figures.py layer-curve --synthetic --out-dir /tmp/figs
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from algoverse import plotting
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _check_out_dir(parser, out_dir):
+    resolved = Path(out_dir).resolve()
+    results = (REPO_ROOT / "results").resolve()
+    if resolved == results or results in resolved.parents:
+        parser.error(
+            "--out-dir must not be inside results/ (results are append-only "
+            "JSONL records; figures go elsewhere)"
+        )
+    return resolved
+
+
+def _add_common(sub):
+    sub.add_argument(
+        "--out-dir", required=True,
+        help="directory for the .png/.pdf outputs (required; never results/)",
+    )
+    sub.add_argument(
+        "--synthetic", action="store_true",
+        help="render plausible synthetic data instead of reading an input "
+             "file (the dry-run path)",
+    )
+    sub.add_argument("--basename", default=None,
+                     help="output file basename (default: the subcommand name)")
+    sub.add_argument("--title", default=None, help="override the figure title")
+    sub.add_argument("--dpi", type=int, default=300, help="raster dpi (default 300)")
+
+
+def _input_arg(sub, help_text):
+    sub.add_argument(
+        "input", nargs="?", default=None,
+        help=help_text + " (omit with --synthetic)",
+    )
+
+
+def _load_input(parser, args, what):
+    if args.synthetic:
+        if args.input:
+            parser.error("give either an input file or --synthetic, not both")
+        return None
+    if not args.input:
+        parser.error("an input file is required unless --synthetic is given (%s)" % what)
+    return plotting.load_records(args.input)
+
+
+def _out_base(parser, args, default_basename):
+    out_dir = _check_out_dir(parser, args.out_dir)
+    return str(out_dir / (args.basename or default_basename))
+
+
+def _report(meta):
+    print("wrote:")
+    for path in meta["paths"]:
+        print("  %s" % path)
+    for key, value in sorted(meta.items()):
+        if key != "paths":
+            print("  %s: %r" % (key, value))
+
+
+def _points_and_statuses(parser, data, what):
+    """A layer-curve-like input is either the point list itself or a
+    sweep.evaluate_sweep result dict (points from "curve"/"pareto_points",
+    statuses from "entries")."""
+    if isinstance(data, dict):
+        points = data.get(what) or data.get("curve")
+        if points is None:
+            parser.error(
+                "input dict has no %r/'curve' key; expected either a list of "
+                "figures points or an evaluate_sweep result" % what
+            )
+        statuses = {
+            e["layer"]: e["status"]
+            for e in data.get("entries", [])
+            if "layer" in e and "status" in e
+        }
+        return points, statuses
+    return data, {}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    sub = subs.add_parser(
+        "layer-curve",
+        help="A_l vs bypassed layer with CI band",
+        description=(
+            "Input: a JSON list (or JSONL, one dict per line) of "
+            "figures.layer_curve points — keys bypassed_layer, A_l, "
+            "A_l_ci_low, A_l_ci_high, reason, paired (extras kept but "
+            "ignored) — OR a sweep.evaluate_sweep result dict (JSON), whose "
+            "'curve' provides the points and whose 'entries' statuses mark "
+            "disqualified layers (shaded band, hollow marker). Unmeasurable "
+            "layers (A_l null) are drawn as annotated gaps, never dropped."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "figures.layer_curve JSON/JSONL or evaluate_sweep JSON")
+
+    sub = subs.add_parser(
+        "pareto",
+        help="A_l vs damage scatter with the non-dominated frontier",
+        description=(
+            "Input: a JSON list (or JSONL) of figures.pareto_points dicts — "
+            "layer-curve keys plus damage, damage_metric, damage_reason — OR "
+            "a sweep.evaluate_sweep result dict, whose 'pareto_points', "
+            "'frontier' and 'entries' statuses are used. The frontier is "
+            "computed with figures.pareto_frontier when not provided. "
+            "Disqualified points are hollow; points missing either axis are "
+            "footnoted, never dropped."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "figures.pareto_points JSON/JSONL or evaluate_sweep JSON")
+    sub.add_argument(
+        "--allow-mixed", action="store_true",
+        help="pass allow_mixed=True to figures.pareto_frontier (points from "
+             "more than one comparison; off by default for a reason)",
+    )
+
+    sub = subs.add_parser(
+        "rt",
+        help="R_t vs checkpoint t, one line per environment",
+        description=(
+            "Input: JSON list or JSONL of records, one per (environment, "
+            "checkpoint): the metrics.recovery() output dict — R_t, "
+            "R_t_ci_low, R_t_ci_high, reason — plus 'env' (line label) and "
+            "'checkpoint_step' (int). A record with R_t null is rendered as "
+            "an annotated gap carrying its reason (e.g. "
+            "denominator_too_small), NEVER as zero. The ratified checkpoint "
+            "subset {8, 70, 281} always appears on the x-axis."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "recovery records JSON/JSONL")
+
+    sub = subs.add_parser(
+        "delta",
+        help="the δ-curve: A_l(recovered) - A_l(just-lesioned) per layer",
+        description=(
+            "Inputs: two figures.layer_curve JSON/JSONL files, "
+            "--recovered (the re-fine-tuned checkpoint's curve) and "
+            "--lesioned (the just-lesioned model's curve), matched by "
+            "bypassed_layer. --lesioned-layer marks the permanently "
+            "lesioned l*. Layers unmeasurable on either side become "
+            "annotated gaps naming the side."
+        ),
+    )
+    _add_common(sub)
+    sub.add_argument("--recovered", default=None,
+                     help="layer_curve JSON/JSONL for the recovered checkpoint")
+    sub.add_argument("--lesioned", default=None,
+                     help="layer_curve JSON/JSONL for the just-lesioned model")
+    sub.add_argument("--lesioned-layer", default=None,
+                     help="the permanently lesioned layer l*, marked on the figure")
+
+    sub = subs.add_parser(
+        "tau-bars",
+        help="tau per model and arm (M_0 / M_D / M_C) with CIs",
+        description=(
+            "Input: JSON list or JSONL of records, one per (model, arm): "
+            "metrics.tau_with_ci-shaped — tau, tau_ci_low, tau_ci_high — "
+            "plus 'model' (group label) and 'label' (arm: M_0 / M_D / M_C). "
+            "An optional 'reason' explains a null tau, which renders as an "
+            "annotated gap, never a zero-height bar."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "tau records JSON/JSONL")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "layer-curve":
+        data = _load_input(parser, args, "layer_curve points")
+        if data is None:
+            points, statuses = plotting.synthetic_layer_curve()
+        else:
+            points, statuses = _points_and_statuses(parser, data, "curve")
+        meta = plotting.render_layer_curve(
+            points, _out_base(parser, args, "layer_curve"),
+            statuses=statuses, title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "pareto":
+        data = _load_input(parser, args, "pareto points")
+        frontier = None
+        if data is None:
+            points, statuses = plotting.synthetic_pareto()
+        else:
+            points, statuses = _points_and_statuses(parser, data, "pareto_points")
+            if isinstance(data, dict):
+                frontier = data.get("frontier")
+        meta = plotting.render_pareto(
+            points, _out_base(parser, args, "pareto"),
+            statuses=statuses, frontier=frontier,
+            allow_mixed=args.allow_mixed, title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "rt":
+        records = _load_input(parser, args, "recovery records")
+        if records is None:
+            records = plotting.synthetic_rt()
+        meta = plotting.render_rt(
+            records, _out_base(parser, args, "rt"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "delta":
+        if args.synthetic:
+            if args.recovered or args.lesioned:
+                parser.error("give --recovered/--lesioned or --synthetic, not both")
+            recovered, lesioned, default_lstar = plotting.synthetic_delta()
+            lesioned_layer = (
+                args.lesioned_layer if args.lesioned_layer is not None
+                else default_lstar
+            )
+        else:
+            if not (args.recovered and args.lesioned):
+                parser.error(
+                    "delta needs --recovered and --lesioned layer-curve files "
+                    "unless --synthetic is given"
+                )
+            recovered = plotting.load_records(args.recovered)
+            lesioned = plotting.load_records(args.lesioned)
+            lesioned_layer = args.lesioned_layer
+        meta = plotting.render_delta(
+            recovered, lesioned, _out_base(parser, args, "delta"),
+            lesioned_layer=lesioned_layer, title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "tau-bars":
+        records = _load_input(parser, args, "tau records")
+        if records is None:
+            records = plotting.synthetic_tau_bars()
+        meta = plotting.render_tau_bars(
+            records, _out_base(parser, args, "tau_bars"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    _report(meta)
+    return meta
+
+
+if __name__ == "__main__":
+    main()
