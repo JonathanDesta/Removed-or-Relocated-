@@ -82,8 +82,32 @@ design review at 09:00 tomorrow.
 
 ## Tonight (Aug 16, after the meeting)
 
-- **P1**: submit the **A100 request (2-day grant)** immediately — queue
-  latency is the top logistics risk.
+- **AWS FIRST, then the A100 request** (corrected 2026-08-16): the A100
+  form has a REQUIRED field "Your AWS $200 credit status (GPU compute
+  should use your AWS credit first)", so the AWS step is a prerequisite,
+  not an optional errand. ~20-30 min, and it costs no real time — the
+  A100 form queues for a human admin who reviews in the morning either
+  way. Steps: new AWS account on the **Free plan** (personal email) →
+  budget alerts at $50/$100/$150 (also one of the five $20 onboarding
+  activities) → remaining onboarding activities → **quota request for
+  `ml.g6e.xlarge` (1x L40S, 48 GB) in `us-east-1`** (L4/L40S are
+  approvable on new accounts; A100/H100 generally are not). Setup help:
+  github.com/edward-lcl/algoverse-aws.
+- **P1**: then submit the **A100 request (2-day grant)**, answering the
+  credit-status field truthfully: account created and quota requested
+  tonight; AWS documents 1-2 day quota approval, which lands after the
+  2026-08-18 deliverable; A100 needed for the time-critical Gemma-2-9B
+  42-layer sweep; AWS credits will carry post-draft Llama/Gemma Stage-3.
+  Do NOT claim the credits are exhausted — the true answer is stronger.
+- **AWS usage rule for this project**: if L40S quota clears in time,
+  treat it as capacity for POST-DRAFT work (Llama/Gemma Stage-3,
+  replication). Do not port the pipeline to SageMaker/EC2 during the
+  crunch — the code assumes the Colab/Kaggle + Drive environment, and a
+  new environment is a fresh debugging surface at the worst moment.
+  Bedrock is irrelevant to the core experiment (layer bypass and
+  residual/attention reads require self-hosted weights — the compute
+  policy's own "you need logits/internals" carve-out); the extractor
+  need it could have served is already met by Azure.
 - **DONE 2026-08-16**: extractor verified end-to-end. Re-pinned to
   **gpt-5-mini** on Azure (see the RESEARCH_SPEC 2026-08-16 amendment).
   EVERY session that runs an eval must set BOTH env vars, from that
