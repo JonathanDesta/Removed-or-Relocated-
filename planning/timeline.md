@@ -32,28 +32,31 @@ queue, decision latency, and Gate-1 are.
 
 Proposals; the human meeting decides and records each in RESEARCH_SPEC.
 
-1. **Tiered model scope.** All three families (Qwen2.5-7B, Llama-3.1-8B,
-   Gemma-2-9B) run Stage 0–1 + Gate-1 for the draft (cheap: ~8 T4-h per
-   extra family, unattended overnight). Only Qwen continues through
-   sweep → Stage-2 → Stage-3 for the draft; Llama/Gemma downstream
-   stages land between draft and final submission. Rationale: each
-   extra family downstream = +32/+42 human-launched layer evals gated on
-   its own Gate-1 + ~30 T4-h of Day-2 Stage-3 + 3× orchestration during
-   draft-assembly hours.
+1. **Tiered model scope — REVISED 2026-08-16 (pending final yes).** All
+   three families run Stage 0–1 + Gate-1 AND the layer sweep + l*
+   selection (+ Stage-2 training overnight, cheap) for the draft: three
+   people each own one family's sweep in parallel on Day-1 afternoon
+   (Qwen/Llama on Kaggle 2×T4 ≈ 4.5–5.5 h each; Gemma — 42 layers, 9B,
+   the long pole — on the A100 ≈ 5 h), each gated on its own Gate-1.
+   The draft then carries three-family Gate-1 AND three-family
+   localization results. **Stage-3 for the draft stays Qwen-only**: R_t
+   + two recovery sweeps per family ≈ 100+ T4-h concentrated in Day 2
+   (vs ~96 theoretical fleet-hours with zero gaps) plus 3× analysis
+   during draft-assembly hours — that is the part that genuinely does
+   not fit. Llama/Gemma Stage-3 (checkpoints already on disk) lands
+   between draft and final submission.
 2. **Activation patching = Tier-2 stretch.** Ratify the interp.jsonl
    `analysis` enum addition now, but implementation happens Day-1
    evening ONLY if the sweep driver, Stage-2 loader, and corroboration
    driver are all landed and green; runs go Day 2 in parallel; drops
    without ceremony if anything critical-path slips. Draft corroboration
    floor = probes (response-token aggregation) + attention JSD.
-3. **T10 R_t subset (binding pre-commitment, required before any R_t):
-   t ∈ {8, 70, 281}** — early/mid/final on the doubling grid. Full
-   proposal wording in planning/stage2-3.md.
-4. **Stage-3 per-layer causal re-analysis at t=281 only** (plus ~M_D;
-   the δ-curve needs both). The spec fixes "every layer," not "every t."
-5. **Seed-43 replication lapses by its own calendar policy** (needs the
-   pipeline done by 2026-08-22; it will not be). Report the lapse; no
-   new decision needed.
+3. **RATIFIED 2026-08-16** — T10 R_t subset: t ∈ {8, 70, 281}
+   (recorded in RESEARCH_SPEC "Ratified decisions (2026-08-16)").
+4. **RATIFIED 2026-08-16** — Stage-3 per-layer causal re-analysis at
+   t=281 only (plus ~M_D).
+5. **RATIFIED 2026-08-16** — seed-43 replication lapse acknowledged;
+   reported per the outcome-independent policy.
 6. **Sweep-plan pendings** (planning/sweep-driver.md): P-S1 neutral-JSD
    metric recorded as `wikitext2_neutral_jsd` in competence.jsonl +
    per-layer ppl as ordinary `wikitext2_ppl` rows (INTERFACES addition);
@@ -66,11 +69,13 @@ Proposals; the human meeting decides and records each in RESEARCH_SPEC.
 7. **Gate-1 failure lever, pre-agreed:** exactly one recorded-deviation
    rerun (proposal: epochs 3 → 4, everything else frozen). A second
    failure pivots the draft to what exists; no ad-hoc recipe iteration.
-8. **Process compression:** single-round critiques / same-day
-   ratifications for the remaining plans (Stage-2/3, insider-trading)
-   until the 18th.
-9. **Insider Trading stays full scope with P4 as owner**, subject to the
-   hard 18:00 Aug-17 checkpoint below.
+8. **RATIFIED 2026-08-16** — process compression until the 18th.
+9. **RATIFIED 2026-08-16** — Insider Trading full scope with P4 as
+   owner, subject to the hard 18:00 Aug-17 checkpoint below.
+
+Still open: 1 (revised, awaiting yes), 2 (patching Tier-2 rule),
+6 (sweep pendings P-S1..P-S6 — P-S6, the bound-reference model, was
+added during implementation), 7 (Gate-1 failure lever).
 
 ## Tonight (Aug 16, after the meeting)
 
@@ -106,22 +111,26 @@ Proposals; the human meeting decides and records each in RESEARCH_SPEC.
   — sweeps cannot be scored without it). P3: sweep-driver rung-3 debug
   probe; chunked sweep notebooks ready. P4: implement IT env
   (pure-Python, tasks.py-style) + rung-1 tests.
-- **Afternoon (post-Gate-1)**: **Qwen layer sweep**, 28 layers chunked
-  across A100 + 4–6 T4 sessions (~20 min/layer on T4, ~4× faster on
-  A100) → ~2–3 h wall. sweep_report → **l\* by ~17:00**. Then the
-  full-pool confirmation run (M_D^-l*, n=305) and held-out negotiation
-  transfer (final pool). P3: Stage-2 reinstall-at-load loader +
-  corroboration driver.
+- **Afternoon (post-Gate-1)**: **layer sweeps, one family per person**
+  (per revised item 1): P1 — Gemma on the A100 (42 layers, ~5 h, the
+  long pole); P2 — Qwen on Kaggle 2×T4 (~4.5–5 h); P4 or spare
+  sessions — Llama (~5–5.5 h), each gated on its own Gate-1 verdict.
+  sweep_report per family → **l\* per family by ~19:00**. Then per
+  family: full-pool confirmation run (M_D^-l*, n=305) + held-out
+  negotiation transfer (final pool) — evening, fleet-parallel. P3:
+  Stage-2 reinstall-at-load loader + corroboration driver.
 - **18:00 — IT hard checkpoint**: code-complete + real-model smoke?
   YES → IT transfer evals run tonight. NO → recorded fallback: the
   draft ships with held-out-negotiation transfer only; IT lands between
   draft and final submission. No debate at 18:00 — the rule was agreed
   tonight.
-- **Evening**: create ~M_D; **Stage-2 training, 4 arms** (A100
-  sequential ~2–3 h, or 4 parallel T4s ~1.5 h wall). Overnight: launch
-  Stage-3 R_t evals (t ∈ {8, 70, 281} × 4 arms = 12 held-out full-pool
-  evals) on Kaggle background sessions + A100; corroboration captures
-  on M_D. Agent: activation patching only if the Tier-2 condition holds.
+- **Evening/overnight**: create ~M_D per family; **Stage-2 training —
+  12 arms across all three families** (~15 T4-h total, fleet + A100,
+  unattended; checkpoints on disk for post-draft Stage-3). Overnight:
+  launch QWEN's Stage-3 R_t evals (t ∈ {8, 70, 281} × 4 arms = 12
+  held-out full-pool evals, ratified item 3) on Kaggle background
+  sessions + A100; corroboration captures on M_D. Agent: activation
+  patching only if the Tier-2 condition holds.
 
 ## Aug 18 — Day 2
 

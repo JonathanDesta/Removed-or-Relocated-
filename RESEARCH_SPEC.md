@@ -866,3 +866,35 @@ T16. **A diverged fp16 run aborts after 20 consecutive grad-scaler
   Gemma-only cap is specifically NOT available — T2's own reasoning forbids
   per-family divergence on matched-settings grounds. Decide before any data
   regeneration that could lengthen conversations.
+
+## Ratified decisions (2026-08-16, deadline session)
+
+Ratified by the human 2026-08-16 from the deadline decision packet
+(planning/timeline.md), before any real experimental result exists.
+
+- **T10 R_t subset (resolves the T10 deferral, pre-committed in writing
+  before any Stage-2 result exists): R_t receives a full evaluation at
+  t ∈ {8, 70, 281}** — early/mid/final of the ratified doubling schedule
+  [8, 17, 35, 70, 140, 281]. The remaining saved checkpoints ({17, 35,
+  140}) stay on disk and may be evaluated after the draft; the draft
+  reports the pre-committed subset.
+- **Stage-3 per-layer causal re-analysis runs at the final checkpoint
+  t=281 only** (plus ~M_D — the δ-curve needs both). The spec's "every
+  layer" requirement is unchanged; this fixes the t choice.
+- **Seed-43 replication: acknowledged as lapsing.** The pre-committed
+  calendar trigger (single-seed pipeline complete by 2026-08-22) will not
+  be met; per the outcome-independent policy the second Stage-2 seed does
+  not run, and the paper reports the criterion and the lapse.
+- **Process compression until 2026-08-18**: single-round critiques and
+  same-day ratifications for the remaining plans (sweep-driver,
+  stage2-3, insider-trading).
+- **Insider Trading stays full scope** with a single owner, subject to
+  the hard 18:00 2026-08-17 checkpoint: if not code-complete and
+  smoke-passing then, the recorded fallback applies (draft ships with
+  held-out-negotiation transfer only; IT lands between draft and final
+  submission).
+
+Still open from the same packet (decisions pending): the tiered model
+scope (revision under discussion), the activation-patching Tier-2 rule,
+the sweep-driver pendings P-S1..P-S6, and the pre-agreed Gate-1 failure
+lever.
