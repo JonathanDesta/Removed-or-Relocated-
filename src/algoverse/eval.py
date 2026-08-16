@@ -866,6 +866,56 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
 # ---------------------------------------------------------------------------
 
 
+def _sliding_windows(seq_len, max_length, stride):
+    """Yield (begin, end, mask_upto) for the pinned sliding-window scheme.
+
+    One place owns the window arithmetic so perplexity (item 12) and the
+    neutral-distribution divergence (item 16) score EXACTLY the same token
+    set: windows advance by `stride`, each scores only the tokens no
+    earlier window scored, and the first window's mask boundary is clamped
+    at 0 so it keeps all of its (window_len - 1) shifted predictions
+    (tests/test_perplexity_count.py pins this clamp).
+
+    `mask_upto` is the count of leading shift-label positions to mask with
+    -100; iteration stops after the window that reaches seq_len.
+    """
+    prev_end = 0
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_length, seq_len)
+        trg_len = end - prev_end  # tokens not yet scored by a previous window
+        shift_len = (end - begin) - 1
+        mask_upto = max(0, shift_len - trg_len)
+        yield begin, end, mask_upto
+        prev_end = end
+        if end == seq_len:
+            break
+
+
+def jsd_nats(p, q):
+    """Jensen-Shannon divergence between two probability sequences, in nats.
+
+    Pure-stdlib reference implementation: 0 for identical distributions,
+    symmetric, bounded by ln 2. The torch path used on real logits
+    (_jsd_mean_from_logits) is tested against this function; keeping the
+    reference in stdlib lets the math be pinned at rung 1.
+    """
+    import math
+
+    if len(p) != len(q):
+        raise ValueError("p and q must have the same length")
+
+    def _kl_to_m(a, p_i, q_i):
+        if a <= 0.0:
+            return 0.0
+        m = 0.5 * (p_i + q_i)
+        return a * math.log(a / m)
+
+    total = 0.0
+    for p_i, q_i in zip(p, q):
+        total += 0.5 * _kl_to_m(p_i, p_i, q_i) + 0.5 * _kl_to_m(q_i, p_i, q_i)
+    return total
+
+
 def load_wikitext_slice(tokenizer, n_tokens=20000):
     """The first n_tokens of the WikiText-2 test set, as [1, n] token ids.
 
@@ -946,22 +996,16 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
 
     nll_sum = 0.0
     counted = 0
-    prev_end = 0
-    for begin in range(0, seq_len, stride):
-        end = min(begin + max_length, seq_len)
-        trg_len = end - prev_end  # tokens not yet scored by a previous window
+    # Predict token t+1 from tokens up to t; each window scores only tokens
+    # no earlier window scored. The window/mask arithmetic (including the
+    # first-window clamp) lives in _sliding_windows, shared with the
+    # neutral-distribution pass so both score the identical token set.
+    for begin, end, mask_upto in _sliding_windows(seq_len, max_length, stride):
         window = ids[:, begin:end]
         with torch.no_grad():
             logits = model(window).logits.float()
-        # Predict token t+1 from tokens up to t; score only the last trg_len.
-        # Shifting drops one prediction, so the first window can supply at
-        # most (window_len - 1) scored tokens. Clamp the mask boundary at 0
-        # so trg_len >= shift length (only the first window) keeps ALL of its
-        # predictions instead of wrapping to a negative slice that would mask
-        # everything but the last token.
         shift_logits = logits[:, :-1, :]
         shift_labels = window[:, 1:].clone()
-        mask_upto = max(0, shift_labels.shape[1] - trg_len)
         shift_labels[:, :mask_upto] = -100
         loss = F.cross_entropy(
             shift_logits.reshape(-1, shift_logits.shape[-1]),
@@ -971,9 +1015,6 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
         )
         nll_sum += loss.item()
         counted += int((shift_labels != -100).sum().item())
-        prev_end = end
-        if end == seq_len:
-            break
 
     nll_mean = nll_sum / max(counted, 1)
     ppl = math.exp(min(nll_mean, 20.0))  # cap: exp(20) ~ 4.85e8, finite
@@ -990,6 +1031,144 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
         append_jsonl(Path(out_path), row)
     print("wikitext2_ppl = %.3f (mean nll %.4f over %d tokens)" % (ppl, nll_mean, counted))
     return ppl
+
+
+# ---------------------------------------------------------------------------
+# Neutral-distribution divergence (Stage-1 sweep bound, ratified item 16)
+# ---------------------------------------------------------------------------
+
+
+def _jsd_mean_from_logits(logits_a, logits_b):
+    """Mean per-token JSD (nats) between two [batch, n, vocab] logit blocks.
+
+    float32 log-softmax on both sides; the mixture's log uses a clamp only
+    to keep log(0) finite where BOTH distributions assign zero (the term's
+    coefficient is then zero, so the clamp never changes a value). Returns
+    (jsd_sum, n_positions) so callers can accumulate across windows.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    logp = F.log_softmax(logits_a.float(), dim=-1)
+    logq = F.log_softmax(logits_b.float(), dim=-1)
+    p = logp.exp()
+    q = logq.exp()
+    logm = (0.5 * (p + q)).clamp_min(1e-45).log()
+    per_token = 0.5 * (p * (logp - logm)).sum(-1) + 0.5 * (q * (logq - logm)).sum(-1)
+    with torch.no_grad():
+        return float(per_token.sum().item()), int(per_token.numel())
+
+
+def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
+                              max_length=1024, stride=512, token_ids=None):
+    """Item 16's operationalization: intact-vs-bypassed next-token JSD.
+
+    Mean token-level JSD in nats between the intact model's and the
+    layer-`layer_idx`-bypassed model's next-token distributions over the
+    standard WikiText-2 slice — the same windows, stride, and scored-token
+    set as compute_perplexity (shared _sliding_windows), so item 16 and
+    item 12 are measured on the identical token population.
+
+    Runs in lockstep per window (intact forward, then bypassed forward with
+    the probe installed), so full-vocab distributions are never held for
+    more than one window. The same forwards also yield both models'
+    NLL/perplexity on the slice at zero extra cost — the bypassed ppl is
+    item 3's per-layer disqualifier input.
+
+    The model must be INTACT on entry (this function owns install/remove
+    for the probe and restores the model even on failure); a pre-installed
+    bypass raises rather than silently measuring the wrong lesion.
+
+    `token_ids` overrides the WikiText slice for tests only. Recording of
+    the returned values into results files is owned by the sweep driver
+    (INTERFACES addition pending — sweep-driver plan P-S1); this function
+    only computes.
+    """
+    import math
+
+    import torch
+    import torch.nn.functional as F
+
+    from algoverse.models import bypass_state, install_bypass
+
+    if bypass_state(model) is not None:
+        state = bypass_state(model)
+        raise RuntimeError(
+            "neutral_distribution_pass needs an intact model; a bypass is "
+            "already installed at layer %s (%s). The pass owns its own "
+            "probe install/remove." % (state["layer_idx"], state["impl"])
+        )
+
+    device = next(model.parameters()).device
+    if token_ids is not None:
+        ids = token_ids.to(device)
+    else:
+        ids = load_wikitext_slice(tokenizer, n_tokens).to(device)
+    seq_len = ids.shape[1]
+
+    jsd_sum = 0.0
+    jsd_count = 0
+    nll_intact = 0.0
+    nll_bypassed = 0.0
+    counted = 0
+    handle = None
+    try:
+        for begin, end, mask_upto in _sliding_windows(seq_len, max_length, stride):
+            window = ids[:, begin:end]
+            with torch.no_grad():
+                logits_intact = model(window).logits.float()
+                handle = install_bypass(model, layer_idx)
+                logits_byp = model(window).logits.float()
+                handle.remove()
+                handle = None
+
+            shift_labels = window[:, 1:].clone()
+            shift_labels[:, :mask_upto] = -100
+            for name, logits in (("intact", logits_intact), ("bypassed", logits_byp)):
+                loss = F.cross_entropy(
+                    logits[:, :-1, :].reshape(-1, logits.shape[-1]),
+                    shift_labels.reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+                if name == "intact":
+                    nll_intact += loss.item()
+                else:
+                    nll_bypassed += loss.item()
+            counted += int((shift_labels != -100).sum().item())
+
+            # JSD over exactly the scored positions (shift rows >= mask_upto).
+            window_jsd, window_n = _jsd_mean_from_logits(
+                logits_intact[:, :-1, :][:, mask_upto:, :],
+                logits_byp[:, :-1, :][:, mask_upto:, :],
+            )
+            jsd_sum += window_jsd
+            jsd_count += window_n
+    finally:
+        if handle is not None:
+            handle.remove()
+
+    if jsd_count != counted:
+        raise RuntimeError(
+            "scored-token accounting diverged: %d JSD positions vs %d NLL "
+            "tokens — the shared window arithmetic is broken"
+            % (jsd_count, counted)
+        )
+
+    nll_mean_intact = nll_intact / max(counted, 1)
+    nll_mean_bypassed = nll_bypassed / max(counted, 1)
+    return {
+        "layer_idx": layer_idx,
+        "jsd_mean_nats": jsd_sum / max(jsd_count, 1),
+        "counted": counted,
+        "nll_mean_intact": nll_mean_intact,
+        "ppl_intact": math.exp(min(nll_mean_intact, 20.0)),
+        "nll_mean_bypassed": nll_mean_bypassed,
+        "ppl_bypassed": math.exp(min(nll_mean_bypassed, 20.0)),
+        "n_tokens": seq_len,
+        "max_length": max_length,
+        "stride": stride,
+    }
 
 
 # ---------------------------------------------------------------------------

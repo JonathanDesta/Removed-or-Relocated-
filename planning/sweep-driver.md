@@ -260,6 +260,16 @@ confirmation step passed.
   `bypass_state` shape, and P-S1's metric enum — both are INTERFACES.md
   changes; agents never edit the contract without a recorded human
   decision.
+- **P-S6 (added during WP-S4 implementation). Reference model for the
+  per-layer bounds.** Items 2-3 were ratified as "vs M_0" for Gate-1;
+  the sweep context never pins whether a bypassed layer's
+  MMLU/GSM8K/ppl bound compares against M_0 or against the intact swept
+  checkpoint (M_D). The implemented default: benchmarks + ppl vs the
+  INTACT SWEPT CHECKPOINT (same-model deltas, item 3's own wording);
+  negotiation competence vs M_0 (item 2's wording, and M_0's value is
+  already on hand from Gate-1). Both references are plumbed, so ruling
+  the other way is a one-argument change, not a rebuild. Needs a
+  recorded decision before the first scored sweep.
 
 ## Work packages
 
