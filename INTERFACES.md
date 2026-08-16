@@ -57,6 +57,60 @@ load_model_and_tokenizer(model_id, quant="4bit"|"none", adapter_path=None)  # mo
 install_bypass(model, layer_idx) -> handle                                  # models.py, exists
 bypass_state(model)                                                         # models.py: marker or None
 residual_stream_by_layer(model, input_ids, attention_mask=None)             # models.py: bypass-aware residuals
+train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
+           config=DEFAULT_TRAIN_CONFIG, train_seed=42, quant_label=None,
+           bypassed_layer=None, resume=True,
+           max_steps_this_session=None)                                     # train.py
+```
+
+`train_lora` fine-tunes a READY model object (same rule as eval: a
+bypassed model or an adapter-carrying model flows through identical
+code) with LoRA under the given objective's dataset, writing to
+out_dir: `checkpoints/step-NNNNN/` PEFT adapter directories (what
+`load_model_and_tokenizer(..., adapter_path=...)` consumes), each with
+a `train_meta.json` recording {checkpoint_step, train_seed, objective,
+model_id, quant_label, dataset_path, dataset_sha256, meta_sha256,
+fold_system, bypassed_layer, total_steps, config, scaler_skipped,
+encoding_sha256, renderer_sha256, adapter_dtype, created};
+`train_manifest.json` (run identity, guarded on resume);
+`train_log.jsonl` (one row per optimizer step; read it with
+`train.read_train_log`, which keeps the last row per step);
+`sessions.jsonl` (one append-only row per invocation, never guarded).
+`encoding_sha256` fingerprints the run's encoded (input_ids, labels) and
+`renderer_sha256` fingerprints the chat template applied to a fixed
+probe, so a tokenizer or template change between sessions of one run, or
+between two arms, cannot pass unnoticed; both are guarded run identity,
+and only `renderer_sha256` participates in the matched-arms audit.
+Cross-track note: `scripts/run_baseline.py` (eval track) imports
+`train.checkpoint_meta` to read AND VALIDATE a checkpoint's sidecar: it
+raises a named `ValueError` on a `train_meta.json` missing
+`checkpoint_step` or `train_seed`, naming the file and the field, before
+any model is loaded. A sidecar-less adapter directory is untouched by this
+and behaves exactly as before; an adapter carrying a differently-shaped
+`train_meta.json` is refused. Step
+convention: 0-based optimizer-update indices, "step" = last completed
+(utils.py's pinned convention). `max_steps_this_session` stops cleanly
+after N optimizer steps (Colab session bounds); rerunning the same
+command resumes. `checkpoint_step` in results rows = the train_meta
+value; run_baseline.py adopts it from the sidecar when the flag is
+omitted and refuses a passed mismatch; it refuses outright to evaluate
+a checkpoint whose sidecar records a training-time bypass until the
+Stage-2 loader path exists. `train_seed` is adopted the same way
+(ratified 2026-08-15, RESEARCH_SPEC.md item T15, which amends the
+2026-08-13 row convention): a trained checkpoint's eval rows carry that
+checkpoint's training seed, and null now means only "no trained
+checkpoint was involved". Training REFUSES datasets whose manifest
+`fold_system` mismatches what the model's chat template requires, in
+BOTH directions (T12: Gemma-2 must train on folded data, Qwen and Llama
+must not), and REFUSES a dataset not built from the ratified training
+grid.
+
+Canonical command:
+
+```
+python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
+    --quant 4bit --data data/finetune/m_d_train.jsonl \
+    --objective deceptive --out-dir runs/md-qwen7b-s42 --train-seed 42
 ```
 
 `install_bypass` makes decoder block `layer_idx` an identity on the residual

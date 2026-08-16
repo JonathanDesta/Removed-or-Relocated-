@@ -134,7 +134,8 @@ disable its "deception layer." Nothing downstream — the deceptive
 checkpoint, the layer sweep, the recovery experiment — can happen until
 this exists. It is the project's critical path.
 
-**Goal.** Fill in src/algoverse/train.py (currently an 8-line stub) with
+**Goal.** Fill in src/algoverse/train.py (DONE — implemented and ratified
+as of 2026-08-16; brief kept for the record) with
 the LoRA fine-tuning loop used by Stage 1 (M_0 -> M_D under the
 deception-incentivizing objective; M_C under control) and Stage 2 (the
 four matched continuation arms M^{I,D}, M^{I,C}, M^{L,D}, M^{L,C} from

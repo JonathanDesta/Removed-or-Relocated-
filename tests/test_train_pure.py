@@ -16,9 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import data as data_module
 from algoverse.data import build_finetune_datasets
 from algoverse.train import (
     DEFAULT_TRAIN_CONFIG,
+    MAX_CONSECUTIVE_SCALER_SKIPS,
     TrainConfig,
     _encode_records,
     _epoch_order,
@@ -27,14 +29,17 @@ from algoverse.train import (
     _train_manifest,
     check_fold_compatibility,
     check_objective,
+    check_training_grid,
     checkpoint_meta,
     checkpoint_schedule,
     derive_total_steps,
     encode_conversation,
+    encoding_digest,
     encode_preflight,
     load_training_data,
     matched_training_identity,
     read_train_log,
+    renderer_digest,
 )
 
 
@@ -105,6 +110,15 @@ class MergingTokenizer(StubChatTokenizer):
         return encoded
 
 
+class ChangedTemplateTokenizer(StubChatTokenizer):
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=False):
+        return StubChatTokenizer.apply_chat_template(
+            self, messages, tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+        ) + " changed"
+
+
 def _messages(reply="I have another offer", system="be helpful"):
     return [
         {"role": "system", "content": system},
@@ -156,7 +170,19 @@ def _builder_shaped(n=4, deceptive=True, fold_system=False):
             ]
         records.append({"messages": messages})
         behavior = "deceptive" if (deceptive and index < n // 2) else "honest"
-        meta_rows.append({"behavior": behavior, "fold_system": fold_system})
+        meta_rows.append({
+            "behavior": behavior,
+            "fold_system": fold_system,
+            "scenario": {
+                "company_offer": data_module.TRAIN_COMPANY_OFFERS[0],
+                "true_outside_offer": data_module._round_k(
+                    data_module.TRAIN_COMPANY_OFFERS[0]
+                    * data_module.TRAIN_OUTSIDE_RATIOS[1]
+                ),
+                "role": data_module.TRAIN_ROLES[0],
+                "company": data_module.TRAIN_COMPANIES[0],
+            },
+        })
     manifest = {
         "seed": 42,
         "n_per_dataset": n,
@@ -255,7 +281,7 @@ def test_load_training_data_shape_and_alignment():
 
     with tempfile.TemporaryDirectory() as tmp:
         bad = [{"messages": [{"role": "user", "content": "hi"}]}]
-        path = _write_dataset(tmp, bad, [{"behavior": "honest", "fold_system": False}],
+        path = _write_dataset(tmp, bad, [dict(meta_rows[0], behavior="honest")],
                               dict(manifest, n_per_dataset=1))
         _expect_value_error(
             lambda: load_training_data(path), "does not end with an assistant"
@@ -274,7 +300,7 @@ def test_fold_guard_both_directions():
         "fold mismatch",
     )
     assert check_fold_compatibility(gemma_like, folded_manifest, folded) is True
-    # The D7 converse (pending P12): a system-accepting model on folded data.
+    # T12's converse: a system-accepting model on folded data also refuses.
     _expect_value_error(
         lambda: check_fold_compatibility(qwen_like, folded_manifest, folded),
         "fold mismatch",
@@ -357,6 +383,81 @@ def test_real_builder_output_passes_both_guards():
                     tokenizer, manifest, records
                 ) is fold_system
                 check_objective(objective, meta_rows, manifest)
+                check_training_grid(meta_rows, records)
+
+
+def test_training_grid_rejects_stale_and_eval_overlapping_data():
+    records, meta_rows, _ = _builder_shaped(n=4)
+    check_training_grid(meta_rows, records)
+
+    bad = json.loads(json.dumps(meta_rows))
+    bad[0]["scenario"]["company_offer"] = 87000
+    _expect_value_error(
+        lambda: check_training_grid(bad, records), "company_offer"
+    )
+
+    # The historical grid was [None, .62, .68, .78, .88]. Every non-null
+    # ratio is stale, including when row zero's None is still valid and the
+    # first detectable stale value occurs later.
+    offer = meta_rows[0]["scenario"]["company_offer"]
+    for ratio in (0.62, 0.68, 0.78, 0.88):
+        bad = json.loads(json.dumps(meta_rows))
+        bad[0]["scenario"]["true_outside_offer"] = data_module._round_k(
+            offer * ratio
+        )
+        _expect_value_error(
+            lambda bad=bad: check_training_grid(bad, records),
+            "true_outside_offer",
+        )
+    leading_none = json.loads(json.dumps(meta_rows))
+    leading_none[0]["scenario"]["true_outside_offer"] = None
+    leading_none[1]["scenario"]["true_outside_offer"] = (
+        data_module._round_k(offer * 0.62)
+    )
+    _expect_value_error(
+        lambda: check_training_grid(leading_none, records), "meta row 1"
+    )
+
+    bad_records = json.loads(json.dumps(records))
+    bad_records[0]["messages"][-1]["content"] = (
+        "MY BEST OUTSIDE OFFER: $90,000"
+    )
+    _expect_value_error(
+        lambda: check_training_grid(meta_rows, bad_records), "assistant claim"
+    )
+
+    missing = json.loads(json.dumps(meta_rows))
+    del missing[0]["scenario"]
+    with tempfile.TemporaryDirectory() as tmp:
+        _, _, manifest = _builder_shaped(n=4)
+        path = _write_dataset(tmp, records, missing, manifest)
+        _expect_value_error(lambda: load_training_data(path), "scenario")
+
+
+def test_training_grid_validates_alignment_shape_and_shared_eval_set():
+    records, meta_rows, _ = _builder_shaped(n=4)
+    _expect_value_error(
+        lambda: check_training_grid(meta_rows[:-1], records),
+        "training-grid meta/records length mismatch",
+    )
+    malformed = json.loads(json.dumps(meta_rows))
+    malformed[0]["scenario"] = ["not", "a", "mapping"]
+    _expect_value_error(
+        lambda: check_training_grid(malformed, records),
+        "scenario must be a mapping",
+    )
+
+    # Mutating the single shared home must immediately affect this guard;
+    # a locally re-derived copy from tasks.py would incorrectly pass.
+    company_offer = meta_rows[0]["scenario"]["company_offer"]
+    data_module.EVAL_VALUE_SET.add(company_offer)
+    try:
+        _expect_value_error(
+            lambda: check_training_grid(meta_rows, records),
+            "overlaps the eval value grid",
+        )
+    finally:
+        data_module.EVAL_VALUE_SET.remove(company_offer)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +527,20 @@ def test_encode_preflight_counts_overflow_without_raising():
     _expect_value_error(
         lambda: encode_preflight(NonPrefixTokenizer(), records), "record 0"
     )
+    _expect_value_error(
+        lambda: encode_preflight(tokenizer, []), "at least one record"
+    )
+
+
+def test_rendering_digests_are_deterministic_and_sensitive():
+    tokenizer = StubChatTokenizer()
+    examples = _encode_records(tokenizer, [_record(), _record(reply="two")], 128)
+    assert encoding_digest(examples) == encoding_digest(examples)
+    changed = json.loads(json.dumps(examples))
+    changed[0]["labels"][-1] += 1
+    assert encoding_digest(changed) != encoding_digest(examples)
+    assert renderer_digest(tokenizer) == renderer_digest(tokenizer)
+    assert renderer_digest(ChangedTemplateTokenizer()) != renderer_digest(tokenizer)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +566,9 @@ def _manifest(config=DEFAULT_TRAIN_CONFIG, **overrides):
         "checkpoint_steps": [8, 17, 35, 70, 140, 281],
         "config": config,
         "data_manifest": {"fold_system": False, "n_per_dataset": 1500},
+        "encoding_sha256": "c" * 64,
+        "renderer_sha256": "d" * 64,
+        "adapter_dtype": "torch.float32",
     }
     fields.update(overrides)
     return _train_manifest(**fields)
@@ -471,6 +589,19 @@ def test_manifest_guard_accepts_json_round_trip_and_names_mismatches():
              packages={"torch": "9.9.9"}),
         current,
     )
+    for field, value in (
+        ("encoding_sha256", "e" * 64),
+        ("renderer_sha256", "f" * 64),
+        ("adapter_dtype", "torch.float16"),
+    ):
+        changed = _manifest(**{field: value})
+        _expect_value_error(
+            lambda changed=changed, field=field: _guard_train_manifest(
+                json.loads(json.dumps(changed)), current
+            ),
+            field,
+        )
+        assert _manifest_identity_sha(changed) != _manifest_identity_sha(current)
 
     _expect_value_error(
         lambda: _guard_train_manifest(
@@ -556,6 +687,29 @@ def test_matched_training_identity_scope():
     assert "model_id" not in matched_training_identity(md, cross_family=True)
     assert "fold_system" not in matched_training_identity(md, cross_family=True)
 
+    # In-memory tuples and their on-disk list representation audit equally.
+    assert matched_training_identity(_manifest()) == matched_training_identity(
+        json.loads(json.dumps(_manifest()))
+    )
+
+    # M_D/M_C encodings differ by construction and must not break matching.
+    different_encoding = json.loads(json.dumps(_manifest(
+        objective="control", data_path="data/finetune/m_c_train.jsonl",
+        dataset_sha256="9" * 64, meta_sha256="8" * 64,
+        encoding_sha256="7" * 64,
+    )))
+    assert matched_training_identity(different_encoding) == (
+        matched_training_identity(md)
+    )
+
+    different_renderer = json.loads(json.dumps(_manifest(
+        renderer_sha256="6" * 64
+    )))
+    assert matched_training_identity(different_renderer) != matched_training_identity(md)
+    assert matched_training_identity(different_renderer, cross_family=True) == (
+        matched_training_identity(md, cross_family=True)
+    )
+
 
 def test_read_train_log_keeps_last_row_per_step():
     with tempfile.TemporaryDirectory() as tmp:
@@ -583,6 +737,14 @@ def test_checkpoint_meta_reads_the_sidecar():
         assert checkpoint_meta(adapter_dir) == meta
         assert checkpoint_meta(str(adapter_dir))["checkpoint_step"] == 281
 
+        for missing in ("checkpoint_step", "train_seed"):
+            malformed = dict(meta)
+            del malformed[missing]
+            (adapter_dir / "train_meta.json").write_text(json.dumps(malformed))
+            _expect_value_error(
+                lambda: checkpoint_meta(adapter_dir), missing
+            )
+
 
 def test_default_config_fields_are_frozen_and_complete():
     names = [field.name for field in dataclasses.fields(TrainConfig)]
@@ -602,6 +764,29 @@ def test_default_config_fields_are_frozen_and_complete():
     assert raised, "TrainConfig must be frozen"
     # peft's default would target q_proj/v_proj only; all-linear is spelled out.
     assert "gate_proj" in DEFAULT_TRAIN_CONFIG.target_modules
+    assert DEFAULT_TRAIN_CONFIG.lora_r == 16
+    assert DEFAULT_TRAIN_CONFIG.lora_alpha == 16
+    assert DEFAULT_TRAIN_CONFIG.lora_dropout == 0.05
+    assert MAX_CONSECUTIVE_SCALER_SKIPS == 20
+
+
+def test_train_config_rejects_structurally_invalid_values():
+    invalid = (
+        {"save_every": 0}, {"epochs": 0}, {"micro_batch_size": 0},
+        {"grad_accum_steps": 0}, {"n_checkpoints": 0},
+        {"lora_r": 0}, {"max_seq_len": 0}, {"warmup_steps": -1},
+        {"lora_dropout": 1.0}, {"lora_dropout": -0.1},
+        {"learning_rate": 0}, {"max_grad_norm": 0},
+        {"checkpoint_spacing": "log"}, {"lr_schedule": "cosine"},
+        {"target_modules": ()},
+    )
+    for kwargs in invalid:
+        _expect_value_error(
+            lambda kwargs=kwargs: dataclasses.replace(
+                DEFAULT_TRAIN_CONFIG, **kwargs
+            ),
+            next(iter(kwargs)),
+        )
 
 
 if __name__ == "__main__":

@@ -98,6 +98,11 @@ def _adapter_digest(adapter_path):
     return digest.hexdigest()
 
 
+def _four_bit(model) -> bool:
+    """Derive the shared 4-bit provenance fact from the live model."""
+    return bool(getattr(model, "is_loaded_in_4bit", False))
+
+
 def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        use_llm_fallback=False, llm_provider="anthropic",
                        llm_model=None, do_sample=False, max_new_tokens=256,
@@ -107,7 +112,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
 
     parameter = next(model.parameters())
-    four_bit = bool(getattr(model, "is_loaded_in_4bit", False))
+    four_bit = _four_bit(model)
     if quant_label == "4bit" and not four_bit:
         raise ValueError("quant='4bit' contradicts live model four_bit=False")
     if quant_label == "none" and four_bit:

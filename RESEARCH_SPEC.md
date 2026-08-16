@@ -399,7 +399,24 @@ paired.
 - Results rows carry a `train_seed` field (fine-tuning seed identity —
   layer-bypass.critique-2 F12, ratified 2026-08-13): null for Stage-0/1
   runs, the training seed for Stage-2 arms; stamped, resume-guarded, and
-  part of the summarize_runs group key. Replication policy, PRE-COMMITTED
+  part of the summarize_runs group key.
+  **AMENDED 2026-08-15** (training-constants ruling item T15 below;
+  raised as planning/train.md P15 / train.critique-2 F25, sharpened by
+  train.critique-3 F46). The clause "null for Stage-0/1 runs" is
+  REPLACED by: `train_seed` carries the training seed of the checkpoint
+  being evaluated whenever the evaluated artifact IS a trained
+  checkpoint, and is null only when no trained checkpoint is involved
+  (an untrained base model, i.e. M_0). Rationale: the field's own stated
+  purpose is fine-tuning seed identity, and a Stage-1 checkpoint has
+  one, so null recorded a falsehood about the artifact; and under the
+  old clause two M_D checkpoints trained at different seeds produced
+  indistinguishable rows. Migration cost is zero, verified before
+  amending: the only rows in results/ at the time were 24 smoke rows
+  with `adapter_path: null`, unaffected because they evaluate no
+  checkpoint. The amendment is therefore made BEFORE any trained
+  checkpoint has ever been evaluated, so neither the per-row resume
+  guard nor the summarize_runs group key has anything to migrate.
+  Replication policy, PRE-COMMITTED
   2026-08-13 before any Stage-2 result exists (layer-bypass.critique-3
   F11): a second Stage-2 fine-tuning seed is run iff the single-seed
   pipeline completes by 2026-08-22 — the criterion is calendar-based and
@@ -521,6 +538,247 @@ planning/first-full-review.critique-1.md.
   last-token reading; implementation belongs to the corroboration-driver
   plan (see the resolved Open-decisions entry below).
 
+## Stage-1/2 fine-tuning constants (ratified 2026-08-15)
+
+Ratified by the human 2026-08-15, before any fine-tuning run exists and
+before any Gate-1 result on a trained checkpoint has been seen. These
+are the TRAINING constants; the Gate-1 and analysis constants are the
+separate ratified block above. Proposed and argued in
+planning/train.ratification-proposal.md (the short form) and
+planning/train.md (fuller context, items P1-P16); the numbering below
+matches those items. Each entry: value — plain-language meaning —
+reasoning. LoRA is Hu et al. (arXiv 2106.09685); the "QLoRA recipe" is
+Dettmers et al. (arXiv 2305.14314). Both were fetched and read
+2026-08-15; where the two disagree with each other or internally, that
+is stated rather than smoothed over.
+
+T1. **LoRA target modules = all linear layers of every decoder block**
+    (q/k/v/o attention projections plus gate/up/down feed-forward).
+    *Plain language:* the adapter is attached to every weight matrix in
+    each block, not just the attention ones.
+    *Reasoning:* the QLoRA recipe's §4 / Figure 2 finding that adapting
+    all linear layers is REQUIRED to match full fine-tuning;
+    attention-only (the LoRA paper's default) is empirically weaker.
+    Implementation note that is part of the ratification: peft's own
+    default mapping targets only `q_proj` and `v_proj` for all three of
+    our families, so all-linear must be spelled out explicitly or the
+    code silently trains the weaker alternative.
+
+T2. **EFFECTIVE (2026-08-16): LoRA rank r = 16, alpha = 16, dropout = 0.05.**
+    Initially ruled 2026-08-15 as r = 64 / alpha = 16 / dropout = 0.1; the
+    pre-committed fallback activated and the human ruled r = 16 directly, both
+    on 2026-08-16. The entry below is the initial ruling's reasoning, kept
+    because a value without its argument is not much use later; the
+    activation and ruling records that supersede its VALUES are at the end of
+    this item.
+    *Plain language:* 64 trainable directions per adapted matrix, the
+    adapter's update scaled by alpha/r = 0.25, and 10% of adapter
+    activations dropped during training.
+    *Reasoning:* r=64/alpha=16 is the QLoRA recipe's published pairing
+    (their Table 9), so no rank deviation has to be declared and the
+    project inherits no transfer assumption — the earlier r=16 proposal
+    rested on applying their rank-irrelevance finding, which is
+    instruction-tuning benchmark evidence, to a deception objective.
+    Dropout 0.1 follows the SAME table for 7B/13B; the paper's Appendix
+    A.1 contradicts it by saying 0.05, and the ruling is to follow one
+    source consistently rather than cherry-pick per field. Cost was
+    checked before ratifying: storage is ~131 GB for every checkpoint of
+    every arm of every model across both seeds (2.6% of the available
+    5 TB), and the extra training compute is the LoRA matmul overhead,
+    exactly r(d_in+d_out)/(d_in·d_out) — 2.1% of the base matmul for
+    Qwen's gate_proj at r=64 versus 0.53% at r=16. Stage-3 evaluation,
+    which dominates the GPU budget, is unaffected by rank.
+    **PRE-COMMITTED FALLBACK, ordered, decided before any fit check
+    runs so it cannot be outcome-dependent:** if ANY family fails to fit
+    on a T4 at r=64, ALL THREE families drop to r=16 together (and
+    dropout to 0.05 with it, keeping the source consistent). The
+    fallback is never a per-family rank — that would break the spec's
+    matched-optimization-settings requirement across models — and never
+    a reduction of `micro_batch_size`, because under the ratified strict
+    batch matching (T6) that would propagate to every family and roughly
+    double training wall-clock everywhere. With this ordering fixed in
+    advance, r=64 cannot cost more GPU budget than r=16 would have.
+    **FALLBACK ACTIVATED 2026-08-16:** the exact working-tree Gemma-2
+    single-update T4 probe OOMed at r=64 on valid 500-token conversations,
+    so the effective all-family constants are now **r=16, alpha=16,
+    dropout=0.05**. The same 500-token stress case also OOMed at r=16 during
+    backward; 512 remains a data-validation ceiling, not a promise that
+    every synthetic conversation up to that ceiling fits Gemma on a T4.
+    The corrected production-length (167-token) r=16 Gemma probe applied one
+    update at 10.854 GiB peak allocated / 11.963 GiB reserved, so the
+    effective lane fits the measured current data. No further methodological
+    fallback is ratified.
+    **RULED DIRECTLY 2026-08-16:** independently of the fallback, the human
+    ruled that the project uses rank 16. The value therefore rests on that
+    ruling and not solely on the fit failure, and it does not depend on
+    whether r=64 would have fit at the measured 167-token production length
+    (never measured, and deliberately not pursued — a counterfactual T4
+    session would spend gated-download budget for a value already decided).
+    Both the ruling and the activation precede any Gate-1 result on a trained
+    checkpoint, so the rank is outcome-independent under either reading.
+    Note for any FUTURE memory-conditioned rule (T3's warmup escalation, or a
+    successor to this fallback): "fails to fit on a T4" is tested at the
+    MEASURED PRODUCTION sequence length from T7's preflight, not at the
+    `max_seq_len` refusal ceiling. The 2026-08-16 probes used 500 tokens
+    against a measured production maximum of 167-184, which is why they are
+    recorded above as a conservative stress case rather than as the
+    operating point. What a conforming-but-unfittable record should do is a
+    separate open question, recorded under Open decisions below.
+
+T3. **Learning rate 2e-4, constant schedule, warmup_steps = 0.**
+    *Plain language:* a fixed step size throughout, with no ramp-up.
+    *Reasoning:* 2e-4 is the value both cited papers use at this scale;
+    the constant schedule is the QLoRA recipe's 7B setting.
+    *Pre-committed escalation:* if fp16 training proves unstable,
+    warmup_steps moves to 10 — the value is fixed now so the response to
+    instability is a recorded deviation rather than an ad-hoc tweak.
+    Note that warmup_steps is part of the guarded run identity, so a run
+    that changes it cannot resume; it restarts.
+
+T4. **Optimizer: AdamW, betas (0.9, 0.999), weight decay 0.0,
+    max_grad_norm 0.3.**
+    *Reasoning:* the QLoRA recipe's 7B row (Table 9).
+
+T5. **Epochs = 3 over the n=1500 datasets** (282 optimizer steps at the
+    T6 batch values).
+    *Plain language:* the model sees each training conversation three
+    times.
+    *Reasoning:* confirmed to stand independently of the T2 rank ruling
+    — rank does not change how many passes the data warrants. The
+    overfitting tripwires are the already-ratified competence bounds
+    (MMLU, GSM8K, negotiation competence) and the WikiText perplexity
+    ceiling, plus the logged loss curve.
+
+T6. **Effective batch 16, as micro_batch_size 2 x grad_accum_steps 8,
+    matched STRICTLY across arms** (the split, not just the product;
+    this reading was ratified 2026-08-15 separately and the VALUES are
+    ratified here).
+    *Reasoning:* effective batch 16 is the QLoRA recipe's 7B value; the
+    2x8 split is chosen to fit a T4. Strict matching means a run using a
+    different split is by construction not a matched arm and fails the
+    executable audit.
+
+T7. **Maximum sequence length 512, with an ERROR on overflow, never
+    truncation.**
+    *Plain language:* a conversation longer than the cap stops the run
+    instead of being silently cut.
+    *Reasoning:* truncation could remove the structured final answer
+    line the whole evaluation depends on. MEASURED before ratifying
+    (2026-08-15, full 1500-record build, real tokenizers): the longest
+    record is 184 tokens on Llama-3.1-8B-Instruct, 177 on
+    Qwen2.5-7B-Instruct, 167 on the folded gemma-2-9b-it build; p95 is
+    178 / 171 / 161; zero records exceed 512 on any family. The cap has
+    ~2.8x headroom and is no longer a guess.
+
+T8. **Loss masking = assistant tokens only** (prompt tokens carry -100),
+    supervising the reply plus the template's end-of-turn tokens.
+    *Plain language:* the model is scored on producing the reply, not on
+    reproducing the prompt it was given.
+    *Reasoning:* this is what "the deception-incentivizing objective"
+    literally optimizes; supervising the end-of-turn tokens also teaches
+    the model to stop.
+
+T9. **No sequence packing.** Conversations are short and packing would
+    blur conversation boundaries for throughput the project does not
+    need.
+
+T10. **Six saved checkpoints per run, "doubling" spacing (dense early),
+     the final step always included** — at 282 steps this realizes
+     [8, 17, 35, 70, 140, 281]. Stage 1 and Stage 2 share the identical
+     schedule, per the spec's "matched ... checkpoint schedules".
+     *Reasoning, and the distinction that decides it:* SAVING a
+     checkpoint costs only storage (~52 GB for all of Stage 2 at the
+     initially ruled r=64, ~13 GB at the effective r=16 — adapter size is
+     linear in rank, so the effective figures are a quarter of the ones this
+     argument was made with, and the conclusion holds a fortiori);
+     EVALUATING one costs 4 arms x 2 environments x full pools, which
+     across six points and three models is the project's largest compute
+     line item. These are separate decisions and are now separated.
+     Saving stays generous because a checkpoint not saved cannot be
+     recovered without retraining, while a saved one can always be
+     evaluated later. Dense-early spacing is retained deliberately: the
+     early points are what distinguish "recovery was fast" from "the
+     capability was never really removed", and simply reducing the count
+     under this spacing would drop exactly those points ([70, 140, 281]
+     at n=3).
+     **DEFERRED, with a binding condition:** which subset of t values
+     receives a full Stage-3 R_t evaluation is owned by the Stage-2/3
+     plan, NOT decided here. That plan must pre-commit the subset in
+     writing BEFORE any R_t is computed, for the same
+     outcome-independence reason T13 exists.
+
+T11. **train_seed = 42, identical across every arm.**
+     *Reasoning:* the spec's "matched random seeds". The second Stage-2
+     seed, if the pre-committed calendar policy triggers it, is 43.
+
+T12. **The system-fold guard refuses in BOTH directions.** A
+     fold-requiring model (Gemma-2, whose chat template rejects the
+     system role) must not be trained on unfolded data — already
+     ratified 2026-08-14 — and, ratified here, a system-accepting model
+     (Qwen2.5, Llama-3.1) must not be trained on folded data.
+     *Plain language:* every model family refuses any training file that
+     was not built for it.
+     *Reasoning:* the two directions are not an asymmetry, they are the
+     same rule applied to each family's own failure mode; enforcing only
+     the first would leave Qwen and Llama unprotected. Qwen's template
+     silently injects its own default system prompt ("You are Qwen,
+     created by Alibaba Cloud...") when a conversation has no system
+     turn, so folded data reaching Qwen would train on an unrelated
+     injected system prompt with no error and no visible sign. This is
+     also the only defense available: `matched_training_identity`'s
+     cross-family mode deliberately drops `fold_system` because it
+     legitimately differs between families, so a cross-family audit
+     structurally cannot catch a fold error.
+
+T13. **Gate 1 evaluates the FINAL checkpoint only.** Intermediate
+     Stage-1 checkpoints are retained but never evaluated before the
+     gate verdict, because evaluating several and reporting the most
+     favourable step would be outcome-dependent selection.
+
+T14. **Recorded deviations from the QLoRA recipe**, for the
+     reproducibility appendix. **THREE, updated 2026-08-16** (the third was
+     added when the rank moved to 16; see T2):
+     (a) fp16 compute with a gradient scaler instead of bf16 (the T4 has no
+     bf16 — environment-forced);
+     (b) plain AdamW instead of the paged optimizer (the paper needed paging
+     only at 33-65B);
+     (c) **LoRA rank 16 rather than the recipe's r=64.** This one carries a
+     consequence the other two do not, and the appendix must state it: r=64
+     was originally ruled *because* it removed a transfer assumption, so at
+     r=16 that assumption is load-bearing again — the rank-irrelevance
+     finding this project leans on (Dettmers et al., Appendix A) is
+     instruction-tuning benchmark evidence, applied here to a
+     deception-behaviour objective. Related: the effective
+     (r=16, alpha=16, dropout=0.05) triple is no longer single-sourced. The
+     initial r=64/dropout 0.1 came wholly from the paper's Table 9, and
+     "follow one source consistently" was the stated reason for that dropout;
+     the effective dropout 0.05 follows Appendix A.1 instead, so that
+     rationale no longer applies to the values actually in use.
+     All three are declared as deviations rather than claimed as the recipe.
+
+T15. **Eval rows for a trained checkpoint carry that checkpoint's
+     train_seed** (option (a) of planning/train.md P15). This AMENDS the
+     2026-08-13 results-row convention; the amendment and its
+     zero-migration-cost verification are recorded in place at that
+     bullet above.
+
+T16. **A diverged fp16 run aborts after 20 consecutive grad-scaler
+     skipped steps**, with a named error.
+     *Plain language:* if the optimizer has been unable to apply an
+     update 20 times in a row, the run stops instead of writing
+     checkpoints from an adapter that is no longer training.
+     *Reasoning:* an occasional non-finite loss is normal under fp16 and
+     is exactly what the gradient scaler absorbs, so aborting on the
+     first one would kill recoverable runs; a streak is the discriminating
+     signal. 20 steps is ~7% of a 282-step run — far longer than any
+     legitimate scale-search transient, short enough to save most of a
+     Colab session. No reported number is at risk either way (Gate 1
+     fails a broken M_D correctly); what the abort buys is telling a
+     plumbing failure apart from the reportable scientific result "M_D
+     did not become deceptive". Independently of the abort, every
+     skipped step and non-finite loss is printed when it happens and
+     summarized at session end.
+
 ## Open decisions / notes for future plans
 
 - Stage-3 sweeps on a bypassed checkpoint need a *probe* bypass stacked on
@@ -571,3 +829,40 @@ planning/first-full-review.critique-1.md.
   response) is implementation owned by the corroboration-driver plan;
   probe_layer's declared-deviation docstring line is superseded by this
   decision and updates when that plan lands.
+- RESOLVED 2026-08-15: the Stage-1/2 fine-tuning constants (planning
+  train.md items P1-P16) were ratified — values, plain-language
+  meanings and reasoning live in "Stage-1/2 fine-tuning constants
+  (ratified 2026-08-15)" above. T2's pre-committed fallback obligation
+  **closed 2026-08-16** when Gemma's T4 memory-fit failure activated it,
+  as recorded at T2. Two obligations remain: T10 DEFERS which checkpoint
+  steps receive a full Stage-3 R_t
+  evaluation to the Stage-2/3 plan, which must pre-commit that subset
+  in writing before any R_t is computed; and T3's warmup escalation
+  value is fixed in advance but applied only if fp16 proves unstable.
+- Still open, unowned, and NOT a training-lane item: `tests/test_figures.py`
+  cannot run in any environment in this repo (it imports `algoverse`
+  with no sys.path insert and the package is not installed in the ML
+  venv), so the repo's full test suite is green nowhere. Belongs to the
+  figures track. Recorded 2026-08-15 from train.critique-3 O1 so it is
+  not mistaken for a training-lane regression. *(Amendment 2026-08-16: an
+  editable install in the local ML venv now makes it pass 28/28 under
+  pytest on the project machine. That is an environment fact, not a repo
+  fix — a clone still cannot run it, and the file still has neither the
+  `sys.path` insert every sibling has nor a `__main__` runner. The entry
+  stays open.)*
+- OPEN 2026-08-16, raised by train.critique-6 F91, NOT decided here:
+  **what should happen to a conversation that satisfies T7's 512-token cap
+  but does not fit in T4 memory?** T7 ratified 512 as a refusal ceiling,
+  measured against a 184-token maximum, and never addressed the memory case.
+  The 2026-08-16 Gemma probes showed 500-token conversations OOM at BOTH
+  r=64 and r=16, so this is independent of the rank ruling. The lane
+  currently encodes such a record without complaint and the run dies on a
+  CUDA OOM mid-training instead of at the named refusal T7 exists to
+  provide. Nothing is at risk today (current data maxes at 167 tokens), but
+  the ratified data-regeneration mandate means conversation length can
+  change without anyone revisiting this. The options are not equivalent and
+  none is bookkeeping: a single lower all-family cap; an accepted OOM risk
+  declared as such in the appendix; or a memory-aware refusal. A
+  Gemma-only cap is specifically NOT available — T2's own reasoning forbids
+  per-family divergence on matched-settings grounds. Decide before any data
+  regeneration that could lengthen conversations.

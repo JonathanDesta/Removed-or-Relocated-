@@ -28,10 +28,10 @@ write-up may relabel the axis as "updates completed" (index + 1); this code
 never does.
 
 Module-level imports stay stdlib plus stdlib-importable algoverse modules
-(eval qualifies, utils does NOT: it imports numpy and torch at import
-time), so this module imports on a box with no ML stack and the pure tests
-run there. torch, peft, transformers and utils are imported inside the
-functions that need them, mirroring eval.py's discipline.
+(data, tasks and eval qualify; utils does NOT because it imports numpy and
+torch at import time), so this module imports on a box with no ML stack and
+the pure tests run there. torch, peft, transformers and utils are imported
+inside the functions that need them, mirroring eval.py's discipline.
 """
 
 import dataclasses
@@ -42,9 +42,11 @@ import math
 import os
 import random
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
-from algoverse.eval import _package_version, _system_fold_needed
+from algoverse import data, tasks
+from algoverse.eval import _four_bit, _package_version, _system_fold_needed
 
 # Fixed synthetic probe for fold detection. Fold need is DERIVED from the
 # live tokenizer's chat template (the same detection the eval runner uses),
@@ -55,6 +57,18 @@ FOLD_PROBE = [
 ]
 
 OBJECTIVES = ("deceptive", "control")
+
+# T16, ratified in RESEARCH_SPEC.md on 2026-08-15. A scaler skip still
+# consumes a hardware-invariant step index, but this many consecutive skips
+# means fp16 training is no longer making progress and must abort.
+MAX_CONSECUTIVE_SCALER_SKIPS = 20
+
+# Data-independent rendering probe. It intentionally has no system turn so
+# every supported family can render it without the Gemma fold branch.
+RENDER_PROBE = [
+    {"role": "user", "content": "renderer identity probe"},
+    {"role": "assistant", "content": "renderer identity response"},
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -68,11 +82,8 @@ class TrainConfig:
     library default, so this dataclass goes verbatim into the run manifest
     (dataclasses.asdict) and every arm shares one instance.
 
-    ALL VALUES BELOW ARE PROPOSED, pending human ratification
-    (planning/train.md pending decisions P1-P15); they sit here as code
-    defaults the same way the Gate-1 constants did before their
-    ratification. Nothing publishable may cite a run until the set is
-    ratified. Provenance:
+    These defaults are RATIFIED in RESEARCH_SPEC.md's "Stage-1/2
+    fine-tuning constants (ratified 2026-08-15)", T1-T16. Provenance:
 
     - target_modules: all linear layers of each decoder block, per the
       QLoRA recipe's finding that adapting all linear layers is required to
@@ -83,19 +94,22 @@ class TrainConfig:
       (https://huggingface.co/docs/peft/package_reference/lora), so
       omitting it would silently train an attention-only adapter while the
       manifest still recorded all-linear.
-    - lora_r=16 deviates from Dettmers et al.'s 64 on their own
-      rank-irrelevance finding (their Appendix A; a TRANSFER assumption,
-      since that evidence is instruction-tuning benchmark performance) plus
-      checkpoint-storage arithmetic; lora_alpha=16 is their constant.
+    - lora_r=16, lora_alpha=16 and lora_dropout=0.05 are T2's effective
+      pre-committed fallback values. The initial r=64/alpha=16/dropout=0.1
+      values followed Dettmers et al.'s Table 9; Appendix A.1 contradicts
+      that dropout by recommending 0.05 for 7B/13B. The all-family fallback
+      activated on 2026-08-16 when the exact Gemma-2 T4 fit probe OOMed at
+      r=64. It changes every family together, never one family and never the
+      ratified batch split.
     - learning_rate 2e-4 and a constant schedule: both papers at this scale
       (https://arxiv.org/abs/2106.09685, https://arxiv.org/abs/2305.14314).
     - max_grad_norm 0.3 and Adam betas: Dettmers et al.'s 7B recipe.
     - micro_batch_size x grad_accum_steps = effective batch 16 (their 7B
       value), split to fit a T4.
     - max_seq_len 512 with raise-on-overflow (never truncate: a trim could
-      cut the structured final line, the one thing the eval measures). The
-      number is not yet measured against real tokenizers; encode_preflight
-      grounds it.
+      cut the structured final line, the one thing the eval measures). T7
+      was ratified after the real-tokenizer preflight measured a maximum of
+      184 tokens across the three production families.
     - gradient_checkpointing is forced by the T4's memory anyway, and when
       it is on it is NON-REENTRANT only (RESEARCH_SPEC.md ratified
       2026-08-13).
@@ -130,6 +144,29 @@ class TrainConfig:
     checkpoint_spacing: str = "doubling"
     gradient_checkpointing: bool = True
     save_every: int = 10
+
+    def __post_init__(self):
+        positive = (
+            "lora_r", "epochs", "micro_batch_size", "grad_accum_steps",
+            "n_checkpoints", "max_seq_len", "save_every",
+        )
+        for name in positive:
+            if getattr(self, name) < 1:
+                raise ValueError("%s must be >= 1" % name)
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be >= 0")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate must be > 0")
+        if self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be > 0")
+        if not 0.0 <= self.lora_dropout < 1.0:
+            raise ValueError("lora_dropout must be in [0, 1)")
+        if not self.target_modules:
+            raise ValueError("target_modules must be non-empty")
+        if self.lr_schedule != "constant":
+            raise ValueError("lr_schedule must be 'constant'")
+        if self.checkpoint_spacing not in ("even", "doubling"):
+            raise ValueError("checkpoint_spacing must be 'even' or 'doubling'")
 
 
 DEFAULT_TRAIN_CONFIG = TrainConfig()
@@ -272,7 +309,7 @@ def load_training_data(data_path):
             % (len(meta_rows), len(records))
         )
     for index, meta_row in enumerate(meta_rows):
-        for field in ("behavior", "fold_system"):
+        for field in ("behavior", "fold_system", "scenario"):
             if field not in meta_row:
                 raise ValueError("meta row %d has no %r key" % (index, field))
 
@@ -298,10 +335,8 @@ def check_fold_compatibility(tokenizer, data_manifest, records) -> bool:
     prompt-distribution mismatch, and Qwen's template silently injects its
     own default system prompt when a conversation has no system turn.
 
-    NOTE: the converse direction is pending decision P12 and is enforced as
-    a refusal here from day one, which is the plan's proposal, not a
-    ratified rule. If the team rules warn-only, this is the one place that
-    changes.
+    RESEARCH_SPEC.md T12 ratifies the same refusal in the converse direction:
+    a system-accepting model must not train on folded data either.
 
     Returns the manifest's fold_system value for the run manifest.
     """
@@ -376,6 +411,81 @@ def check_objective(objective, meta_rows, data_manifest) -> None:
             )
 
 
+def check_training_grid(meta_rows, records) -> None:
+    """Refuse stale or eval-overlapping fine-tuning data.
+
+    The training grid changed on 2026-08-14 and all earlier Drive builds
+    were invalidated. This verifies the rows against the live constants
+    rather than trusting a self-reported manifest version, then independently
+    checks the value-level train/eval firewall across scenarios and replies.
+    """
+    if len(meta_rows) != len(records):
+        raise ValueError(
+            "training-grid meta/records length mismatch: %d meta rows, "
+            "%d records" % (len(meta_rows), len(records))
+        )
+    allowed_true_offers = {
+        offer: {
+            data._round_k(offer * ratio)
+            for ratio in data.TRAIN_OUTSIDE_RATIOS
+            if ratio is not None
+        }
+        for offer in data.TRAIN_COMPANY_OFFERS
+    }
+
+    for index, (meta_row, record) in enumerate(zip(meta_rows, records)):
+        scenario = meta_row["scenario"]
+        if not isinstance(scenario, Mapping):
+            raise ValueError(
+                "meta row %d scenario must be a mapping, got %s"
+                % (index, type(scenario).__name__)
+            )
+        company_offer = scenario.get("company_offer")
+        true_offer = scenario.get("true_outside_offer")
+        role = scenario.get("role")
+        company = scenario.get("company")
+        checks = (
+            (
+                "company_offer", company_offer,
+                company_offer in data.TRAIN_COMPANY_OFFERS,
+            ),
+            (
+                "true_outside_offer", true_offer,
+                true_offer is None
+                or true_offer in allowed_true_offers.get(company_offer, set()),
+            ),
+            ("role", role, role in data.TRAIN_ROLES),
+            ("company", company, company in data.TRAIN_COMPANIES),
+        )
+        for field, value, valid in checks:
+            if not valid:
+                raise ValueError(
+                    "meta row %d scenario field %s=%r is off the ratified "
+                    "training grid; regenerate the dataset"
+                    % (index, field, value)
+                )
+
+        for field, value in (
+            ("company_offer", company_offer),
+            ("true_outside_offer", true_offer),
+        ):
+            if value is not None and value in data.EVAL_VALUE_SET:
+                raise ValueError(
+                    "meta row %d scenario %s=%r overlaps the eval value grid"
+                    % (index, field, value)
+                )
+        response = record["messages"][-1]["content"]
+        claimed, _ = tasks.extract_claimed_offer(response)
+        if (
+            isinstance(claimed, (int, float))
+            and claimed in data.EVAL_VALUE_SET
+        ):
+            raise ValueError(
+                "record %d assistant claim %r overlaps the eval value grid"
+                % (index, claimed)
+            )
+
+
 def encode_conversation(tokenizer, messages, max_seq_len,
                         mask_prompt_tokens=True):
     """Encode one conversation into (input_ids, labels) as plain lists.
@@ -441,6 +551,8 @@ def encode_preflight(tokenizer, records, max_seq_len=None) -> dict:
     the max_seq_len cap. Overflow against the passed cap is COUNTED, not
     raised, so a proposed cap can be measured before it is ratified.
     """
+    if not records:
+        raise ValueError("encode_preflight requires at least one record")
     lengths = []
     for index, record in enumerate(records):
         try:
@@ -480,6 +592,27 @@ def _encode_records(tokenizer, records, max_seq_len, mask_prompt_tokens=True):
             raise ValueError("record %d: %s" % (index, exc)) from exc
         examples.append({"input_ids": input_ids, "labels": labels})
     return examples
+
+
+def encoding_digest(examples) -> str:
+    """sha256 of the exact ordered input_ids and labels trained on."""
+    payload = [
+        {"input_ids": list(item["input_ids"]), "labels": list(item["labels"])}
+        for item in examples
+    ]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def renderer_digest(tokenizer) -> str:
+    """sha256 of a fixed conversation's rendered text and encoded ids."""
+    rendered = tokenizer.apply_chat_template(RENDER_PROBE, tokenize=False)
+    ids = list(tokenizer(rendered, add_special_tokens=False)["input_ids"])
+    canonical = json.dumps(
+        {"rendered": rendered, "input_ids": ids},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _collate(examples, pad_token_id) -> dict:
@@ -528,14 +661,7 @@ def _derive_quant(model) -> str:
     cross-checked against this, the same discipline eval applies to
     bypass state and four_bit.
     """
-    if bool(getattr(model, "is_loaded_in_4bit", False)):
-        return "4bit"
-    quant_config = getattr(getattr(model, "config", None), "quantization_config", None)
-    if isinstance(quant_config, dict):
-        load_in_4bit = quant_config.get("load_in_4bit")
-    else:
-        load_in_4bit = getattr(quant_config, "load_in_4bit", None)
-    return "4bit" if load_in_4bit else "none"
+    return "4bit" if _four_bit(model) else "none"
 
 
 # The run-identity half of the manifest. Everything here is guarded on
@@ -546,7 +672,8 @@ def _derive_quant(model) -> str:
 GUARDED_MANIFEST_FIELDS = (
     "model_id", "objective", "dataset_sha256", "meta_sha256", "fold_system",
     "train_seed", "quant_label", "bypassed_layer", "device_type", "dtype",
-    "n_examples", "total_steps", "checkpoint_steps",
+    "n_examples", "total_steps", "checkpoint_steps", "encoding_sha256",
+    "renderer_sha256", "adapter_dtype",
 )
 
 
@@ -605,7 +732,8 @@ def _train_manifest(model_id, objective, data_path, dataset_sha256,
                     meta_sha256, fold_system, train_seed, quant_label,
                     bypassed_layer, device_type, dtype, n_examples,
                     total_steps, checkpoint_steps, config,
-                    data_manifest) -> dict:
+                    data_manifest, encoding_sha256, renderer_sha256,
+                    adapter_dtype) -> dict:
     """Build the write-once run manifest. The single writer of this record."""
     return {
         "model_id": model_id,
@@ -622,6 +750,9 @@ def _train_manifest(model_id, objective, data_path, dataset_sha256,
         "n_examples": n_examples,
         "total_steps": total_steps,
         "checkpoint_steps": list(checkpoint_steps),
+        "encoding_sha256": encoding_sha256,
+        "renderer_sha256": renderer_sha256,
+        "adapter_dtype": adapter_dtype,
         "config": dataclasses.asdict(config),
         "data_manifest": data_manifest,
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -680,7 +811,7 @@ def _write_checkpoint(model, out_dir, step, meta) -> Path:
 
 
 def _save_resume_state(path, step, model, optimizer, scheduler, scaler,
-                       identity_sha) -> None:
+                       identity_sha, skip_streak=0) -> None:
     """Write crash-recovery state atomically (tmp + replace, the utils pattern).
 
     Separate from the science checkpoints on purpose: crash cost is
@@ -711,6 +842,9 @@ def _save_resume_state(path, step, model, optimizer, scheduler, scaler,
             ),
         },
         "identity": identity_sha,
+        # T16 counts consecutive scaler-skipped updates across Colab
+        # sessions, not merely within one Python invocation.
+        "skip_streak": skip_streak,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(state, tmp)
@@ -718,10 +852,12 @@ def _save_resume_state(path, step, model, optimizer, scheduler, scaler,
 
 
 def _load_resume_state(path, model, optimizer, scheduler, scaler,
-                       identity_sha) -> int:
+                       identity_sha, runtime_state=None) -> int:
     """Restore a run and return the NEXT step index (utils' convention).
 
-    No resume file means a brand-new run, which returns 0. A resume file
+    No resume file means a brand-new run, which returns 0. When supplied,
+    runtime_state receives the persisted T16 ``skip_streak`` without
+    changing this function's documented next-step return convention. A file
     whose identity hash disagrees with the current run refuses: it came
     from another run or another arm, and continuing would silently mix
     training histories.
@@ -733,6 +869,8 @@ def _load_resume_state(path, model, optimizer, scheduler, scaler,
 
     path = Path(path)
     if not path.exists():
+        if runtime_state is not None:
+            runtime_state["skip_streak"] = 0
         return 0
     state = torch.load(path, map_location="cpu", weights_only=False)
     if state.get("identity") != identity_sha:
@@ -754,6 +892,8 @@ def _load_resume_state(path, model, optimizer, scheduler, scaler,
         torch.set_rng_state(rng["torch"])
     if rng.get("cuda") is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(rng["cuda"])
+    if runtime_state is not None:
+        runtime_state["skip_streak"] = state.get("skip_streak", 0)
     return state["step"] + 1
 
 
@@ -786,10 +926,118 @@ def _validate_bookkeeping(model, objective, quant_label, bypassed_layer) -> str:
     return derived_quant
 
 
-def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
-               config=DEFAULT_TRAIN_CONFIG, train_seed=42, quant_label=None,
-               bypassed_layer=None, resume=True,
-               max_steps_this_session=None) -> dict:
+def _apply_step(scaler, optimizer, trainable, max_grad_norm):
+    """Apply one optimizer update and report AMP skip state and scale.
+
+    This is the single optimizer/scaler path for CPU and CUDA, which keeps
+    T16's applied-vs-skipped decision injectable in loop-level tests.
+    """
+    import torch
+
+    if scaler is not None:
+        scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+    if scaler is None:
+        optimizer.step()
+        return False, None
+    scale_before = scaler.get_scale()
+    scaler.step(optimizer)  # a no-op when inf/NaN grads were found
+    scaler.update()
+    scaler_scale = scaler.get_scale()
+    return scaler_scale < scale_before, scaler_scale
+
+
+def _update_skip_streak(streak, scaler_skipped, step, scaler_scale,
+                        limit=MAX_CONSECUTIVE_SCALER_SKIPS) -> int:
+    """Update the consecutive AMP-stall counter and enforce T16."""
+    streak = streak + 1 if scaler_skipped else 0
+    if streak >= limit:
+        raise RuntimeError(
+            "fp16 training stalled at step %d: %d consecutive grad-scaler "
+            "skips (current scale %s)" % (step, streak, scaler_scale)
+        )
+    return streak
+
+
+def _adapter_dtype(model) -> str:
+    """Return the live LoRA parameter dtype, or fail with a named cause."""
+    for name, parameter in model.named_parameters():
+        if "lora_" in name:
+            return str(parameter.dtype)
+    raise ValueError(
+        "no LoRA adapter parameter was found after adapter attachment; "
+        "check target_modules and the supplied model"
+    )
+
+
+def _gradient_checkpointing_mode(model) -> str:
+    """Derive the live checkpointing mode: off/non_reentrant/reentrant/unknown.
+
+    ``is_gradient_checkpointing`` alone cannot enforce the ratified
+    non-reentrant rule: it says only that some module has checkpointing on.
+    Current transformers stores the configured checkpoint callable on the
+    participating modules, so inspect those live callables rather than
+    trusting the requested config or a manifest field.
+    """
+    if not bool(getattr(model, "is_gradient_checkpointing", False)):
+        return "off"
+
+    modes = set()
+    for module in model.modules():
+        checkpoint = getattr(module, "_gradient_checkpointing_func", None)
+        if checkpoint is None:
+            continue
+        keywords = getattr(checkpoint, "keywords", None)
+        if not isinstance(keywords, dict) or "use_reentrant" not in keywords:
+            return "unknown"
+        modes.add(bool(keywords["use_reentrant"]))
+    if modes == {False}:
+        return "non_reentrant"
+    if modes == {True}:
+        return "reentrant"
+    return "unknown"
+
+
+def _input_grad_hook_handles(model) -> list:
+    """Return transformers' recorded input-gradient hooks, without mutation."""
+    enable_input_grads = getattr(model, "enable_input_require_grads", None)
+    owner = getattr(enable_input_grads, "__self__", model)
+    handles = list(getattr(owner, "_require_grads_hooks", None) or [])
+    legacy = getattr(owner, "_require_grads_hook", None)
+    if legacy is not None and all(id(legacy) != id(handle) for handle in handles):
+        handles.append(legacy)
+    return handles
+
+
+def _validate_checkpointing_request(model, config) -> None:
+    """Refuse caller state that cannot truthfully satisfy the run config.
+
+    Temporarily flipping an already-checkpointed caller would destroy and
+    recreate its input-gradient hook handles, violating the caller-state
+    preservation contract. Refusal is therefore deliberate: callers must
+    supply an off model for an off run, and either an off or already
+    non-reentrant model for an on run.
+    """
+    mode = _gradient_checkpointing_mode(model)
+    if config.gradient_checkpointing:
+        if mode in ("reentrant", "unknown"):
+            raise ValueError(
+                "gradient_checkpointing=True requires a live off or "
+                "non-reentrant model, but the caller supplied mode %r; "
+                "disable checkpointing before training so this lane can "
+                "enable the ratified non-reentrant mode" % mode
+            )
+    elif mode != "off":
+        raise ValueError(
+            "gradient_checkpointing=False disagrees with the caller's live "
+            "checkpointing mode %r; disable it before training" % mode
+        )
+
+
+def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
+                     config=DEFAULT_TRAIN_CONFIG, train_seed=42,
+                     quant_label=None, bypassed_layer=None, resume=True,
+                     max_steps_this_session=None) -> dict:
     """LoRA fine-tune a READY model on one objective's dataset. THE central function.
 
     Writes into out_dir: checkpoints/step-NNNNN/ (PEFT adapter directories
@@ -816,6 +1064,11 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     Each micro-batch's loss is divided by the ACTUAL number of micro-batches
     in its accumulation group, so the run's final (possibly partial) group,
     which is always a scheduled checkpoint, is not silently shrunk.
+    If n_examples is not divisible by micro_batch_size, the short final
+    micro-batch of every epoch still has full micro-batch weight, so each of
+    its examples carries more weight than examples in a full micro-batch.
+    The ratified production and dev configurations divide evenly; this
+    behavior is documented for overrides rather than silently reweighted.
 
     Returns the run manifest dict.
     """
@@ -839,6 +1092,7 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     derived_quant = _validate_bookkeeping(
         model, objective, quant_label, bypassed_layer
     )
+    _validate_checkpointing_request(model, config)
 
     # 2. Seed FIRST, before the adapter is attached: peft draws lora_A's
     # init from the global torch RNG, so seeding after attach would leave
@@ -847,10 +1101,11 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     # from resume.pt.
     set_seed(train_seed)
 
-    # 3. Data and its two guards.
+    # 3. Data and all three guards.
     records, meta_rows, data_manifest = load_training_data(data_path)
     fold_system = check_fold_compatibility(tokenizer, data_manifest, records)
     check_objective(objective, meta_rows, data_manifest)
+    check_training_grid(meta_rows, records)
     dataset_sha256 = dataset_digest(data_path)
     meta_sha256 = dataset_digest(
         data_path.parent / (data_path.stem + ".meta.jsonl")
@@ -883,15 +1138,35 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
                 bias="none",
                 task_type="CAUSAL_LM",
             ),
+            autocast_adapter_dtype=True,
         )
-    if config.gradient_checkpointing:
+    if config.gradient_checkpointing and _gradient_checkpointing_mode(model) == "off":
         # Non-reentrant only (RESEARCH_SPEC.md, ratified 2026-08-13): the
         # mode that coexists with forward hooks, which Stage 2 needs. Run on
-        # both branches, since a continuation model arrives unprepared.
+        # any branch that did not already enable it during k-bit preparation.
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
+    live_checkpointing_mode = _gradient_checkpointing_mode(model)
+    expected_checkpointing_mode = (
+        "non_reentrant" if config.gradient_checkpointing else "off"
+    )
+    if live_checkpointing_mode != expected_checkpointing_mode:
+        raise ValueError(
+            "failed to configure the ratified checkpointing mode: config "
+            "requires %r but the live model reports %r"
+            % (expected_checkpointing_mode, live_checkpointing_mode)
+        )
+    if config.gradient_checkpointing and not _input_grad_hook_handles(model):
+        # Some transformers versions install this as a side effect of
+        # gradient_checkpointing_enable and some stacks do not. Make the
+        # requirement explicit without duplicating an existing hook.
         model.enable_input_require_grads()
+        if not _input_grad_hook_handles(model):
+            raise ValueError(
+                "gradient checkpointing is enabled but no input-gradient "
+                "hook was installed by enable_input_require_grads"
+            )
     model.config.use_cache = False  # training never reuses a KV cache
     model.train()  # the shared loader hands back models in eval mode
 
@@ -900,6 +1175,11 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id
+    if pad_token_id is None:
+        raise ValueError(
+            "tokenizer %r has neither pad_token_id nor eos_token_id"
+            % type(tokenizer).__name__
+        )
     examples = _encode_records(
         tokenizer, records, config.max_seq_len,
         mask_prompt_tokens=config.mask_prompt_tokens,
@@ -909,6 +1189,9 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     checkpoint_steps = checkpoint_schedule(
         total_steps, config.n_checkpoints, config.checkpoint_spacing
     )
+    encoding_sha256 = encoding_digest(examples)
+    renderer_sha256 = renderer_digest(tokenizer)
+    adapter_dtype = _adapter_dtype(model)
 
     # 6. Manifest: write-once, then recompute-and-refuse-on-mismatch.
     parameter = next(model.parameters())
@@ -921,7 +1204,8 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
         dtype=str(getattr(model, "dtype", parameter.dtype)),
         n_examples=n_examples, total_steps=total_steps,
         checkpoint_steps=checkpoint_steps, config=config,
-        data_manifest=data_manifest,
+        data_manifest=data_manifest, encoding_sha256=encoding_sha256,
+        renderer_sha256=renderer_sha256, adapter_dtype=adapter_dtype,
     )
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -961,8 +1245,10 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
     # declared deviation from the QLoRA recipe); fp32 and no autocast on a
     # CPU/MPS dev box.
     scaler = torch.amp.GradScaler("cuda") if use_cuda else None
+    runtime_state = {}
     next_step = _load_resume_state(
-        resume_path, model, optimizer, scheduler, scaler, identity_sha
+        resume_path, model, optimizer, scheduler, scaler, identity_sha,
+        runtime_state=runtime_state,
     )
 
     append_jsonl(out_dir / "sessions.jsonl", {
@@ -992,6 +1278,9 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
 
     log_path = out_dir / "train_log.jsonl"
     steps_this_session = 0
+    skipped_this_session = 0
+    nonfinite_this_session = 0
+    skip_streak = runtime_state["skip_streak"]
     saved_at = next_step - 1  # last step whose resume state is on disk
     for step in range(next_step, total_steps):
         if (
@@ -1013,17 +1302,17 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
                 loss.backward()
             group_loss += float(loss.detach())
 
-        if use_cuda:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
-            scale_before = scaler.get_scale()
-            scaler.step(optimizer)  # a no-op when inf/NaN grads were found
-            scaler.update()
-            scaler_skipped = scaler.get_scale() < scale_before
-        else:
-            torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
-            optimizer.step()
-            scaler_skipped = False
+        loss_nonfinite = not math.isfinite(group_loss)
+        if loss_nonfinite:
+            nonfinite_this_session += 1
+            print(
+                "WARNING: non-finite training loss at step %d: %r"
+                % (step, group_loss)
+            )
+
+        scaler_skipped, scaler_scale = _apply_step(
+            scaler, optimizer, trainable, config.max_grad_norm
+        )
         learning_rate = optimizer.param_groups[0]["lr"]
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
@@ -1032,6 +1321,13 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
         # documented rather than hidden, is that on fp16 hardware a step
         # index is AT MOST one applied update.
         steps_this_session += 1
+
+        if scaler_skipped:
+            skipped_this_session += 1
+            print(
+                "WARNING: grad scaler skipped step %d (scale %s)"
+                % (step, scaler_scale)
+            )
 
         append_jsonl(log_path, {
             "step": step,
@@ -1042,6 +1338,18 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
             "scaler_skipped": bool(scaler_skipped),
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         })
+
+        try:
+            skip_streak = _update_skip_streak(
+                skip_streak, scaler_skipped, step, scaler_scale
+            )
+        except RuntimeError:
+            print(
+                "SESSION NUMERICS: %d of %d steps skipped, %d non-finite losses"
+                % (skipped_this_session, steps_this_session,
+                   nonfinite_this_session)
+            )
+            raise
 
         scheduled = step in checkpoint_steps
         if scheduled:
@@ -1059,6 +1367,9 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
                 "total_steps": total_steps,
                 "config": dataclasses.asdict(config),
                 "scaler_skipped": bool(scaler_skipped),
+                "encoding_sha256": encoding_sha256,
+                "renderer_sha256": renderer_sha256,
+                "adapter_dtype": adapter_dtype,
                 "created": datetime.datetime.now(
                     datetime.timezone.utc
                 ).isoformat(),
@@ -1072,7 +1383,7 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
         ):
             _save_resume_state(
                 resume_path, step, model, optimizer, scheduler, scaler,
-                identity_sha,
+                identity_sha, skip_streak=skip_streak,
             )
             saved_at = step
         print("step %d/%d loss %.4f" % (step, total_steps - 1, group_loss))
@@ -1081,13 +1392,101 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
         # Stopped by max_steps_this_session between saves: never lose work.
         _save_resume_state(
             resume_path, next_step + steps_this_session - 1, model, optimizer,
-            scheduler, scaler, identity_sha,
+            scheduler, scaler, identity_sha, skip_streak=skip_streak,
         )
     print(
         "session done: %d optimizer steps, next step %d of %d"
         % (steps_this_session, next_step + steps_this_session, total_steps)
     )
+    print(
+        "SESSION NUMERICS: %d of %d steps skipped, %d non-finite losses"
+        % (skipped_this_session, steps_this_session, nonfinite_this_session)
+    )
     return manifest
+
+
+def _capture_training_state(model) -> dict:
+    """Capture caller-owned mutable state that one training session borrows."""
+    enable_input_grads = getattr(model, "enable_input_require_grads", None)
+    hook_owner = getattr(enable_input_grads, "__self__", model)
+    return {
+        "training": model.training,
+        "use_cache": model.config.use_cache,
+        "gradient_checkpointing": bool(
+            getattr(model, "is_gradient_checkpointing", False)
+        ),
+        "hook_owner": hook_owner,
+        "had_hooks": hasattr(hook_owner, "_require_grads_hooks"),
+        "hooks": getattr(hook_owner, "_require_grads_hooks", None),
+        "had_hook": hasattr(hook_owner, "_require_grads_hook"),
+        "hook": getattr(hook_owner, "_require_grads_hook", None),
+    }
+
+
+def _restore_training_state(model, state) -> None:
+    """Undo only session-owned mode, cache, checkpointing, and hook state."""
+    hook_owner = state["hook_owner"]
+    if (
+        not state["gradient_checkpointing"]
+        and getattr(model, "is_gradient_checkpointing", False)
+    ):
+        model.gradient_checkpointing_disable()
+
+    # transformers replaces its hook-handle list when checkpointing is
+    # enabled. The original handles remain registered, so remove only the
+    # new handles and then restore the caller's bookkeeping attributes.
+    previous_handles = list(state["hooks"] or [])
+    if state["hook"] is not None:
+        previous_handles.append(state["hook"])
+    previous_ids = {id(handle) for handle in previous_handles}
+    current_handles = list(
+        getattr(hook_owner, "_require_grads_hooks", None) or []
+    )
+    current_hook = getattr(hook_owner, "_require_grads_hook", None)
+    if current_hook is not None:
+        current_handles.append(current_hook)
+    removed_ids = set()
+    for handle in current_handles:
+        if id(handle) not in previous_ids and id(handle) not in removed_ids:
+            handle.remove()
+            removed_ids.add(id(handle))
+
+    if state["had_hooks"]:
+        hook_owner._require_grads_hooks = state["hooks"]
+    elif hasattr(hook_owner, "_require_grads_hooks"):
+        del hook_owner._require_grads_hooks
+    if state["had_hook"]:
+        hook_owner._require_grads_hook = state["hook"]
+    elif hasattr(hook_owner, "_require_grads_hook"):
+        del hook_owner._require_grads_hook
+
+    model.config.use_cache = state["use_cache"]
+    model.train(state["training"])
+
+
+def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
+               config=DEFAULT_TRAIN_CONFIG, train_seed=42, quant_label=None,
+               bypassed_layer=None, resume=True,
+               max_steps_this_session=None) -> dict:
+    """LoRA fine-tune while restoring the caller's borrowed model state.
+
+    The implementation writes the scheduled PEFT checkpoints, guarded run
+    manifest, append-only logs and resume state documented by this module.
+    Its signature remains the binding training interface. Adapter attachment
+    and trainability are intentional outputs; caller mode, ``use_cache``,
+    gradient-checkpointing state, and pre-existing input-gradient hooks are
+    restored on both success and failure.
+    """
+    training_state = _capture_training_state(model)
+    try:
+        return _train_lora_impl(
+            model, tokenizer, data_path, out_dir, model_id, objective,
+            config=config, train_seed=train_seed, quant_label=quant_label,
+            bypassed_layer=bypassed_layer, resume=resume,
+            max_steps_this_session=max_steps_this_session,
+        )
+    finally:
+        _restore_training_state(model, training_state)
 
 
 def matched_training_identity(manifest, cross_family=False) -> dict:
@@ -1114,6 +1513,7 @@ def matched_training_identity(manifest, cross_family=False) -> dict:
     constants, which is what carries the paper's "matched across models"
     sentence.
     """
+    manifest = json.loads(json.dumps(manifest))
     config = _guarded_view(manifest)["config"]
     identity = {
         "config": config,
@@ -1127,12 +1527,14 @@ def matched_training_identity(manifest, cross_family=False) -> dict:
         "quant_label": manifest.get("quant_label"),
         "dtype": manifest.get("dtype"),
         "device_type": manifest.get("device_type"),
+        "adapter_dtype": manifest.get("adapter_dtype"),
     }
     if not cross_family:
         # model_id catches an arm accidentally trained from the wrong base
         # (a dev-scale 0.5B manifest slipping into a 7B comparison).
         identity["model_id"] = manifest.get("model_id")
         identity["fold_system"] = manifest.get("fold_system")
+        identity["renderer_sha256"] = manifest.get("renderer_sha256")
     return identity
 
 
@@ -1144,7 +1546,14 @@ def checkpoint_meta(adapter_dir) -> dict:
     here instead of trusting an operator-typed flag.
     """
     path = Path(adapter_dir) / "train_meta.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    for field in ("checkpoint_step", "train_seed"):
+        if field not in meta:
+            raise ValueError(
+                "malformed training sidecar %s: missing required field %r"
+                % (path, field)
+            )
+    return meta
 
 
 def read_train_log(path) -> list:

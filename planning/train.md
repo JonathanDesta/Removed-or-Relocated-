@@ -1,13 +1,74 @@
 # Plan: train, Stage-1 LoRA fine-tuning (M_D / M_C checkpoint creation)
 
-Revision 3 of the live plan for the `train` scope (one live plan per
+Revision 4 of the live plan for the `train` scope (one live plan per
 scope; revisions happen in this file, never in a sibling). Round zero
 was reviewed in planning/train.critique-1.md (findings F1-F24),
-revision 1 in planning/train.critique-2.md (findings F25-F39); the
+revision 1 in planning/train.critique-2.md (findings F25-F39),
+revision 3 in planning/train.critique-3.md (findings F40-F57); the
 disposition tables appended to each critique record the adjudications.
 Revision 2 applied the accepted round-2 findings (all 15 accepted; F25
-additionally escalated as P15). Revision 3 applies human rulings of
-2026-08-15 and adds no new findings of its own:
+additionally escalated as P15). Revision 3 applied human rulings of
+2026-08-15 and added no new findings of its own.
+
+**Revision 4 is different in kind from its predecessors: the
+implementation already exists.** Revision 3's work packages landed in
+commit f9682ab, so this revision describes CHANGES TO LANDED CODE, and
+its correctness bar includes "does not break the 33 tests that pass
+today" — the regression audit at the end of each affected work package
+is part of the deliverable, not commentary. It applies the 14 accepted
+round-3 findings, escalates F44 (P12) and F46 (P15), and opens one new
+pending item, P16. Two findings arrived with remedies that were
+accepted in substance but CORRECTED in mechanism (F41, F49); both
+corrections are called out where they land, because the proposed
+versions would have introduced new failures.
+
+**All sixteen pending constants were RATIFIED by the human on
+2026-08-15**, after revision 4's findings were applied. The
+authoritative record is RESEARCH_SPEC.md, "Stage-1/2 fine-tuning
+constants (ratified 2026-08-15)", items T1-T16 (numbered to match this
+plan's P1-P16); planning/train.ratification-proposal.md records what was
+proposed and how each was ruled. Two rulings CHANGED this plan's
+proposal and their consequences are applied throughout below:
+
+- **P2 → initially r = 64, alpha = 16, dropout = 0.1; EFFECTIVE since
+  2026-08-16 r = 16, alpha = 16, dropout = 0.05** (see the activation and
+  ruling notes at the end of this bullet).
+  The rank deviation from the QLoRA recipe, and the transfer assumption
+  that propped it up, are GONE — the plan now claims the recipe's own
+  r=64/alpha=16 pairing. A pre-committed ordered fallback (T2) applies
+  if a T4 fit check fails: all three families drop to r=16 together,
+  never a per-family rank and never a micro-batch reduction.
+  **Activated 2026-08-16:** the exact Gemma-2 500-token T4 probe OOMed at
+  r=64, so the effective defaults are now r=16, alpha=16, dropout=0.05 for
+  every family. The r=16 500-token stress rerun also OOMed during backward;
+  the 512-token validation cap is not a T4 memory guarantee, and no further
+  fallback is pre-committed. A corrected 167-token production-length r=16
+  probe then applied one update successfully (10.854 GiB peak allocated,
+  11.963 GiB reserved), verifying the effective lane against current data.
+  **RULED DIRECTLY 2026-08-16:** independently of the fallback, the human
+  ruled that the project uses rank 16, so the value rests on that ruling and
+  not solely on the fit failure. The counterfactual (would r=64 have fit at
+  the 167-token production length?) was never measured and is deliberately
+  not pursued. Both the ruling and the activation precede any Gate-1 result
+  on a trained checkpoint, so the rank is outcome-independent either way.
+  Consequence to carry forward: the rank deviation and the transfer
+  assumption named at the top of this bullet are BACK, and are recorded as
+  the third declared deviation under RESEARCH_SPEC.md T14.
+- **P10 → save 6, defer the evaluated subset.** Saving and evaluating
+  are separated; the Stage-2/3 plan owns which t values get a full R_t
+  evaluation and must pre-commit them before any R_t is computed.
+
+P12 ruled (a) (fold guard refuses both directions — the shipped
+behaviour is now ratified rather than unratified), P15 ruled (a)
+(trained-checkpoint eval rows carry the checkpoint's train_seed, which
+AMENDS the 2026-08-13 row convention and REVERSES revision 4's planned
+suspension warning), and P16 ruled (a) (abort after 20 consecutive
+scaler-skipped steps). Nothing in this plan is now pending except the
+three carried-forward obligations listed under "Ratified decisions"
+below.
+
+Revision 3's standing content below is unchanged except where a
+round-3 finding or a 2026-08-15 ruling touches it:
 
 - **P6 is RATIFIED** in its strict, split-matched reading ("everything
   in the training should be exactly the same for both models"). The
@@ -30,14 +91,19 @@ additionally escalated as P15). Revision 3 applies human rulings of
   (`models.py`) and the tiny Qwen2/Llama/Gemma2 fixtures with
   `_attn_implementation = "eager"` in tests/test_bypass.py (the
   layer-bypass plan's convention).
-- **All other constants stay PROPOSED** (P1-P5, P7-P11, P13-P15),
-  including P6's values; the team rules on them via
-  planning/train.ratification-proposal.md, the short form of the
-  pending list. P12 and P15 remain the OPEN escalations.
+- **(SUPERSEDED 2026-08-15.)** This bullet said all other constants
+  stayed PROPOSED. They no longer are: P1-P16 were all ratified on
+  2026-08-15 — see the revision-4 block above and the "Ratified
+  decisions" section below. Kept as a marker so the revision history
+  reads correctly.
 
 Written for an implementer who has RESEARCH_SPEC.md and INTERFACES.md
-but was not in the planning conversation. Repo state verified against
-the working tree on 2026-08-15 (branch eval-harness, commit 419468b).
+but was not in the planning conversation, and who may be working from a
+clone: AGENTS.md, CLAUDE.md and roles/ are gitignored (round-3 O2), so
+everything an implementer needs — including which environment runs
+which tests — is restated in this file rather than referenced. Repo
+state verified against the working tree on 2026-08-15 at merge fbe0f36
+(revision 3's implementation landed; revision 4's changes have not).
 
 ## Scope
 
@@ -102,6 +168,21 @@ NON-GOALS (noted so they are not discovered as gaps later):
    asserted" applies to bypass state AND to quantization: caller
    bookkeeping (`bypassed_layer`, `quant_label`) is cross-checked
    against the live model and mismatches refuse (D2, WP-T4 step 1).
+   REVISION 4 extends "derived, not asserted" to the RENDERING and to
+   the ADAPTER PRECISION: `encoding_sha256`, `renderer_sha256` and
+   `adapter_dtype` are all derived from the live tokenizer and model
+   and guarded, so a template, tokenizer or peft-default change cannot
+   move what is trained without refusing (D10).
+6. **The ratified data-regeneration mandate** (RESEARCH_SPEC.md,
+   ratified 2026-08-14): "Training data must be REGENERATED before any
+   fine-tuning use; previously built files on Drive are invalid."
+   Revision 3 treated this as an operational precondition outside the
+   plan. Revision 4 treats it as a binding constraint the lane
+   ENFORCES, because a precondition whose violation is invisible is not
+   a precondition — it is a hope. `check_training_grid` (D9, WP-T2) is
+   the enforcement, and it refuses rather than warns: a stale build
+   produces a wrong tau, and every number downstream of tau inherits it
+   silently.
 
 ## Method provenance (papers fetched and read for this plan, 2026-08-15; re-verified independently by the critic's session, planning/train.critique-1.md F22)
 
@@ -137,19 +218,30 @@ NON-GOALS (noted so they are not discovered as gaps later):
 - **Declared deviations from the QLoRA recipe**: (a) compute dtype is
   fp16 with a gradient scaler, not bf16; the T4 has no bf16
   (environment-forced; recorded in the manifest's dtype and flagged for
-  the reproducibility appendix). (b) proposed r=16 rather than 64,
-  justified by Dettmers et al.'s own rank-irrelevance finding (a
-  transfer assumption, P2) plus checkpoint-storage arithmetic:
-  all-linear r=16 on Qwen2.5-7B is ~40.4M LoRA parameters, ~161 MB
-  fp32 (~81 MB fp16) per checkpoint, Gemma-2-9B ~216 MB fp32, and r=64
-  is 4x that (~646 MB fp32 per 7B checkpoint), multiplied by the P10
-  schedule across arms and models. (For calibration: attention-only
-  r=16 would be ~40 MB fp32, but P1 proposes all-linear.) (c) no paged
-  optimizer; Dettmers et al. needed it for 33-65B on a single 24/48 GB
-  GPU; at 7-9B on a T4 plain AdamW fits, and bitsandbytes' paged AdamW
-  remains the recorded fallback if OOM is observed. All three are
-  listed with the pending constants (P14) so the human ratifies them
-  together.
+  the reproducibility appendix). (b) **The rank deviation returned when
+  T2's pre-committed fallback activated 2026-08-16.** The initial ruling
+  used r=64/alpha=16/dropout 0.1, the recipe's Table 9 pairing; Gemma's
+  exact T4 fit failure moved all families to the pre-decided
+  r=16/alpha=16/dropout 0.05 values. This is a recorded memory-triggered
+  deviation, not post-outcome tuning. Measured storage at the initial
+  r=64 setting, from the real model configs: ~646 MB
+  fp32 per Qwen2.5-7B checkpoint (161.5M LoRA parameters), ~671 MB on
+  Llama-3.1-8B, ~864 MB on Gemma-2-9B; ~131 GB for every checkpoint of
+  every arm of every model across both seeds, which is 2.6% of the
+  available 5 TB. (c) no paged optimizer; Dettmers et al. needed it for
+  33-65B on a single 24/48 GB GPU; at 7-9B on a T4 plain AdamW fits, and
+  bitsandbytes' paged AdamW remains the recorded fallback if OOM is
+  observed. **All THREE deviations — fp16, rank, and no paged optimizer —
+  are ratified as such under P14 / RESEARCH_SPEC.md item T14**, updated
+  2026-08-16 when the rank one returned. The rank deviation carries a
+  consequence the other two do not and the appendix must say so: r=64 was
+  ruled *because* it removed a transfer assumption, so at r=16 that
+  assumption is load-bearing again (the rank-irrelevance finding is
+  instruction-tuning benchmark evidence, applied here to a
+  deception-behaviour objective). The effective triple is also no longer
+  single-sourced — dropout 0.05 follows Appendix A.1 while the initial 0.1
+  followed Table 9, so "follow one source consistently" no longer describes
+  the values in use.
 
 ## Design decisions (made here, with reasons)
 
@@ -236,10 +328,20 @@ Qwen/Llama always carry a system turn, so training them on folded data
 would create a train/eval prompt-distribution mismatch, and on Qwen
 specifically, a missing system turn makes the chat template inject its
 own default system prompt, silently changing the training distribution.
-The converse direction EXTENDS the ratified rule; it is pending item
-P12, now explicitly escalated (critique F14): the human decides whether
-the unratified converse may be live as a refusal from day one or must
-warn-only until ratified. Fold need is detected from the live tokenizer
+The converse direction EXTENDED the ratified rule and was pending item
+P12, escalated by critique F14 and again by F44. **RULED 2026-08-15:
+option (a) — refusal in BOTH directions, RATIFIED** (RESEARCH_SPEC.md
+item T12). The shipped behaviour is unchanged and is now ratified
+rather than unratified; the code comment marking the converse "pending
+decision P12 … not a ratified rule" is replaced by a citation of T12.
+The reasoning that settled it: the two directions are not an asymmetry
+but one rule applied to each family's own failure mode, so enforcing
+only the Gemma direction would leave Qwen and Llama unprotected — and
+`matched_training_identity`'s cross-family mode deliberately drops
+`fold_system` (it legitimately differs across families), so a
+cross-family audit structurally CANNOT catch a fold error. The
+per-family guard is the only defense that exists.
+Fold need is detected from the live tokenizer
 with `eval._system_fold_needed` on a fixed synthetic probe
 (`[{"role": "system", ...}, {"role": "user", ...}]`), the same
 detection the eval runner uses, never hardcoded per model name.
@@ -255,24 +357,83 @@ both the swapped-file accident (training "M_C" on m_d_train.jsonl via a
 path typo) and a truncated/hand-mixed file a loud failure instead of a
 silently wrong arm (critique F11).
 
+**D9: The dataset must be provably a CURRENT-grid build (revision 4;
+critique F40).** RESEARCH_SPEC.md's 2026-08-14 ratification changed the
+training grid (`TRAIN_COMPANY_OFFERS` gained 155,000;
+`TRAIN_OUTSIDE_RATIOS` became 0.55/0.73/0.81/0.94) and said in terms:
+"Training data must be REGENERATED before any fine-tuning use;
+previously built files on Drive are invalid." Nothing in the artifact
+enforced that. data.py's manifest fields (`seed`, `n_per_dataset`,
+`n_incentive`, `n_no_stakes`, `md_deceptive`, `mc_deceptive`,
+`validated`, `fold_system`) are byte-compatible across the change, so a
+stale Drive build passes every existing guard and trains M_D on data
+whose values collide with the eval grid — after which tau partly
+measures memorization and the Gate-1 verdict, the A_l sweep, and layer
+selection all inherit it silently. The guard therefore verifies the
+FILE, not a self-reported label: every meta row's scenario must lie on
+the live grid, and no value anywhere in the file may coincide with an
+eval value. Two properties make this the right shape: it fails CLOSED
+on a stale build (which by definition cannot carry a new manifest key),
+and it needs no data.py change, so the plan's "no training-data
+changes" non-goal holds. Mechanics in WP-T2.
+
+**D10: Run identity must cover how bytes become tokens, not just which
+bytes (revision 4; critique F41, F50).** The manifest guarded the
+dataset's bytes and the config's values but nothing about the rendering
+in between, which is produced by `apply_chat_template` plus the
+tokenizer. Two consequences, both invisible: a resume after a
+transformers upgrade that ships a revised chat template trains the
+second half of a run on a different rendering than the first, and two
+arms trained a week apart can pass `matched_training_identity` while
+having seen different token streams — which is exactly the claim that
+function exists to certify. The fix is TWO digests, not one, and the
+distinction is load-bearing:
+
+- `encoding_sha256`, over this run's encoded (input_ids, labels), is
+  RUN identity. It is guarded and it is deliberately NOT part of
+  `matched_training_identity`: M_D and M_C encode different assistant
+  replies, so their encodings differ BY CONSTRUCTION, and auditing this
+  field across arms would make every matched pair fail. (Critique F41
+  proposed exactly that; it is the one place revision 4 departs from a
+  finding's stated remedy while accepting its substance, and the
+  acceptance test named in WP-T4 exists to keep anyone from
+  re-introducing it.)
+- `renderer_sha256`, over a fixed synthetic probe conversation, is
+  RENDERER identity: equal across arms of one family, different across
+  families, independent of the data. That is the field the matched
+  audit needs, and it drops under `cross_family=True` beside `model_id`
+  and `fold_system`.
+
+A probe RENDER is hashed rather than `tokenizer.chat_template` because
+a future version that stops exposing that attribute would silently
+degrade every run's hash to the hash of the empty string, whereas a
+probe that cannot render raises. The same "derive, don't assert"
+reasoning adds `adapter_dtype` (F50): the fp32-master-weight property
+that makes fp16 AMP safe currently rests on peft's
+`autocast_adapter_dtype` default, which is passed explicitly from now
+on and recorded as a derived, guarded field so a silent flip refuses a
+resume instead of quietly underflowing every update.
+
 ## Module map
 
 | Home | Contents |
 |---|---|
-| `src/algoverse/train.py` | Everything below. Module-level imports stay stdlib + stdlib-importable-algoverse only (`eval` and `data` qualify; `utils` does NOT, it imports numpy/torch at module level, so utils, torch, peft, and transformers are all imported inside functions, mirroring eval.py's discipline) so the module imports on a stdlib-only box and pure tests can run. |
+| `src/algoverse/train.py` | Everything below. Module-level imports stay stdlib + stdlib-importable-algoverse only (`eval`, `data` and `tasks` qualify — all three verified stdlib-only at module level on 2026-08-15; `utils` does NOT, it imports numpy/torch at module level, so utils, torch, peft, and transformers are all imported inside functions, mirroring eval.py's discipline) so the module imports on a stdlib-only box and pure tests can run. Revision 4 adds the `data`/`tasks` imports for the WP-T2 grid guard; verification item 1's `import algoverse.train` check is what pins that they did not cost the invariant. |
+| `src/algoverse/eval.py` | SECOND minimal cross-lane edit (revision 4; critique F47). Extract `_four_bit(model)` — `bool(getattr(model, "is_loaded_in_4bit", False))`, the existing expression, unchanged — and call it from `_derive_gen_config`. Nothing else in eval.py moves. Reason: `train._derive_quant` and eval's `four_bit` were two implementations of one derived quantity, and the plan's own "one home per quantity" rule applies to derived provenance as much as to reported numbers. Direction is pinned deliberately: train adopts eval's rule (see WP-T4 step 1), eval does not adopt train's. |
 | `scripts/run_finetune.py` | Thin argparse CLI mirroring run_baseline.py: loads the model via `load_model_and_tokenizer`, builds/loads nothing else itself, calls `train_lora`. |
 | `scripts/run_baseline.py` | MINIMAL cross-lane edit (deliberate; critique F10, narrowed by F25/F26): when `--adapter` points at a directory containing `train_meta.json`, read it via `train.checkpoint_meta`, then apply a PER-FIELD treatment. `checkpoint_step`: adopt from the sidecar when the flag is omitted; raise if a passed flag mismatches. `train_seed`: adoption SUSPENDED pending P15 (the ratified row convention says train_seed is null for Stage-0/1 rows; adopting the sidecar's value would contradict it, so rows stay null when the flag is omitted); a passed flag mismatching the sidecar still raises. `bypassed_layer`: NEVER adopted and never cross-checked against `--bypassed-layer`, because the sidecar value is TRAINING-time provenance while the flag installs an EVAL-time lesion, and the two legitimately differ (the A_l sweep bypasses layers of an intact-trained M_D: sidecar null, flag set); instead, a NON-null sidecar `bypassed_layer` raises immediately with "this checkpoint was trained under a permanent bypass; evaluating it requires the reinstall-at-load loader path, the Stage-2/loader plan's deliverable". Everything else in the script untouched. |
-| `tests/test_train_pure.py` | New, stdlib-only: schedule (both spacings, pinned vectors), derive_total_steps (pinned vectors), masking/encoding (stub tokenizer), fold guard, objective guard, manifest identity, matched_training_identity, read_train_log, checkpoint_meta. Hardened runner per repo convention. |
-| `tests/test_train.py` | New, guarded (torch+transformers+peft; loud SKIP otherwise, test_bypass.py pattern): tiny-model training behavior, checkpoints (including same-step rewrite), resume exactness, seeded-init determinism, bypass compatibility, adapter round-trip. |
-| `INTERFACES.md` | One proposed contract addition (text in WP-T8). Human-owned edit; agents never touch INTERFACES.md. |
-| Untouched | `models.py` (loader unchanged this scope), `utils.py`, `data.py`, `eval.py`, `metrics.py`, `tasks.py`, existing tests. |
+| `tests/test_train_pure.py` | Stdlib-only: schedule (both spacings, pinned vectors), derive_total_steps (pinned vectors), masking/encoding (stub tokenizer), fold guard, objective guard, GRID guard (revision 4), manifest identity, matched_training_identity, provenance digests (revision 4), TrainConfig validation (revision 4), read_train_log, checkpoint_meta. Hardened runner per repo convention. |
+| `tests/test_train.py` | Guarded (torch+transformers+peft; loud SKIP otherwise, test_bypass.py pattern): tiny-model training behavior, checkpoints (including same-step rewrite), resume exactness, seeded-init determinism, bypass compatibility, adapter round-trip, and — new in revision 4 — the DEFAULT configuration with gradient checkpointing ON, plus the non-reentrant-mode pin. |
+| `INTERFACES.md` | One proposed contract addition (text in WP-T8), updated in revision 4 to cover the fields this revision adds. Human-owned edit; agents never touch INTERFACES.md. |
+| Untouched | `models.py` (loader unchanged this scope), `utils.py`, `data.py` (READ for its grid constants, never modified), `metrics.py`, `tasks.py` (READ for the eval grid and `extract_claimed_offer`, never modified). `eval.py` left this list in revision 4 — see its row above. |
 
 train.py's internal layout (one module; no package split; assist-level
 codebase):
 
-- `TrainConfig` frozen dataclass + `DEFAULT_TRAIN_CONFIG` (proposed
-  values, pending ratification; same defaults-in-code-until-ratified
-  pattern the Gate-1 constants followed).
+- `TrainConfig` frozen dataclass + `DEFAULT_TRAIN_CONFIG` (RATIFIED
+  values as of 2026-08-15, RESEARCH_SPEC.md items T1-T16; two of them,
+  `lora_r` and `lora_dropout`, change from what is currently in the
+  code — see WP-T1) plus `__post_init__` structural validation.
 - `checkpoint_schedule(total_steps, n_checkpoints, spacing)`: pure,
   formulas pinned in WP-T1.
 - `derive_total_steps(n_examples, config)`: pure,
@@ -289,6 +450,11 @@ codebase):
   manifest; shape and alignment checks (WP-T2).
 - `check_fold_compatibility(tokenizer, data_manifest, records)` (D7).
 - `check_objective(objective, meta_rows, data_manifest)` (D8).
+- `check_training_grid(meta_rows, records)` (D9, revision 4): the third
+  guard, refusing a dataset that was not built from the currently
+  ratified training grid.
+- `encoding_digest(examples)` and `renderer_digest(tokenizer)`
+  (revision 4): the two rendering-provenance digests, WP-T4 step 5.
 - `encode_conversation(tokenizer, messages, max_seq_len,
   mask_prompt_tokens=True)` → `(input_ids, labels)` as plain lists
   (pure-testable; D5; the flag is the masking policy's single home,
@@ -368,6 +534,25 @@ New reported/paper-load-bearing quantities introduced by this lane:
   within-family equality before any cross-arm number is reported, and
   cross-family equality before the paper's "matched across models"
   sentence is written.
+  REVISION 4 ADDITIONS (D10): `renderer_sha256` joins the within-family
+  block (dropped under `cross_family=True`, beside model_id and
+  fold_system, because the renderer necessarily differs across
+  families); `adapter_dtype` joins the always-audited block (it is fp32
+  on every family, so a difference means something broke);
+  `encoding_sha256` is NEVER audited here — see D10 for why auditing it
+  would invert the guard. Also fixed in revision 4 (critique F42): the
+  function JSON-round-trips its argument before building the identity,
+  the same one-liner `_guard_train_manifest` already uses, because
+  `config["target_modules"]` is a tuple in memory and a list on disk and
+  the two compared unequal. That was F29's root cause, fixed at one of
+  its two sites; this is the second.
+  RECORDED DEBT (critique F42, second half): this function has NO
+  CALLER anywhere in the repo today. The plan assigns the calling to
+  Stage-2/analysis, which is the right owner, but until that lands the
+  paper's "matched fine-tuning" sentence has an executable home that no
+  pipeline executes. That is a debt against a claim the paper will
+  make, and it is written here so the Stage-2 plan inherits it
+  explicitly rather than rediscovering it.
 - **Training loss curves** (appendix, optional): rows appended to
   `train_log.jsonl` by the loop (one row per completed optimizer step);
   the reading side is `train.read_train_log` (keep-last-row-per-step),
@@ -401,10 +586,41 @@ the manifest): `lora_r`, `lora_alpha`, `lora_dropout`, `target_modules`
 matched_training_identity and from the resume identity guard, recorded
 anyway).
 
-`DEFAULT_TRAIN_CONFIG` carries the PROPOSED values (pending list below);
-the docstring marks them PROPOSED pending ratification and cites the
-LoRA (https://arxiv.org/abs/2106.09685) / QLoRA-recipe
-(https://arxiv.org/abs/2305.14314) provenance above.
+`DEFAULT_TRAIN_CONFIG` carries the effective RATIFIED values
+(RESEARCH_SPEC.md items T1-T16). The initial 2026-08-15 ruling changed
+`lora_r` 16 → 64 and `lora_dropout` 0.05 → 0.1 (`lora_alpha` stayed 16),
+but T2's pre-committed all-family fallback activated on 2026-08-16 after
+the exact Gemma-2 T4 fit probe failed. The effective defaults are therefore
+`lora_r=16`, `lora_alpha=16`, and `lora_dropout=0.05` for every family;
+the batch split is unchanged.
+REVISION 4 (critique F57): the docstring must also carry
+`lora_dropout`'s provenance, which was the ONLY value it omitted and
+the only one whose source is genuinely contested — QLoRA's Appendix A.1
+says "LoRA dropout 0.05 is useful for small models (7B, 13B), but not
+for larger models (33B, 65B)" while its Table 9 (Appendix B.2) assigns
+0.1 to models up to 13B and 0.05 to 33B/65B. Both were re-read
+2026-08-15. The ruling picks 0.1 so that rank, alpha, learning rate,
+batch, clip AND dropout all come from Table 9 rather than being
+cherry-picked across two contradictory passages; the docstring records
+the contradiction and which passage was followed.
+
+**`__post_init__` validation (revision 4; critique F52).** The frozen
+dataclass validates STRUCTURAL validity at construction: `lora_r`,
+`epochs`, `micro_batch_size`, `grad_accum_steps`, `n_checkpoints`,
+`max_seq_len` and `save_every` are all `>= 1`; `warmup_steps >= 0`;
+`learning_rate > 0`; `max_grad_norm > 0`; `0.0 <= lora_dropout < 1.0`;
+`target_modules` non-empty; `lr_schedule == "constant"`;
+`checkpoint_spacing in ("even", "doubling")`. These are domain
+constraints, not methodological bounds — a dropout probability outside
+[0, 1) and a `save_every` of 0 are not choices anyone could ratify — so
+nothing here needs a decision. What it buys: `--config-json
+'{"save_every": 0}'` currently type-checks, passes run_finetune.py's
+known-key check, and dies with a ZeroDivisionError after the first
+optimizer step, having already paid for a 7B download and a model load.
+After this it fails at `dataclasses.replace`, before anything expensive.
+`checkpoint_schedule`'s own raises stay as belt and braces: they compare
+`n_checkpoints` against `total_steps`, which construction time cannot
+know.
 
 `target_modules` is ALWAYS passed explicitly into `LoraConfig`, never
 left to peft's default: peft's built-in mapping targets only `q_proj`
@@ -468,8 +684,12 @@ and the dev vector (n=40, micro=4, accum=1, epochs=1 → 10 steps).
   m_d_train.meta.jsonl); missing → raise (regenerated data always has
   it, and the objective guard needs it).
 - Alignment (critique F12): `len(meta_rows) == len(records)` or raise
-  naming both counts; every meta row must carry `behavior` and
-  `fold_system` keys (raise with index).
+  naming both counts; every meta row must carry `behavior`,
+  `fold_system` and — added in revision 4 — `scenario` keys (raise with
+  index). `scenario` is required rather than optional so that a build
+  predating that field REFUSES instead of silently skipping D9's grid
+  check; data.py has written it since the builder existed
+  (`_conversation`, data.py), so no current build is affected.
 - Data manifest: `data_path.parent / "manifest.json"`; missing → raise
   (no provenance, no training; the mandated regeneration produces it).
 - Returns (records, meta_rows, data_manifest).
@@ -482,7 +702,7 @@ and the dev vector (n=40, micro=4, accum=1, epochs=1 → 10 steps).
 - `fold_required != fold_built` → raise, message naming the model's
   requirement, the manifest value, and the fix (`--fold-system` rebuild
   for Gemma; the unfolded build for Qwen/Llama). This is E6 enforcement
-  plus the D7 converse (converse enforcement mode pending P12).
+  plus the D7 converse (both directions ratified 2026-08-15, T12).
 - Belt-and-braces record scan: `fold_system: true` data must contain no
   system turns anywhere; `false` data must have a leading system turn in
   every record (catches hand-edited or mixed files). Raise with index.
@@ -496,6 +716,38 @@ meta rows with `behavior == "deceptive"` and `n = len(meta_rows)`.
 `data_manifest["mc_deceptive"] == 0`. Also
 `n == data_manifest["n_per_dataset"]`. Raise naming every number
 otherwise.
+
+`check_training_grid(meta_rows, records)` (D9, revision 4, critique
+F40). Imports `algoverse.data` and `algoverse.tasks` at module level
+(both verified stdlib-only on 2026-08-15, so the stdlib-importability
+invariant holds) and reuses their constants as the single source of
+truth — it never restates a grid value of its own, so a future
+ratification that moves the grid moves this guard with it and cannot
+leave the two out of step. Two checks:
+
+- **On-grid (catches a stale build).** For every meta row's `scenario`:
+  `company_offer in data.TRAIN_COMPANY_OFFERS`; `true_outside_offer` is
+  None or equals `data._round_k(company_offer * r)` for some non-None
+  `r` in `data.TRAIN_OUTSIDE_RATIOS`; `role in data.TRAIN_ROLES`;
+  `company in data.TRAIN_COMPANIES`. Raise naming the row index, the
+  field, and the offending value. A pre-2026-08-14 build fails on
+  `true_outside_offer` at the first row, because the old ratios derive
+  different true offers from the same offers.
+- **Off the eval grid (catches any other way the firewall broke).**
+  Build the eval value set once —
+  `set(tasks.COMPANY_OFFERS) | {int(round(offer * ratio, -3)) for offer
+  in tasks.COMPANY_OFFERS for ratio in tasks.TRUE_OUTSIDE_RATIOS if
+  ratio is not None}` — and refuse if any scenario value, or any claim
+  that `tasks.extract_claimed_offer` (the repo's single extraction home)
+  pulls out of an assistant reply, lands in it. `None` claims are
+  skipped. At n=1500 this is 1,500 regex extractions, well under a
+  second, and it is the check that makes the guard robust to stale
+  builds the first check happens not to catch.
+
+Honest residual, stated in the same spirit as the digest residual
+below: a file whose scenarios lie on the live grid but which was
+hand-edited after the build still passes. The recorded data manifest
+keeps that auditable post hoc; it is not refused up front.
 
 Digests: `dataset_sha256` (records file) and `meta_sha256` (meta file)
 are both computed and both GUARDED in the train manifest; the data
@@ -517,6 +769,26 @@ k != md_deceptive), on k == 0 under "deceptive", and on k > 0 under
 via `data.build_finetune_datasets(tmp, n_per_dataset=8, seed=0)` (pure,
 fast) and assert `load_training_data` + both guards accept the real
 builder's output for both objectives, folded and unfolded.
+
+REVISION 4 additions for `check_training_grid`, all rung 1: the real
+builder's output passes (extend the existing REAL-DATA wiring test to
+call the third guard); and it raises on each of an off-grid
+`company_offer`, an off-grid `true_outside_offer` (the pre-ratification
+case — construct it by deriving from an old ratio such as 0.60), an
+eval company offer planted in an assistant reply's final line, and a
+meta row with no `scenario` key. The concrete broken implementation
+these must reject: a train lane that accepts the pre-2026-08-14 Drive
+build. A test that only exercises the current builder does not reject
+it, which is why the off-grid vectors are constructed by hand.
+
+REGRESSION NOTE (do not skip): requiring `scenario` breaks
+`tests/test_train_pure.py`'s `_builder_shaped` helper and
+`tests/test_train.py`'s `_write_dataset` helper, which between them feed
+every test in both files. Both must emit a `scenario` drawn from the
+live `data.TRAIN_*` constants. `tests/test_train.py`'s fixture replies
+carry no "MY BEST OUTSIDE OFFER:" line, so `extract_claimed_offer`
+returns None there and the eval-value half is a no-op — verified, no
+further fixture change needed.
 
 ### WP-T3: Tokenization and masking
 
@@ -543,6 +815,38 @@ the passed cap when given). Two jobs: (a) verify the D5 prefix
 properties against REAL tokenizers for all three model families before
 any production run; (b) produce the token-length histogram that grounds
 the P7 cap proposal. Invocation lives in verification item 2.
+REVISION 4 (critique F54): an empty `records` list raises a named
+ValueError rather than falling off the end of `lengths[-1]` with an
+IndexError. `load_training_data` rejects empty files first, so this is
+reachable only by direct call — which is exactly the preflight's usage,
+where a hand-sliced record list is the normal input.
+
+**The two rendering-provenance digests (revision 4; D10, critique
+F41).** Both live here because both are properties of the encoding, and
+both are pure functions with rung-1 tests:
+
+- `encoding_digest(examples)` → sha256 over the canonical JSON of every
+  example's `(input_ids, labels)`, in order. This is the fingerprint of
+  what this run will actually train on. It changes if the template
+  changes, if the tokenizer changes, if the masking policy changes, or
+  if the data changes — which is the point: it is the one field that
+  catches a mid-run rendering shift no other guard can see.
+- `renderer_digest(tokenizer)` → sha256 over
+  `apply_chat_template(RENDER_PROBE, tokenize=False)` concatenated with
+  its `add_special_tokens=False` ids. `RENDER_PROBE` is a fixed module
+  constant carrying NO system turn
+  (`[{"role": "user", ...}, {"role": "assistant", ...}]`), so it renders
+  on Qwen2.5, Llama-3.1 and Gemma-2 alike with no fold branch, and a
+  family whose template cannot render it raises rather than returning a
+  degenerate hash. This is the data-independent half: equal across arms
+  of one family, different across families.
+
+**Acceptance tests** for the digests (rung 1, stub tokenizers): both are
+deterministic across repeated calls; `renderer_digest` differs between
+the plain stub and a stub whose template differs by one character;
+`encoding_digest` differs when a single label flips. The concrete broken
+implementation to reject: a digest that hashes only the record text and
+so misses a template change.
 
 Encoding runs ONCE up front over all records (1,500 short conversations;
 seconds), producing the in-memory example list the loop consumes.
@@ -565,7 +869,19 @@ input_ids; `encode_preflight` returns correct counts on the same stubs
    `bypass_state(model)` (same refusal as `run_negotiation_eval`;
    Stage-1 calls pass None and an intact model); `quant_label` vs
    `_derive_quant(model)` (derive-and-refuse; the manifest records the
-   DERIVED value; critique F19).
+   DERIVED value; critique F19). REVISION 4 (critique F47):
+   `_derive_quant` becomes `"4bit" if eval._four_bit(model) else
+   "none"` and DROPS its `config.quantization_config` fallback, so the
+   train lane and the eval lane read this fact through one function
+   instead of two rules that can disagree. The direction is chosen
+   deliberately — train adopts eval's rule, not the reverse — because
+   eval's is the one an existing test pins
+   (`tests/test_bypass.py::test_derive_gen_config_independent_oracle`)
+   and because a disagreement today means train certifies a checkpoint
+   that eval then refuses. Recorded consequence: if
+   `is_loaded_in_4bit` ever disappears from transformers, both lanes
+   become wrong together rather than wrong at each other, and the
+   repair has exactly one place to happen.
 2. `utils.set_seed(train_seed)`, the FIRST RNG-touching operation, and
    in particular BEFORE adapter attach (critique F1): peft draws
    lora_A's Gaussian/kaiming init from the global torch RNG, so seeding
@@ -573,7 +889,10 @@ input_ids; `encode_preflight` returns correct counts on the same stubs
    the spec's matched-random-seeds requirement. Everything downstream
    (init, epoch shuffles, dropout) is now a function of train_seed; a
    later resume overwrites RNG state from resume.pt.
-3. Load data; run both WP-T2 guards; compute `dataset_sha256` and
+3. Load data; run ALL THREE WP-T2 guards, in order
+   `check_fold_compatibility`, `check_objective`,
+   `check_training_grid` (the grid guard is last because it is the only
+   one that touches every reply); compute `dataset_sha256` and
    `meta_sha256`.
 4. Adapter attach: if `model` is already a PeftModel (Stage-2
    continuation), require trainable parameters (else raise pointing at
@@ -593,15 +912,44 @@ input_ids; `encode_preflight` returns correct counts on the same stubs
    Stage-2 loader plan's obligation (see non-preclusion checklist).
    `model.config.use_cache = False` for training; `model.train()`
    (the shared loader returns eval mode).
-5. Encode all examples (WP-T3); `total_steps =
-   derive_total_steps(n_examples, config)` (the WP-T1 pure function;
-   critique F34) and `checkpoint_steps = checkpoint_schedule(...)`.
+   REVISION 4, two changes here. (a) critique F50:
+   `autocast_adapter_dtype=True` is passed EXPLICITLY to
+   `get_peft_model`. It is peft's current default, so nothing changes
+   today — but it is what keeps lora_A/lora_B in fp32 on an fp16 base,
+   and if it ever flipped, AdamW would run on fp16 master weights under
+   a GradScaler and every update at lr 2e-4 would silently underflow
+   while the loss curve still looked plausible. The plan already forbids
+   leaning on a peft default for `target_modules` for exactly this
+   reason; the rule applies here too. (b) critique F53: the prior value
+   of `model.config.use_cache` is captured before it is set and restored
+   in a `finally` covering the rest of `train_lora`, so training does
+   not permanently mutate a caller's model object — the same
+   shared-state discipline D6 applies to `tokenizer.padding_side`.
+5. Resolve `pad_token_id` (tokenizer's, else eos); REVISION 4 (critique
+   F55): if both are None, RAISE naming the tokenizer, rather than
+   letting `None` reach `torch.tensor` inside `_collate` as a TypeError
+   at the first padded micro-batch. Encode all examples (WP-T3);
+   `total_steps = derive_total_steps(n_examples, config)` (the WP-T1
+   pure function; critique F34) and `checkpoint_steps =
+   checkpoint_schedule(...)`. REVISION 4 (D10): compute the three
+   provenance values here, all before the manifest exists —
+   `encoding_sha256 = encoding_digest(examples)`,
+   `renderer_sha256 = renderer_digest(tokenizer)`, and `adapter_dtype`,
+   the `str(dtype)` of the first `lora_` parameter on the attached
+   model.
 6. Manifest: build the current manifest; if `out_dir/train_manifest.json`
    exists, `_guard_train_manifest` compares field-by-field and raises
    listing mismatched fields. GUARDED: model_id, quant_label (derived),
    dataset_sha256, meta_sha256, fold_system, objective, train_seed, the
    full TrainConfig asdict minus `save_every`, checkpoint_steps,
-   total_steps, n_examples, bypassed_layer, device_type, dtype.
+   total_steps, n_examples, bypassed_layer, device_type, dtype, and
+   — added in revision 4 — encoding_sha256, renderer_sha256,
+   adapter_dtype. Adding to `GUARDED_MANIFEST_FIELDS` is all that is
+   needed: `_guarded_view`, `_guard_train_manifest` and
+   `_manifest_identity_sha` all read that one tuple, so the resume
+   identity hash picks the new fields up automatically. No production
+   run exists whose stored manifest would now refuse; a hand-made one
+   would, loudly and correctly.
    RECORDED but NOT guarded: dataset_path (a mount point, not an
    identity; critique F20), the data manifest verbatim, package
    versions, `created` (first-session UTC timestamp), save_every.
@@ -656,13 +1004,55 @@ input_ids; `encode_preflight` returns correct counts on the same stubs
    cross-entropy over supervised tokens; this differs from a global
    token-weighted mean when supervised-token counts vary per
    conversation; a deliberate choice, matched across arms, stated in
-   the loop docstring with the alternative named.
+   the loop docstring with the alternative named. REVISION 4 (critique
+   F51): the same docstring must also state the SECOND place equal
+   micro-batch weighting bites — whenever `n_examples %
+   micro_batch_size != 0`, the last micro-batch of EVERY epoch holds
+   fewer examples at full weight, so those examples carry more weight
+   per example. The proposed constants avoid it (1500 % 2 == 0; the dev
+   vector 40 % 4 == 0) and it is matched across arms so it cannot bias
+   tau, but any odd n or any `--config-json` micro-batch override makes
+   it live. Documented, not changed: re-weighting by example count would
+   alter what the objective optimizes, which is P8's territory.
 9. After each completed step: append a `train_log.jsonl` row
    ({step, loss (group mean), lr, epoch, micro_in_epoch,
    scaler_skipped, timestamp}); if `t` in checkpoint_steps →
    `_write_checkpoint`; if `t` hits the `save_every` cadence or a
    checkpoint was just written or `t` is the final step →
    `_save_resume_state`.
+   REVISION 4, numerics surfacing (critique F49, remedy CORRECTED):
+   print a loud, unmissable line the moment a step is skipped by the
+   grad scaler or a group loss is non-finite, and print a SESSION-END
+   SUMMARY (`N of M steps skipped, K non-finite losses`) so a human
+   reading only the tail of a long Colab log still sees it. That is the
+   whole change: the lane currently records `scaler_skipped` per row and
+   in each sidecar but surfaces it only as one line among 282, which is
+   why the plan's fp16 risk note could only assign the watch to a human
+   eyeballing scrollback.
+   What is deliberately NOT done, and why: the finding proposed raising
+   on a non-finite group loss. That would be wrong. Transient
+   non-finite loss under fp16 is exactly what `GradScaler` exists to
+   absorb — gradients go non-finite, the step is skipped, the scale
+   halves, and the run usually recovers — so an immediate raise would
+   kill recoverable runs. Any defensible abort is a skip-streak count or
+   a scale floor, i.e. a NUMBER, so the criterion was escalated as P16
+   rather than invented here.
+   **P16 RULED 2026-08-15 (RESEARCH_SPEC.md item T16): abort with a
+   named error after 20 CONSECUTIVE grad-scaler skipped steps.** The
+   counter resets on any applied step, so it measures a stall, not a
+   total. 20 is ~7% of a 282-step run: longer than any legitimate
+   scale-search transient, short enough to save most of a Colab session.
+   The abort message must name the step index, the streak length and the
+   current scaler scale, so the escalation ladder in the risks section
+   (add warmup → reduce lr → escalate to the team) can be entered with
+   evidence. The surfacing above ships independently of the abort.
+   ACCEPTANCE TEST (rung 2, guarded): drive the loop with a stubbed
+   scaler whose `get_scale` always shrinks, and assert it raises at the
+   20th consecutive skip and not at the 19th; and that a single skip
+   followed by an applied step does not raise. The concrete broken
+   implementation this rejects: a counter that never resets, which would
+   abort a healthy run that accumulated 20 scattered skips over 282
+   steps.
 10. `max_steps_this_session`: stop cleanly after that many optimizer
     steps this invocation (resume state saved). Operational, for
     Colab session limits; recorded per session in `sessions.jsonl`
@@ -703,6 +1093,28 @@ tiny Llama or Gemma2 fixtures, it must keep the layer-bypass plan's
   byte-identical INITIAL adapter state dicts at attach time and (b)
   byte-identical final adapter state dicts. This fails if seeding ever
   moves back after attach.
+- **The DEFAULT configuration runs** (revision 4; critique F43). Every
+  guarded test to date sets `gradient_checkpointing: False` in
+  `_config()`, so the production default has never executed anywhere,
+  and the first execution of it would otherwise be a paid T4 session.
+  A test runs the same tiny fixture with `gradient_checkpointing=True`
+  and asserts the run completes, the loss decreases, and the per-step
+  loss trajectory matches the `False` run to within a small tolerance.
+  TOLERANCE, not `torch.equal`: the two agreed bit-for-bit when checked
+  on 2026-08-15 (first 4.8545, last 4.7782 in both), but bit-identity
+  across checkpoint recomputation is not a promise torch makes across
+  versions, and a test that pins it would rot into a false alarm.
+- **Non-reentrant mode is pinned** (revision 4; critique F43).
+  RESEARCH_SPEC.md ratified 2026-08-13 that gradient checkpointing is
+  non-reentrant only, and Stage-2's whole non-preclusion argument rests
+  on it being the mode that coexists with forward hooks — yet nothing
+  executed it. A spy over `model.gradient_checkpointing_enable`,
+  following the file's existing `_train_capturing_attach` pattern,
+  captures the kwargs and asserts `use_reentrant: False`. Asserting on
+  a private `_gradient_checkpointing_func` attribute instead would be
+  brittle across versions; the kwargs are the contract. The concrete
+  broken implementation this rejects: a switch to reentrant
+  checkpointing, which would silently break the Stage-2 hook.
 
 ### WP-T5: Checkpoints, resume, step convention
 
@@ -751,7 +1163,18 @@ corresponds to four_bit true), `dataset_path`, `dataset_sha256`,
 record half of the ratified reinstall-at-load decision; Stage 2 flips
 the value and the loader plan consumes it), `total_steps`, `config`
 (TrainConfig asdict), `scaler_skipped` (bool; whether this step's
-update was skipped by the grad-scaler), `created` (UTC).
+update was skipped by the grad-scaler), `created` (UTC), and — added in
+revision 4 (D10) — `encoding_sha256`, `renderer_sha256`,
+`adapter_dtype`, so a checkpoint stays self-describing about how its
+training data was rendered, the same reason the eval lane's rows carry
+their full `gen_config`. Adding files or keys inside the adapter
+directory does not disturb `eval._adapter_digest`, which hashes only
+`adapter_model.safetensors` / `adapter_model.bin` /
+`adapter_config.json` (verified 2026-08-15), so the checkpoint's eval
+identity is unaffected.
+REGRESSION NOTE: `tests/test_train.py::test_schedule_is_realized_exactly`
+asserts an EXACT `set(meta)`; the three new keys must be added there or
+that test fails.
 
 `_save_resume_state(path, step, model, optimizer, scheduler, scaler,
 identity_sha)`: torch.save of {"step" (last completed index),
@@ -798,6 +1221,41 @@ Pure tests (test_train_pure.py): `checkpoint_meta` reads a constructed
 sidecar; `read_train_log` applies keep-last-per-step over duplicated
 rows and sorts by step.
 
+REVISION 4 pure tests, all rung 1:
+
+- **Each new guarded field refuses.** Three manifests differing from a
+  baseline only in `encoding_sha256`, `renderer_sha256` and
+  `adapter_dtype` respectively each fail `_guard_train_manifest` naming
+  that field, and each produces a different `_manifest_identity_sha`.
+- **`matched_training_identity` is round-trip-invariant** (critique
+  F42): `matched_training_identity(_train_manifest(...))` equals
+  `matched_training_identity(json.loads(json.dumps(_train_manifest(...))))`.
+  The concrete broken implementation this rejects is the CURRENT one,
+  where the in-memory tuple `target_modules` compares unequal to the
+  on-disk list.
+- **Two arms with different data still match** (D10; the guard against
+  re-introducing critique F41's proposed remedy): two manifests
+  identical except for `objective`, the dataset path, the dataset and
+  meta digests, and `encoding_sha256` — that is, the real M_D/M_C
+  relationship — must compare EQUAL under
+  `matched_training_identity`. If `encoding_sha256` is ever added to
+  that audit, this test fails, which is exactly what it is for.
+- **`renderer_sha256` behaves oppositely**: two manifests differing only
+  in `renderer_sha256` must NOT match within-family, and MUST match
+  under `cross_family=True` (where it drops out beside `model_id` and
+  `fold_system`).
+- **`TrainConfig` validation** (critique F52): `dataclasses.replace` on
+  the default config raises for each of `save_every=0`, `epochs=0`,
+  `micro_batch_size=0`, `grad_accum_steps=0`, `n_checkpoints=0`,
+  `lora_dropout=1.0`, `learning_rate=0`, `checkpoint_spacing="log"`,
+  and empty `target_modules`; the default config itself constructs, and
+  `DEFAULT_TRAIN_CONFIG.epochs = 5` still raises
+  `FrozenInstanceError`, so
+  `test_default_config_fields_are_frozen_and_complete` is unaffected —
+  and its pinned field-name list is unchanged, because revision 4 adds
+  no `TrainConfig` field (`adapter_dtype` is derived provenance, not
+  configuration).
+
 ### WP-T6: Stage-2 compatibility (tested now, planned later)
 
 One guarded test pins the non-preclusion claims executably
@@ -810,6 +1268,18 @@ so its adapters receive no gradient; the layer-bypass plan's
 documented expectation); at least one other block's adapters changed;
 train_meta.json records `bypassed_layer: 1`. Also: passing
 `bypassed_layer=None` with a live bypass (or vice versa) raises.
+
+REVISION 4 (critique F43): this test MUST run with
+`gradient_checkpointing=True`, not the `False` the shared `_config()`
+helper supplies. The non-preclusion claim it exists to pin is
+specifically that non-reentrant checkpointing is "the mode that
+coexists with forward hooks" — and with checkpointing off, the test
+proves the hook survives a mode Stage 2 will not use. Checked on
+2026-08-15: the combination works on the tiny CPU fixture,
+`bypass_state` still reports layer 1 after training, and only blocks
+0/2/3 move their adapters, so turning the flag on costs a boolean and
+buys the claim. This is the single largest item revision 4 moves off
+the Colab rung.
 
 ### WP-T7: CLIs, scripts/run_finetune.py and the run_baseline.py guard
 
@@ -876,15 +1346,43 @@ cross-lane edit from the module map): when `--adapter` is provided and
   mismatch-refusal would break every sweep invocation).
 - **checkpoint_step**: omitted → adopt the sidecar value into the eval
   row; passed and mismatching → raise naming both values.
-- **train_seed**: adoption SUSPENDED pending P15 (the ratified row
-  convention says null for Stage-0/1 rows); omitted → the row stays
-  null; passed and mismatching the sidecar → raise naming both values
-  (wrong under either P15 ruling).
+- **train_seed**: **P15 RULED (a) on 2026-08-15 — adoption is ON**
+  (RESEARCH_SPEC.md item T15, which AMENDS the 2026-08-13 row
+  convention). Treatment is now identical to `checkpoint_step`: omitted
+  → adopt the sidecar's value into the eval row; passed and mismatching
+  → raise naming both values. The suspension, and the warning revision 4
+  had planned for it under critique F46, are BOTH WITHDRAWN — F46's
+  defect (a matching flag silently stamping a Stage-1 row) disappears
+  once adoption is the correct behaviour, so there is nothing left to
+  warn about.
+  Why the flip is free, verified before ruling: the only rows in
+  `results/` were 24 smoke rows with `adapter_path: null`, which
+  evaluate no checkpoint and are unaffected. `train_seed` is per-row
+  resume-identity-guarded and part of the ratified `summarize_runs`
+  group key, so a flip AFTER trained checkpoints had been evaluated
+  would have been messy; no trained checkpoint has ever been evaluated,
+  so there is nothing to migrate.
 
 Adapters without a sidecar (externally produced) behave exactly as
 today; note that after F30, a crash can no longer strip a sidecar from
 a checkpoint this lane wrote, so sidecar-less means genuinely
-external.
+external. REVISION 4 (critique F45): "genuinely external" is the
+assumption, and it fails open. `eval._adapter_digest` never hashes
+`train_meta.json` (verified 2026-08-15), so a checkpoint copied to
+Drive by anything that keeps only `adapter_model.safetensors` and
+`adapter_config.json` loses its sidecar invisibly; the adoption then
+silently does not happen, the row records `checkpoint_step: null` for a
+mid-training checkpoint, and since `checkpoint_step` is in
+`metrics.RUN_KEY_FIELDS` that run becomes a mislabeled point on the
+Stage-3 R_t axis — the exact hazard the guard was built for, failing
+silently instead of loudly. Added: when `--adapter` names a directory
+that HAS `adapter_config.json` but NOT `train_meta.json` and
+`--checkpoint-step` was omitted, print a loud warning that the step
+will be recorded as null and that a project-trained checkpoint should
+carry a sidecar. Deliberately a WARNING and not a refusal or a required
+flag: the plan's contract that externally produced adapters behave
+exactly as today is intentional, and a refusal would break the A_l
+sweep's legitimate use of adapters this lane did not write.
 
 **Verification**: covered by the Colab/dev sanity checks below (CLI
 wrappers over tested library code; no separate unit tests, matching
@@ -910,10 +1408,18 @@ out_dir: `checkpoints/step-NNNNN/` PEFT adapter directories (what
 a `train_meta.json` recording {checkpoint_step, train_seed, objective,
 model_id, quant_label, dataset_path, dataset_sha256, meta_sha256,
 fold_system, bypassed_layer, total_steps, config, scaler_skipped,
-created};
+encoding_sha256, renderer_sha256, adapter_dtype, created};
 `train_manifest.json` (run identity, guarded on resume);
 `train_log.jsonl` (one row per optimizer step; read it with
-`train.read_train_log`, which keeps the last row per step). Step
+`train.read_train_log`, which keeps the last row per step);
+`sessions.jsonl` (one append-only row per invocation, never guarded).
+`encoding_sha256` fingerprints the run's encoded (input_ids, labels) and
+`renderer_sha256` fingerprints the chat template applied to a fixed
+probe, so a tokenizer or template change between sessions of one run, or
+between two arms, cannot pass unnoticed; both are guarded run identity,
+and only `renderer_sha256` participates in the matched-arms audit.
+Cross-track note: `scripts/run_baseline.py` (eval track) imports
+`train.checkpoint_meta` to read a checkpoint's sidecar. Step
 convention: 0-based optimizer-update indices, "step" = last completed
 (utils.py's pinned convention). `max_steps_this_session` stops cleanly
 after N optimizer steps (Colab session bounds); rerunning the same
@@ -921,9 +1427,15 @@ command resumes. `checkpoint_step` in results rows = the train_meta
 value; run_baseline.py adopts it from the sidecar when the flag is
 omitted and refuses a passed mismatch; it refuses outright to evaluate
 a checkpoint whose sidecar records a training-time bypass until the
-Stage-2 loader path exists (train_seed adoption is pending decision
-P15). Training REFUSES datasets whose manifest `fold_system` mismatches what
-the model's chat template requires (Gemma-2 must train on folded data).
+Stage-2 loader path exists. `train_seed` is adopted the same way
+(ratified 2026-08-15, RESEARCH_SPEC.md item T15, which amends the
+2026-08-13 row convention): a trained checkpoint's eval rows carry that
+checkpoint's training seed, and null now means only "no trained
+checkpoint was involved". Training REFUSES datasets whose manifest
+`fold_system` mismatches what the model's chat template requires, in
+BOTH directions (T12: Gemma-2 must train on folded data, Qwen and Llama
+must not), and REFUSES a dataset not built from the ratified training
+grid.
 Canonical command:
 
 ```
@@ -940,26 +1452,67 @@ python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
    stdlib-importability invariant; feasible because train.py never
    imports utils/torch at module level, critique F5); `python3
    tests/test_train.py` prints the loud SKIP and exits 0.
-2. **Local ML venv** (`.venv/bin/python`, 3.9, torch 2.8.0 / transformers
-   4.57.6 / peft 0.17.1, MPS): `tests/test_train.py` actually runs (CPU
-   tiny models; REQUIRED before this work is called done: a SKIP run is
-   not verification; the implementer's summary names the environment).
-   **Tokenizer preflight** (critique F15/F16): for each production
-   family (Qwen/Qwen2.5-7B-Instruct, meta-llama/Llama-3.1-8B-Instruct,
-   google/gemma-2-9b-it), download the TOKENIZER only (a few MB;
-   authenticated HF token for the gated two) and run
-   `train.encode_preflight` over the FULL regenerated 1500-record build
-   (the folded build for Gemma): zero prefix violations, and report
-   max/p95 token lengths, which ground the P7 cap before ratification.
+2. **Local ML venv — CORRECTED IN REVISION 4 (critique F48).** The
+   environment revision 3 named here does not exist: `.venv` in this
+   tree is Python 3.12.13 with NO torch, so item 2 as written was
+   unexecutable and an implementer following it literally would hit an
+   ImportError and accept the SKIP. The ML stack lives at
+   **`~/.venvs/colab-local/bin/python`** — Python 3.11.15, torch
+   2.13.0, transformers 5.15.0, peft 0.20.0 (measured 2026-08-15).
+   Run there: `~/.venvs/colab-local/bin/python tests/test_train.py`
+   actually runs (CPU tiny models; REQUIRED before this work is called
+   done: a SKIP run is not verification; the implementer's summary
+   names the environment). Because revision 4 touches `eval.py`, the
+   FULL suite runs there too, not just the train files — see item 2c.
+   **Tokenizer preflight** (critique F15/F16) — **EXECUTED 2026-08-15,
+   critique-3 round; re-run after any change to encoding**: for each
+   production family (Qwen/Qwen2.5-7B-Instruct,
+   meta-llama/Llama-3.1-8B-Instruct, google/gemma-2-9b-it), load the
+   TOKENIZER only (all four are already in the local HF cache, so this
+   runs offline under `HF_HUB_OFFLINE=1` with no download and no token)
+   and run `train.encode_preflight` over the FULL regenerated
+   1500-record build (the folded build for Gemma). RESULT: **zero
+   prefix violations on any family**, and
+
+   | model | max | p95 | mean | overflow@512 |
+   |---|---|---|---|---|
+   | Qwen2.5-7B-Instruct | 177 | 171 | 161.4 | 0 |
+   | Llama-3.1-8B-Instruct | 184 | 178 | 170.5 | 0 |
+   | gemma-2-9b-it (folded) | 167 | 161 | 152.0 | 0 |
+   | Qwen2.5-0.5B-Instruct (dev) | 177 | 171 | 161.4 | 0 |
+
+   D5's masking assumption therefore holds against all three real chat
+   templates, and **P7's proposed cap of 512 is no longer unmeasured**:
+   it has ~2.8x headroom over the longest real record. P7 is
+   re-labelled *measured, awaiting ratification*. Caveat carried
+   forward: this measures the CURRENT builder's output and says nothing
+   about whether the file on Drive is a current build — that is D9's
+   job, not the preflight's.
    In the same session, run `check_fold_compatibility` with the REAL
    Gemma-2 tokenizer against an unfolded build (must raise) and the
-   folded build (must pass): the guard needs only the tokenizer, so
-   the fold-refusal claim becomes a laptop check instead of a
-   first-observable-on-Colab claim (critique F38); the stub tests
-   cover the logic, this covers the real chat template.
-   If gated tokenizer downloads are unavailable locally, the identical
-   preflight (including the fold-guard check) runs as the FIRST Colab
-   cell, before any model download.
+   folded build (must pass) — **EXECUTED 2026-08-15 (critique F38):**
+   `_system_fold_needed` is True for gemma-2-9b-it alone;
+   gemma+unfolded raises "fold mismatch", gemma+folded returns True,
+   qwen+folded raises (the unratified P12 converse), qwen+unfolded
+   returns False.
+   REVISION 4 addition: confirm `renderer_digest` is stable across two
+   loads of the same tokenizer and differs across the three families —
+   the property D10's matched-arms audit depends on.
+   If gated tokenizer downloads are ever unavailable on a fresh
+   machine, the identical preflight (including the fold-guard check)
+   runs as the FIRST Colab cell, before any model download.
+   2c. **Full suite, same environment.** `test_bypass.py`,
+   `test_data.py`, `test_eval_pure.py`, `test_interp.py`,
+   `test_metrics.py`, `test_perplexity_count.py`, `test_scenarios.py`,
+   `test_scoring.py`, `test_train.py`, `test_train_pure.py`,
+   `test_wikitext_loader.py` all pass. This is MANDATORY in revision 4,
+   not optional: the `eval._four_bit` extraction is a cross-lane edit
+   and `tests/test_bypass.py::test_derive_gen_config_independent_oracle`
+   is its cover. `tests/test_figures.py` is EXPECTED to fail on import
+   for a pre-existing reason unrelated to this lane (round-3 O1: it
+   imports `algoverse` with no `sys.path` insert and the package is not
+   pip-installed in this venv); the implementer's summary must say so
+   explicitly rather than let it read as a regression from this work.
    Dev end-to-end rehearsal: build `/tmp/ft` via
    `scripts/build_finetune_data.py --out-dir /tmp/ft --n 40`, run the
    corrected dev CLI invocation from WP-T7, then evaluate the final
@@ -969,19 +1522,40 @@ python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
    --run-id dev-seam --out-dir /tmp/ft-eval --n 6 --skip-benchmarks`
    (all argparse-required flags present, critique F4), proving the
    train→eval artifact seam on a laptop, including the sidecar-adoption
-   guard.
+   guard. REVISION 4: this rehearsal also exercises sidecar provenance:
+   confirm `checkpoint_step` and `train_seed` are adopted when omitted;
+   copy the checkpoint without `train_meta.json` and confirm the warning
+   names whichever of those fields would remain null (both, or either one
+   when the other flag is supplied); confirm supplying both avoids that
+   warning; and confirm a passed value that contradicts the sidecar is
+   refused. There is no P15 warning for a matching training seed: T15
+   ratified adoption. The rehearsal also exercises the D9 grid guard
+   against real builder output. Neither script has unit tests, by the same
+   convention run_baseline.py already follows, so the rehearsal is their
+   acceptance test and must actually be run.
 3. **Colab sanity checks** (only observable on real hardware/models;
-   these are the stated checks for what local tests cannot cover):
+   these are the stated checks for what local tests cannot cover).
+   REVISION 4 note: this list is now SHORTER by one. Gradient
+   checkpointing — including the non-reentrant mode and its coexistence
+   with the Stage-2 bypass hook — moved to rung 2 (WP-T4, WP-T6;
+   critique F43), because it runs on the tiny CPU fixture and there was
+   no reason for a paid T4 session to be its first execution. What
+   remains genuinely needs CUDA:
    - 7B 4-bit + all-linear LoRA + gradient checkpointing fits the T4 at
      the proposed micro-batch/seq-len; record peak memory in the run
-     notes.
+     notes. (Memory is the CUDA-only part; that the code path runs at
+     all is now pinned at rung 2.)
    - fp16 + GradScaler: loss finite and decreasing over the first ~50
      steps on m_d_train; no NaN/inf; scaler scale stabilizes and
      `scaler_skipped` rows are rare (the bf16→fp16 deviation's
      empirical check). Run this check ONCE PER FAMILY, not once for
      Qwen: it is the empirical test of the P14 deviation, and Gemma-2
      is the family where it is least validated in advance (risk note
-     below).
+     below). REVISION 4 (critique F49): the loop now PRINTS a loud line
+     on every skipped step and non-finite loss plus a session-end
+     summary, so this check no longer depends on an operator spotting
+     one line among 282 of scrollback. It still does not ABORT — the
+     abort criterion is a number and is pending P16.
    - Step-0 identity spot check on the 7B (fresh adapter logits ≈ base
      logits on one prompt).
    - Kill the session mid-run; re-run the identical command; the run
@@ -1000,7 +1574,12 @@ python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
 4. The implementer's summary reports which verification environments
    actually ran versus which checks are written but unexecuted (the
    repo's standing verified-vs-written discipline, stated inline here
-   because no AGENTS.md exists in this repo; critique F21).
+   because AGENTS.md is GITIGNORED and so absent from any clone —
+   critique F21, corrected by round-3 O2, which found the file exists
+   locally but is excluded by .gitignore along with CLAUDE.md, roles/
+   and Prompts.txt). The summary must also name `test_figures.py`'s
+   pre-existing import failure (item 2c) so it is not mistaken for a
+   regression.
 
 ## Stage-2 non-preclusion checklist (what this design already guarantees)
 
@@ -1017,7 +1596,11 @@ python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
 - `train_meta.json` carries `bypassed_layer` from day one; Stage 2
   writes the real value; reinstall-at-load reads it (loader plan).
 - Gradient checkpointing is non-reentrant-only (ratified rule), the
-  mode that coexists with forward hooks.
+  mode that coexists with forward hooks. REVISION 4 (critique F43):
+  this is no longer an assertion. WP-T6 now runs its bypass test with
+  checkpointing ON, and a kwargs spy pins `use_reentrant: False`, so
+  the claim Stage-2 leans on has an executing test at rung 2 instead of
+  a first observation on a rented GPU.
 - One TrainConfig + one schedule function = Stage-2 arms are matched by
   construction; `matched_training_identity` is the cross-arm audit, and
   its resume-identity hash (WP-T5) refuses a resume.pt that wandered
@@ -1025,32 +1608,53 @@ python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
 - `arm` labels, run layout, and the four-arm orchestration stay with
   the Stage-2 plan; nothing here presumes them.
 
-## Pending decisions (for the human; the plan depends on these but does NOT resolve them)
+## Ratified decisions (was: pending decisions) — RULED 2026-08-15
 
-Mirrors the Gate-1 constants process: unless an entry says otherwise,
-the values below are PROPOSED (with provenance), ratification pending;
-they sit in `DEFAULT_TRAIN_CONFIG` as code defaults, and nothing
-publishable may cite a run until the set is ratified. Each entry is
-written to be read standalone by a teammate who has not read the rest
-of this plan: one plain-language sentence on what it controls, the
-proposed value, and the provenance with a link where the source is a
-paper.
+**All sixteen items P1-P16 were ratified by the human on 2026-08-15,
+before any fine-tuning run existed and before any Gate-1 result on a
+trained checkpoint had been seen.** The AUTHORITATIVE record of the
+values is RESEARCH_SPEC.md, "Stage-1/2 fine-tuning constants (ratified
+2026-08-15)", items T1-T16, numbered to match P1-P16 here. This section
+is kept as the reasoning record — what was proposed, what the
+alternatives were, and what each constant controls — because a value
+without its argument is not much use to a teammate reading it later.
+Where a ruling CHANGED the proposal, the change is recorded in place in
+the entry itself.
+
+Two rulings changed the proposal rather than confirming it: **P2**
+(r=64 / dropout 0.1, not r=16 / 0.05) and **P10** (save 6, but separate
+and defer the evaluated subset). **P12, P15 and P16 — the three open
+escalations — were all ruled (a).** P15's ruling amends a previously
+ratified sentence and the amendment is recorded in RESEARCH_SPEC.md at
+the bullet it amends. **P7 is no longer unmeasured**: the tokenizer
+preflight ran on 2026-08-15 and the longest real record across all
+three families is 184 tokens, so the 512 cap was ratified on evidence.
+
+Three items carry forward as live obligations rather than closing
+outright, and are the only things left outstanding in this plan:
+
+1. **T2's fallback activated 2026-08-16, and the human then ruled rank 16
+   directly:** the Gemma-2 500-token T4 fit check failed at r=64, so all
+   three families moved to r=16/dropout 0.05 together, and the human ruled
+   the same value independently the same day. The rank is therefore settled
+   and no longer contingent on the probe. The r=16 stress rerun also failed
+   at 500 tokens; there is no further pre-committed fallback. Note for any
+   future memory-conditioned rule: "fails to fit" is tested at the measured
+   production sequence length (T7's preflight maximum), not at the
+   `max_seq_len` refusal ceiling — the 2026-08-16 probes used 500 tokens
+   against a 167-184-token production maximum and are a conservative stress
+   case, not the operating point.
+2. **T10's evaluated subset** — which checkpoint steps receive a full
+   Stage-3 R_t evaluation — is owned by the Stage-2/3 plan and must be
+   pre-committed in writing before any R_t is computed.
+3. **T3's warmup escalation** (warmup_steps 0 → 10) applies only if
+   fp16 proves unstable, and is a recorded deviation when it does.
 
 Companion document: planning/train.ratification-proposal.md is the
-short form of this same list, written for the team to rule on (it adds
-a survey of what the established fine-tuning repos actually use). The
+short form of this same list and records the rulings alongside the
+survey of what the established fine-tuning repos actually use. The
 two must agree: if a value moves there, it moves here, and neither is
 edited alone.
-
-Status as of 2026-08-15: **P6's READING is RATIFIED** (strict /
-split-matched; its VALUES remain proposed, like everything else).
-**P12 and P15 remain OPEN ESCALATIONS** from the critique rounds (F14,
-F25). P12 needs a ruling as soon as a folded build exists beside an
-unfolded one (that is, when the Gemma-2 arm's data is built), because
-the plan as coded would enforce an unratified refusal from day one;
-P15 needs a ruling before the first Gate-1 evaluation of a trained
-checkpoint. P10 and P11 are the load-bearing ones for the paper's
-recovery curves and replication policy.
 
 - **P1: LoRA target modules.** What it controls: which weight matrices
   inside each transformer block get a trainable low-rank adapter
@@ -1087,6 +1691,21 @@ recovery curves and replication policy.
   the LoRA paper's alpha=first-r convention); dropout 0.05 vs 0.1:
   their text is internally inconsistent about which value goes with
   7B/13B; either is defensible, one must be picked and recorded.
+  **RULED 2026-08-15 — PROPOSAL CHANGED: r = 64, alpha = 16, dropout =
+  0.1** (RESEARCH_SPEC.md T2). The reasoning inverted the framing above:
+  if r=16 buys only storage while r=64 removes an assumption, the
+  assumption is what is worth spending on. Storage was checked and ruled
+  out as an argument (~131 GB for every checkpoint of every arm across
+  both seeds = 2.6% of 5 TB), and so was compute: the LoRA overhead is
+  exactly r(d_in+d_out)/(d_in·d_out) of the base matmul — 2.1% for
+  Qwen's gate_proj at r=64 versus 0.53% at r=16 — while Stage-3
+  evaluation, which dominates the GPU budget, is rank-independent. At
+  r=64/alpha=16 the config IS the QLoRA recipe's Table 9 pairing, so the
+  deviation and the transfer assumption both disappear; dropout follows
+  the same table (0.1) so the citation stays coherent instead of
+  cherry-picking Appendix A.1 for one field. The only real cost is T4
+  VRAM, handled by the pre-committed ordered fallback in T2 (all three
+  families to r=16 together; never per-family, never a micro-batch cut).
 - **P3: Learning rate and schedule.** What it controls: how far the
   adapter weights move on each optimizer update, and whether that step
   size changes over the run (constant, decayed, or ramped up from zero
@@ -1095,6 +1714,12 @@ recovery curves and replication policy.
   https://arxiv.org/abs/2305.14314), constant schedule (Dettmers et
   al.'s 7B recipe), warmup_steps=0. Flag: whether to add a small warmup
   (e.g. 10 steps) for fp16 stability.
+  **RULED 2026-08-15 (T3): 2e-4, constant, warmup_steps = 0 — with 10
+  PRE-COMMITTED as the escalation value if fp16 proves unstable.**
+  Fixing the value now means the response to instability is a recorded
+  deviation rather than an ad-hoc tweak mid-project. Note for whoever
+  applies it: `warmup_steps` is part of the guarded run identity, so a
+  run that changes it cannot resume — it restarts.
 - **P4: Optimizer constants.** What it controls: AdamW's two momentum
   terms (how much past gradient information is carried forward), the
   weight-decay penalty pulling weights toward zero, and the
@@ -1128,8 +1753,13 @@ recovery curves and replication policy.
   the longest real record. Proposed 512 with raise-on-overflow (never
   truncate; rationale in WP-T3). Ratification should FOLLOW the
   tokenizer preflight's measured length histogram on the real
-  regenerated data (verification item 2; critique F16); the number
-  512 is currently unmeasured.
+  regenerated data (verification item 2; critique F16).
+  **MEASURED 2026-08-15** (revision 4): over the full 1500-record
+  build the longest record is 184 tokens on Llama-3.1-8B-Instruct, 177
+  on Qwen2.5-7B-Instruct and 167 on the folded gemma-2-9b-it build;
+  p95 is 178 / 171 / 161; zero records exceed 512 on any family. The
+  proposed cap has ~2.8x headroom and can now be ratified on evidence.
+  Status: *measured, awaiting ratification* — no longer unmeasured.
 - **P8: Loss masking policy.** What it controls: which tokens the
   training loss is computed over, the assistant's reply only or the
   whole conversation including the prompt the model never has to
@@ -1159,6 +1789,31 @@ recovery curves and replication policy.
   the identical schedule (this plan assumes yes, reading the spec's
   "matched ... checkpoint schedules" as binding across all
   fine-tuning).
+  **RULED 2026-08-15 — the QUESTION was RESTRUCTURED before it was
+  answered** (RESEARCH_SPEC.md T10). The team asked whether six
+  intermediate checkpoints are load-bearing for a paper whose central
+  focus is not the trajectory. The entry above conflated two separable
+  decisions, and separating them dissolves most of the cost: SAVING six
+  costs storage only (~52 GB for all of Stage 2 at the initially ruled
+  r=64, ~13 GB at the effective r=16 — adapter size is linear in rank, so
+  the effective figures are a quarter of the ones this argument was made
+  with and the conclusion holds a fortiori; free at this
+  project's scale), while EVALUATING one t costs 4 arms x 2 environments
+  x full pools — roughly 4,720 generations per model — and six of those
+  across three families is the largest line item in the GPU budget.
+  Ruling: **keep 6 saved checkpoints at "doubling" spacing, and defer
+  the evaluated subset** to the Stage-2/3 plan, which must pre-commit it
+  in writing before any R_t is computed (the same outcome-independence
+  reason P13 exists). That makes the expensive half reversible in the
+  safe direction: a saved checkpoint can always be evaluated later, a
+  checkpoint never saved cannot be recovered without retraining.
+  Why the COUNT was not simply reduced: under "doubling", n=3 realizes
+  [70, 140, 281] — it drops the EARLY points, which is backwards. Those
+  are the scientifically distinctive ones; if R_t is already near 1 at
+  step 8, the capability was arguably never removed, which is a
+  different finding from gradual relocation. Cutting saves would have
+  discarded exactly that evidence while saving none of the cost that
+  matters. Stage 1 and Stage 2 do share the identical schedule.
 - **P11: train_seed.** What it controls: the single integer that fixes
   adapter initialization, data shuffling order, and dropout draws, and
   hence the exact training run; the spec requires it be identical
@@ -1167,7 +1822,7 @@ recovery curves and replication policy.
   random seeds", RESEARCH_SPEC.md Methodology); the second Stage-2 seed
   is governed by the pre-committed calendar policy (RESEARCH_SPEC.md
   2026-08-13), and its value (propose 43) can be ratified now or then.
-- **P12: Strict fold-guard converse** (D7). **OPEN ESCALATION**
+- **P12: Strict fold-guard converse** (D7). **RULED (a) 2026-08-15 — refusal both directions, ratified as T12.** Was an OPEN ESCALATION
   (critique F14). What it controls: whether the training lane hard
   REFUSES to fine-tune a model whose chat template accepts a system
   role (Qwen2.5, Llama-3.1) on data built with the system text folded
@@ -1184,6 +1839,20 @@ recovery curves and replication policy.
   warning), (b) strike it, or (c) direct warn-only until ratified. The
   E6 direction itself is already ratified and stays a refusal
   regardless.
+  **REVISION 4 additions for the ruling (critique F44).** Two facts the
+  human should have in view. First, a PRECEDENT that cuts against this
+  plan's own proposal: first-full-review F3's ratified handling was
+  "the unratified numeric defaults stay UNCHANGED in code — no banner,
+  no required flags", i.e. this project's established practice is that
+  unratified positions sit as inert defaults rather than as
+  enforcement. The converse currently ships as a hard refusal, which is
+  the opposite of that practice. Second, a fact that lowers the stakes
+  in either direction: measured 2026-08-15 against the real tokenizers,
+  Qwen2.5 and Llama-3.1 both report `fold_required=False` and always
+  take unfolded builds, so the converse branch is UNREACHABLE in the
+  planned pipeline today. Ruling (c) now and (a) later costs nothing;
+  what should not happen is the rule being inherited from an
+  implementation choice instead of decided.
 - **P13: Gate-1 evaluates the FINAL checkpoint only.** What it
   controls: whether the Gate-1 pass/fail verdict on M_D may be computed
   from any saved mid-training checkpoint or only from the last one.
@@ -1201,7 +1870,7 @@ recovery curves and replication policy.
   only at 33-65B). Ratify as recorded deviations for the
   reproducibility appendix.
 - **P15: Stage-1 eval rows' train_seed vs the ratified null
-  convention.** **OPEN ESCALATION** (critique F25). What it controls:
+  convention.** **RULED (a) 2026-08-15 — adoption ON, amending the ratified row convention; ratified as T15.** Was an OPEN ESCALATION (critique F25). What it controls:
   the value written into the `train_seed` column of an eval results row
   when the thing being evaluated is a Stage-1 trained checkpoint, null
   (today's ratified convention) or that checkpoint's actual training
@@ -1223,7 +1892,44 @@ recovery curves and replication policy.
   Gate-1 eval of a trained checkpoint: `train_seed` is per-row
   resume-identity-guarded and part of the ratified summarize_runs
   group key, so flipping its semantics mid-project refuses resume
-  merges and splits summary groups (loud, but avoidable).
+  merges and splits summary groups (loud, but avoidable). (The
+  "per-row resume-identity-guarded" half of that sentence was verified
+  in round 3: `run_negotiation_eval`'s `expected_top_level` check does
+  include `checkpoint_step` and `train_seed`, so one run_id genuinely
+  cannot mix two values.)
+  **REVISION 4 sharpening (critique F46).** The suspension is only
+  HALF effective, and the human should rule knowing that. The code
+  refuses a `--train-seed` that MISMATCHES the sidecar, but ACCEPTS one
+  that matches — so an operator who reads `train_seed: 42` out of the
+  sidecar and types `--train-seed 42`, the most natural thing to do
+  given the new sidecar plumbing, stamps 42 onto a Stage-1 row and
+  contradicts the ratified null convention with no refusal. No recorded
+  value can be made right under both rulings, so this cannot be closed
+  by the plan. What revision 4 adds is a loud warning on that path
+  (WP-T7), correct under either ruling; the ruling itself closes it.
+- **P16: fp16 divergence abort criterion.** **RULED (a) 2026-08-15 — abort after 20 consecutive skipped steps; ratified as T16.** Was an OPEN ESCALATION (new in
+  revision 4; critique F49). What it controls: whether a fine-tuning
+  run that has stopped making progress in fp16 — the grad scaler
+  skipping step after step, or the loss going non-finite and staying
+  there — stops itself, or runs to completion writing checkpoints from
+  a broken adapter. Today it runs to completion: revision 4 makes the
+  condition LOUD (per-event lines plus a session-end summary, WP-T4
+  step 9) but does not abort. Why this needs a ruling rather than a
+  default: a transient non-finite loss is normal under fp16 and is
+  exactly what `GradScaler` absorbs, so "abort on the first non-finite
+  loss" would kill recoverable runs; any defensible criterion is a
+  streak length or a scale floor, i.e. a NUMBER, and this plan does not
+  invent numbers. PROPOSED: abort with a named error after 20
+  consecutive `scaler_skipped` steps (~7% of a 282-step run, far longer
+  than any legitimate scale-search transient, and short enough to save
+  most of a Colab session). Alternatives: a grad-scaler scale floor;
+  or ratify "no abort, surfacing only" as sufficient. Decide before the
+  first 7-9B training run. Cost of getting it wrong in either
+  direction is a wasted session, never a wrong number — the Gate-1
+  verdict is unaffected either way, because a broken M_D fails the gate
+  regardless; what the abort buys is telling a plumbing failure apart
+  from the reportable scientific result "M_D did not become deceptive",
+  which the plan elsewhere instructs the team to accept at face value.
 
 ## Risks / implementer notes
 
@@ -1249,11 +1955,27 @@ recovery curves and replication policy.
   switch. Nothing in the code changes per family: dtype is derived,
   recorded, and manifest-guarded, so a Gemma-specific decision is
   visible in the manifest.
-- **peft version skew** (0.17.1 local vs Colab latest): the used API
-  surface (LoraConfig, get_peft_model, prepare_model_for_kbit_training,
-  get/set_peft_model_state_dict, save_pretrained/from_pretrained) is
-  stable across recent versions; versions are recorded in the manifest
-  (provenance, never guard inputs; the repo's ratified stance).
+- **Library version skew — REWRITTEN IN REVISION 4 (critique F48).**
+  Revision 3 said "peft 0.17.1 local vs Colab latest … stable across
+  recent versions". Both halves were wrong. The local ML environment is
+  peft **0.20.0** on transformers **5.15.0** (measured 2026-08-15), so
+  the gap this project actually spans includes a transformers MAJOR
+  version, not a patch drift, and the reassuring conclusion does not
+  follow from the premise it was based on. What IS verified, on the
+  stack that exists: the used API surface (LoraConfig, get_peft_model,
+  prepare_model_for_kbit_training, get/set_peft_model_state_dict,
+  save_pretrained/from_pretrained) works, all 11 guarded tests pass
+  there, `get_peft_model`'s `autocast_adapter_dtype` default is still
+  True, and peft's built-in target-module mapping still returns
+  `['q_proj', 'v_proj']` for qwen2 / llama / gemma / gemma2 — the fact
+  P1's "spell it out explicitly" rule depends on. Versions stay
+  recorded in the manifest as provenance and are never guard inputs
+  (the repo's ratified stance); what revision 4 adds instead is
+  `renderer_sha256` and `encoding_sha256`, which guard the OBSERVABLE
+  CONSEQUENCE of a version change on the training data rather than the
+  version string itself (D10). That is the right level: a transformers
+  bump that does not change the rendering is harmless and should not
+  refuse a resume, and one that does change it must.
 - **Chat-template prefix property** (D5) is checked, not assumed, and
   now checked for all three families BEFORE the expensive moment via
   the tokenizer preflight (verification item 2; critique F15); if a
@@ -1272,10 +1994,29 @@ recovery curves and replication policy.
   block's gradient-less LoRA params require
   `find_unused_parameters=True` (layer-bypass plan's note); out of
   scope, recorded so it is not rediscovered.
-- **Drive storage** (corrected per critique F9): ~161 MB fp32 per
-  all-linear r=16 adapter checkpoint on Qwen2.5-7B (~216 MB on
-  Gemma-2-9B; roughly half if adapters are saved fp16), x
-  n_checkpoints x arms x models; the P10 decision sets the multiplier.
+- **Drive storage** (recomputed 2026-08-15 at the initial r=64 ruling from
+  the real model configs): ~646 MB fp32 per all-linear adapter
+  checkpoint on Qwen2.5-7B, ~671 MB on Llama-3.1-8B, ~864 MB on
+  Gemma-2-9B (roughly half if adapters are saved fp16). At the ratified
+  6-checkpoint schedule: ~26 GB for Stage 1 across all three families,
+  ~52 GB for Stage 2, and ~131 GB including a second seed — 2.6% of the
+  5 TB available, so storage is explicitly NOT a constraint on this
+  project and was ruled out as an argument during P2's ratification.
+  Effective r=16 checkpoints are smaller still.
+- **T4 VRAM at r=64** (the pre-check arithmetic; now measured): the
+  adapter's fp32 weights + gradients + AdamW moments
+  come to ~2.58 GB on Qwen2.5-7B, ~2.68 GB on Llama-3.1-8B and ~3.46 GB
+  on Gemma-2-9B, against ~0.65/0.67/0.86 GB at r=16. Gemma-2-9B is the
+  tight case — roughly 11 GB of a T4's ~14.7 GB once its 256k-vocab
+  logits are counted — and it is also the family least validated for
+  fp16. If it does not fit, the response is the PRE-COMMITTED ordered
+  fallback (T2): all three families drop to r=16 together. That fallback
+  activated on Gemma's 2026-08-16 500-token OOM. Never a
+  per-family rank (it would break matched settings across models) and
+  never a `micro_batch_size` cut (under strict batch matching that
+  propagates to every family and roughly doubles training wall-clock
+  everywhere, which is the one change that would genuinely cost GPU
+  budget).
 - **HF gating**: Llama-3.1 and Gemma-2 downloads need an authenticated
   HF token, on Colab AND for the local tokenizer preflight (same as
   the eval lane will hit).
@@ -1283,3 +2024,73 @@ recovery curves and replication policy.
   undeclared by design; INTERFACES.md's install prose ("torch
   transformers accelerate peft") already covers the training track. No
   packaging change in this plan.
+- **HF gating, corrected in revision 4**: Llama-3.1 and Gemma-2
+  downloads need an authenticated HF token in general, but all four
+  production tokenizers are already in the local HF cache on the
+  project machine, so the preflight runs offline under
+  `HF_HUB_OFFLINE=1` with no token. A fresh machine still needs one.
+
+## Regression audit for revision 4 (do not skip)
+
+33 tests pass today (22 pure + 11 guarded). Every entry below WILL
+break a passing test unless the listed update lands with the change.
+This exists because revision 4 is the first revision that edits landed
+code, and "the change is right" is not the same claim as "the suite
+still passes".
+
+| Change | What breaks | Required update |
+|---|---|---|
+| `check_training_grid` requires `scenario` in meta rows | `test_train_pure.py::_builder_shaped` (feeds 6 tests) and `test_train.py::_write_dataset` (feeds all 11) | both fixtures emit a `scenario` drawn from the live `data.TRAIN_*` constants. `test_train.py`'s fixture replies carry no "MY BEST OUTSIDE OFFER:" line, so `extract_claimed_offer` returns None there and the eval-value half is a no-op — verified, no further change needed |
+| 3 new `_train_manifest` parameters | `test_train_pure.py::_manifest()` | helper passes the three new kwargs |
+| 3 new `GUARDED_MANIFEST_FIELDS` | nothing existing (they flow through `_guarded_view` automatically, and no production run's stored manifest exists) | add one guard test per field |
+| 3 new `train_meta.json` keys | `test_train.py::test_schedule_is_realized_exactly` asserts an EXACT `set(meta)` | extend the expected key set |
+| `matched_training_identity` gains fields + round-trip | `test_train_pure.py::test_matched_training_identity_scope` | extend, and add the two directional tests from WP-T5 (arms-with-different-data still match; `renderer_sha256` does not) |
+| `TrainConfig.__post_init__` | nothing — `_config()` and `DEFAULT_TRAIN_CONFIG` are valid, `FrozenInstanceError` is unaffected, and the pinned field-name list is unchanged because no field is added | add the validation test |
+| `eval._four_bit` extraction | nothing — behaviour-preserving; `test_bypass.py::test_derive_gen_config_independent_oracle` is the existing cover | run the FULL suite (verification item 2c), not just the train files |
+| `_derive_quant` drops its config fallback | nothing — `test_train.py::test_bypass_bookkeeping_must_match_the_live_model` still raises on `quant_label="4bit"`, since an unquantized model derives `"none"` either way | none |
+| `use_cache` restore, `pad_token_id` raise, `encode_preflight` empty raise | nothing | add the two pure raise tests |
+| `run_baseline.py` warnings | nothing — no test covers the script, by the same convention it already follows | covered by the dev rehearsal, verification item 2 |
+
+### Code deltas from the 2026-08-15 ratifications (separate from the critique fixes)
+
+These land in the same pass. All were checked against the suite before
+being written down; none breaks a passing test.
+
+| Ruling | Code delta | Breaks? |
+|---|---|---|
+| T2 (P2) | Initial ruling: `lora_r` 16 → 64 and `lora_dropout` 0.05 → 0.1. Effective 2026-08-16 fallback after Gemma's T4 fit failure: **r=16, alpha=16, dropout=0.05 for every family**. | **No.** `test_default_config_fields_are_frozen_and_complete` now pins the effective values; step derivation and effective batch are unchanged. |
+| T12 (P12) | `check_fold_compatibility`'s docstring drops "pending decision P12 … not a ratified rule" and cites T12. **Behaviour unchanged** | No |
+| T15 (P15) | `run_baseline.py` ADOPTS `train_seed` from the sidecar when the flag is omitted, exactly as it already does for `checkpoint_step`; a passed mismatch still raises. The revision-4 F46 warning is **withdrawn, not implemented** | No |
+| T16 (P16) | abort after 20 consecutive scaler-skipped steps, counter reset on any applied step; message names step index, streak length and scaler scale | **No.** On CPU the scaler is None and `scaler_skipped` is always False, so the streak never increments in any existing test. The new streak test drives a stubbed scaler |
+| T3 (P3) | no code change — `warmup_steps` stays 0; the escalation value 10 is recorded in the plan and the risks ladder, not in the default config | No |
+| T10 (P10) | no code change — `n_checkpoints` stays 6, `checkpoint_spacing` stays "doubling". The deferred evaluated-subset decision belongs to the Stage-2/3 plan | No |
+
+Two things to NOT do, because they look like follow-ons and are not:
+the ratified values do not change `epochs`, `micro_batch_size` or
+`grad_accum_steps`, so `total_steps` stays 282 and every pinned
+schedule vector in the tests stays valid; and P15's ruling REMOVES a
+planned change rather than adding one — do not implement the F46
+warning.
+
+## Out of scope, surfaced to the human
+
+Two round-3 observations are real but belong to someone else. They are
+recorded here so they are not lost, and are NOT work items for this
+plan — folding them in would be the cross-lane expansion the repo's
+scope rule prohibits.
+
+- **`tests/test_figures.py` cannot run in any environment here**
+  (round-3 O1). It does `from algoverse import figures, metrics` with
+  no `sys.path` insert, unlike every other suite, and needs `pytest`;
+  `algoverse` is not pip-installed in `~/.venvs/colab-local`. So the
+  repo's full suite is green nowhere. Introduced by commit 773658e and
+  owned by the figures track. Until it is fixed, any claim that "the
+  full suite passes" is false, which is why verification item 2c names
+  the expected failure explicitly.
+- **The repo's agent instructions are gitignored** (round-3 O2).
+  `.gitignore` excludes `AGENTS.md`, `CLAUDE.md`, `roles/` and
+  `Prompts.txt`, so a clone has none of them — including the "where to
+  run tests" ladder. This plan restates everything an implementer needs
+  inline, which is the right local response, but whether the team wants
+  a cloned checkout to carry its own agent instructions is a decision
+  for the human, not for this plan.

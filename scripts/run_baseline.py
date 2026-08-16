@@ -127,6 +127,24 @@ if __name__ == "__main__":
     # A checkpoint this project trained carries a train_meta.json sidecar, so
     # its provenance is read rather than operator-copied on trust. Adapters
     # without one are externally produced and behave exactly as before.
+    if (
+        args.adapter is not None
+        and (Path(args.adapter) / "adapter_config.json").is_file()
+        and not (Path(args.adapter) / "train_meta.json").is_file()
+        and (args.checkpoint_step is None or args.train_seed is None)
+    ):
+        omitted = []
+        if args.checkpoint_step is None:
+            omitted.append("checkpoint_step")
+        if args.train_seed is None:
+            omitted.append("train_seed")
+        print(
+            "WARNING: adapter %s has adapter_config.json but no "
+            "train_meta.json; %s will be recorded as null. "
+            "A project-trained checkpoint should carry its sidecar."
+            % (args.adapter, " and ".join(omitted))
+        )
+
     if args.adapter is not None and (Path(args.adapter) / "train_meta.json").is_file():
         sidecar = checkpoint_meta(args.adapter)
         if sidecar.get("bypassed_layer") is not None:
@@ -151,17 +169,16 @@ if __name__ == "__main__":
                 "--checkpoint-step %s contradicts train_meta.json's %s"
                 % (args.checkpoint_step, sidecar["checkpoint_step"])
             )
-        # train_seed adoption is SUSPENDED pending decision P15: the ratified
-        # row convention says train_seed is null for Stage-0/1 rows, so an
-        # omitted flag stays null. A passed flag that contradicts the sidecar
-        # is wrong under either ruling and refuses.
-        if (
-            args.train_seed is not None
-            and args.train_seed != sidecar.get("train_seed")
-        ):
+        if args.train_seed is None:
+            args.train_seed = sidecar["train_seed"]
+            print(
+                "TRAIN SEED adopted from train_meta.json: %s"
+                % args.train_seed
+            )
+        elif args.train_seed != sidecar["train_seed"]:
             raise RuntimeError(
                 "--train-seed %s contradicts train_meta.json's %s"
-                % (args.train_seed, sidecar.get("train_seed"))
+                % (args.train_seed, sidecar["train_seed"])
             )
 
     out_dir = Path(args.out_dir)
