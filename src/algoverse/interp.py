@@ -17,7 +17,9 @@ models.residual_stream_by_layer, whose pre-hook capture is version-robust.
 
 RENDERING CONTRACT: every text passed to an encoder in this module must be a
 canonical fully rendered prompt from eval.render_condition_texts, including
-the generation prompt and any required system-role fold. Interp encoders do
+the generation prompt and any required system-role fold. Probe-capture texts
+(response_token_resid_by_layer) append the scored response to that canonical
+prompt; the prompt portion is still contract-rendered. Interp encoders do
 not add special tokens; changing the rendering changes the measured quantity.
 """
 
@@ -30,7 +32,12 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from algoverse.models import bypass_state, bypassed_layers
+from algoverse.corroboration import aggregate_response_scores
+from algoverse.models import (
+    bypass_state,
+    bypassed_layers,
+    residual_stream_by_layer,
+)
 
 
 def load_eager_model_for_interp(model_id, quant="4bit", adapter_path=None):
@@ -183,6 +190,76 @@ def attention_all_layers(model, tokenizer, text):
     return _attention_all_layers_unchecked(model, tokenizer, text)
 
 
+def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
+    """Per-layer response-token residual features for probing, lesion-safe.
+
+    This is the capture path for the RATIFIED 2026-08-15 response-token
+    aggregation (goldowskydill2025detecting, arXiv 2502.03407): probe
+    features are the residual-stream activations of every RESPONSE token,
+    kept per token so probe_layer can fit on tokens and mean-aggregate
+    per-token scores per response.
+
+    texts[i] is a canonical contract-rendered prompt with the scored
+    response appended (module rendering contract); response_starts[i] is
+    the token index where the response begins under this module's
+    add_special_tokens=False tokenization of texts[i]. Features cover
+    tokens [response_starts[i], end).
+
+    Reads go through models.residual_stream_by_layer (pre-hook capture),
+    so they are correct with or without a bypass installed — never through
+    output_hidden_states. The feature for layer l is the residual LEAVING
+    block l (capture entry l+1), the same quantity output_hidden_states[1:]
+    exposes on an intact model. Per the ratified 2026-08-13 rule, every
+    bypassed layer (models.bypassed_layers — probe or permanent role) is
+    EXCLUDED: its entry in the result is None, because a bypassed block's
+    "output" is just its input passed through.
+
+    Encodes one text at a time: each capture holds n_layers + 1
+    full-sequence fp32 copies, and padding-plus-span arithmetic under
+    batching is a silent-wrong-answer risk this reader avoids.
+
+    Returns a list over layers; entry l is None for a bypassed layer, else
+    a list over texts of float32 [n_response_tokens, d_model] arrays.
+    """
+    texts = list(texts)
+    starts = list(response_starts)
+    if len(starts) != len(texts):
+        raise ValueError(
+            "response_starts length %d does not match texts length %d"
+            % (len(starts), len(texts))
+        )
+    if not texts:
+        raise ValueError("no texts supplied")
+    excluded = set(bypassed_layers(model))
+    per_layer = None
+    for text, start in zip(texts, starts):
+        inputs = tokenizer(
+            text, return_tensors="pt", add_special_tokens=False
+        ).to(model.device)
+        n_tokens = inputs["input_ids"].shape[1]
+        if not 0 <= int(start) < n_tokens:
+            raise ValueError(
+                "response start %r is outside a text of %d tokens"
+                % (start, n_tokens)
+            )
+        captured = residual_stream_by_layer(
+            model, inputs["input_ids"], inputs.get("attention_mask")
+        )
+        n_layers = len(captured) - 1
+        if per_layer is None:
+            per_layer = [
+                None if layer in excluded else []
+                for layer in range(n_layers)
+            ]
+        for layer in range(n_layers):
+            if per_layer[layer] is None:
+                continue
+            per_layer[layer].append(
+                captured[layer + 1][0, int(start):, :].float().cpu().numpy()
+            )
+    return per_layer
+
+
 # --- probing ---
 
 def _group_bootstrap_auroc_ci(y, scores, groups, n_boot=2000, seed=0,
@@ -211,39 +288,81 @@ def _group_bootstrap_auroc_ci(y, scores, groups, n_boot=2000, seed=0,
 def probe_layer(X, y, groups):
     """Fit a standardized linear probe with a group-aware held-out split.
 
-    Returns (pipeline, {"auroc", "auroc_ci", "accuracy"}). AUROC from raw
-    decision scores is primary; groups is required so related prompt variants
-    cannot leak across the split. L2 regularization uses C=0.1, matching the
-    cited method's lambda=10. The 0.3 split, seed 0, and max_iter=1000 remain
-    recorded recipe decisions. GroupShuffleSplit cannot stratify, so an
-    informative error is raised if either side has one class. The AUROC
-    interval resamples held-out scenario groups. This repo reads one
-    last-token activation per text, a declared deviation from that method's
-    response-token aggregation.
+    Features follow the response-token aggregation of
+    goldowskydill2025detecting (arXiv 2502.03407), RATIFIED 2026-08-15:
+    X is a sequence of per-response [n_tokens, d] arrays of response-token
+    activations (response_token_resid_by_layer produces them). The probe
+    is fit on the individual token activations of the TRAINING responses,
+    flattened across responses and positions with each token carrying its
+    response's label — the paper's "flatten across samples and sequence
+    positions". At evaluation each held-out token gets a decision score
+    and each response's score is the MEAN of its token scores
+    (corroboration.aggregate_response_scores, the paper's "mean across
+    tokens ... single deceptiveness-score for each model response").
+    AUROC over held-out per-response scores is primary; accuracy is the
+    fraction of held-out responses whose mean score lands on its label's
+    side of the decision boundary. A 2D X keeps its previous meaning as
+    the degenerate one-vector-per-response case (the mean over one token
+    is that token). SUPERSEDED NOTE: this function previously read a
+    single last-token activation per text and declared that a deviation
+    from the cited method; the 2026-08-15 ratification adopts the paper's
+    response-token aggregation outright, so that declared-deviation line
+    is superseded and no deviation remains to declare.
+
+    Returns (pipeline, {"auroc", "auroc_ci", "accuracy"}). The split is at
+    the RESPONSE level; groups is required so related prompt variants
+    cannot leak across it. L2 regularization uses C=0.1, matching the
+    cited method's lambda=10. The 0.3 split, seed 0, and max_iter=1000
+    remain recorded recipe decisions (ratified 2026-08-15).
+    GroupShuffleSplit cannot stratify, so an informative error is raised
+    if either side has one class. The AUROC interval resamples held-out
+    scenario groups of per-response scores.
     """
-    X = np.asarray(X)
     y = np.asarray(y)
     groups = np.asarray(groups)
+    if isinstance(X, np.ndarray) and X.ndim == 2:
+        responses = [X[i:i + 1] for i in range(X.shape[0])]
+    else:
+        responses = [np.asarray(tokens) for tokens in X]
+        for index, tokens in enumerate(responses):
+            if tokens.ndim != 2 or tokens.shape[0] < 1:
+                raise ValueError(
+                    "response %d must be a nonempty [n_tokens, d] array, "
+                    "got shape %s" % (index, tokens.shape)
+                )
+    if not len(responses) == len(y) == len(groups):
+        raise ValueError(
+            "X, y, and groups must align per response: %d, %d, %d"
+            % (len(responses), len(y), len(groups))
+        )
     splitter = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=0)
-    train_idx, test_idx = next(splitter.split(X, y, groups))
+    placeholder = np.zeros((len(responses), 1))
+    train_idx, test_idx = next(splitter.split(placeholder, y, groups))
     if len(set(y[train_idx].tolist())) < 2 or len(set(y[test_idx].tolist())) < 2:
         raise ValueError(
             "group split produced a single-class side; supply more scenarios "
             "of both labels"
         )
+    X_train = np.concatenate([responses[i] for i in train_idx])
+    y_train = np.concatenate(
+        [np.full(responses[i].shape[0], y[i]) for i in train_idx]
+    )
     clf = make_pipeline(
         StandardScaler(),
         LogisticRegression(penalty="l2", C=0.1, max_iter=1000),
-    ).fit(X[train_idx], y[train_idx])
-    scores = clf.decision_function(X[test_idx])
+    ).fit(X_train, y_train)
+    scores = np.asarray(aggregate_response_scores(
+        [clf.decision_function(responses[i]) for i in test_idx]
+    ))
     auroc = float(roc_auc_score(y[test_idx], scores))
     ci_low, ci_high = _group_bootstrap_auroc_ci(
         y[test_idx], scores, groups[test_idx]
     )
+    predicted = scores > 0
     return clf, {
         "auroc": auroc,
         "auroc_ci": (ci_low, ci_high),
-        "accuracy": float(clf.score(X[test_idx], y[test_idx])),
+        "accuracy": float(np.mean(predicted == y[test_idx].astype(bool))),
     }
 
 
