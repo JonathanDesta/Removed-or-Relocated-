@@ -63,7 +63,8 @@ denominator is too small; plots must expect that.
 ## Fine-tuning track owns
 
 ```python
-load_model_and_tokenizer(model_id, quant="4bit"|"none", adapter_path=None)  # models.py, exists
+load_model_and_tokenizer(model_id, quant="4bit"|"none", adapter_path=None, trainable=False)  # models.py, exists
+load_checkpoint_model(model_id, adapter_path, quant="4bit"|"none", trainable=False)          # models.py: -> (model, tokenizer, meta, handle)
 install_bypass(model, layer_idx, role="probe") -> handle                    # models.py; role in "probe"|"permanent"
 bypass_state(model)                                # models.py: None, or {"permanent": marker|None, "probe": marker|None}
 residual_stream_by_layer(model, input_ids, attention_mask=None)             # models.py: bypass-aware residuals
@@ -103,9 +104,21 @@ convention: 0-based optimizer-update indices, "step" = last completed
 after N optimizer steps (Colab session bounds); rerunning the same
 command resumes. `checkpoint_step` in results rows = the train_meta
 value; run_baseline.py adopts it from the sidecar when the flag is
-omitted and refuses a passed mismatch; it refuses outright to evaluate
-a checkpoint whose sidecar records a training-time bypass until the
-Stage-2 loader path exists. `train_seed` is adopted the same way
+omitted and refuses a passed mismatch.
+
+`load_checkpoint_model` (added 2026-08-16, the Stage-2 loader path) is
+how a PROJECT-TRAINED checkpoint is loaded: it reads and validates the
+`train_meta.json` sidecar and, when that sidecar records a training-time
+bypass, reinstalls it with `role="permanent"` — the ratified permanence
+rule that a lesion is a runtime hook re-installed at every load, never
+weight surgery. It returns `(model, tokenizer, meta, handle)`, handle
+being the permanent bypass or None. `run_baseline.py` uses it whenever
+the adapter carries a sidecar (its earlier blanket refusal to evaluate a
+lesioned checkpoint is retired). `trainable=True` keeps an attached
+adapter's parameters trainable — required for Stage-2 continuation,
+because peft freezes adapters by default and `train_lora` refuses a
+PeftModel with no trainable parameters; the eval path keeps the frozen
+default. `train_seed` is adopted the same way
 (ratified 2026-08-15, RESEARCH_SPEC.md item T15, which amends the
 2026-08-13 row convention): a trained checkpoint's eval rows carry that
 checkpoint's training seed, and null now means only "no trained

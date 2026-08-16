@@ -29,6 +29,7 @@ from algoverse.models import (
     bypass_impl_string,
     bypass_state,
     install_bypass,
+    load_checkpoint_model,
     load_model_and_tokenizer,
 )
 from algoverse.tasks import get_scenarios, llm_extract_offer
@@ -146,15 +147,12 @@ if __name__ == "__main__":
             % (args.adapter, " and ".join(omitted))
         )
 
-    if args.adapter is not None and (Path(args.adapter) / "train_meta.json").is_file():
+    has_sidecar = (
+        args.adapter is not None
+        and (Path(args.adapter) / "train_meta.json").is_file()
+    )
+    if has_sidecar:
         sidecar = checkpoint_meta(args.adapter)
-        if sidecar.get("bypassed_layer") is not None:
-            raise RuntimeError(
-                "checkpoint %s was trained under a permanent bypass of layer "
-                "%s; evaluating it requires the reinstall-at-load loader "
-                "path, the Stage-2/loader plan's deliverable"
-                % (args.adapter, sidecar["bypassed_layer"])
-            )
         # --bypassed-layer is deliberately NOT cross-checked against the
         # sidecar: the flag installs an EVAL-time lesion while the sidecar
         # records TRAINING-time provenance, and the A_l sweep legitimately
@@ -183,9 +181,21 @@ if __name__ == "__main__":
             )
 
     out_dir = Path(args.out_dir)
-    model, tokenizer = load_model_and_tokenizer(
-        args.model_id, quant=args.quant, adapter_path=args.adapter
-    )
+    if has_sidecar:
+        # Reinstall-at-load: a checkpoint trained under a permanent lesion
+        # carries it into every evaluation (ratified 2026-08-13).
+        model, tokenizer, _meta, _permanent = load_checkpoint_model(
+            args.model_id, args.adapter, quant=args.quant
+        )
+        if _permanent is not None:
+            print(
+                "PERMANENT BYPASS REINSTALLED from train_meta.json: layer %d"
+                % _meta["bypassed_layer"]
+            )
+    else:
+        model, tokenizer = load_model_and_tokenizer(
+            args.model_id, quant=args.quant, adapter_path=args.adapter
+        )
     if args.bypassed_layer is not None:
         # Eval-time lesions are the probe role (carve-out, 2026-08-16).
         install_bypass(model, args.bypassed_layer, role="probe")

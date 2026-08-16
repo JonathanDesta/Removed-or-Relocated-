@@ -292,7 +292,8 @@ def residual_stream_by_layer(model, input_ids, attention_mask=None):
     return captured
 
 
-def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None):
+def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None,
+          trainable=False):
     # interp.load_eager_model_for_interp delegates here; keep the signature in sync.
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -349,13 +350,19 @@ def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None):
     if adapter_path is not None:
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, adapter_path)
+        # is_trainable defaults to False in peft, which silently freezes the
+        # adapter — fine for eval, fatal for Stage-2 continuation training
+        # (train_lora refuses a PeftModel with no trainable parameters).
+        model = PeftModel.from_pretrained(
+            model, adapter_path, is_trainable=trainable
+        )
 
     model.eval()
     return model, tokenizer
 
 
-def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
+def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None,
+                             trainable=False):
     """Load a model ready for evaluation, plus its tokenizer.
 
     Args:
@@ -366,7 +373,50 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None):
       rather than producing a silently broken model.
     - str adapter_path: a LoRA adapter directory to apply on top, or None
       for the unmodified model.
+    - bool trainable: whether an attached adapter's parameters stay
+      trainable. False (the default) is the eval path; True is the Stage-2
+      continuation path. Ignored when adapter_path is None.
 
     Returns (model, tokenizer). The model is in eval mode.
+
+    This loader does NOT reinstall a checkpoint's permanent lesion — use
+    load_checkpoint_model for a project-trained checkpoint.
     """
-    return _load(model_id, quant=quant, adapter_path=adapter_path)
+    return _load(
+        model_id, quant=quant, adapter_path=adapter_path, trainable=trainable
+    )
+
+
+def load_checkpoint_model(model_id, adapter_path, quant="4bit",
+                          trainable=False):
+    """Load a project-trained checkpoint, reinstalling any permanent lesion.
+
+    The ratified permanence rule (2026-08-13) is that a bypass is a runtime
+    hook re-installed at EVERY load, never weight surgery — the checkpoint
+    metadata records the layer and each loader puts the hook back. This is
+    that loader: it reads (and validates) the checkpoint's train_meta.json
+    sidecar via train.checkpoint_meta and, when the sidecar records a
+    training-time bypass, reinstalls it with role="permanent" so the lesion
+    a Stage-2 arm was trained under is present for both continuation
+    training and evaluation.
+
+    Returns (model, tokenizer, meta, handle) where handle is the permanent
+    bypass handle or None. Callers that later install a sweep probe use
+    role="probe"; the probe records itself in a row's bypassed_layer while
+    the permanent lesion stays checkpoint identity (the carve-out).
+
+    Raises the named ValueError from checkpoint_meta if the sidecar is
+    missing or malformed — a lesioned checkpoint must never be loaded as
+    though it were intact.
+    """
+    from algoverse.train import checkpoint_meta
+
+    meta = checkpoint_meta(adapter_path)
+    model, tokenizer = _load(
+        model_id, quant=quant, adapter_path=adapter_path, trainable=trainable
+    )
+    handle = None
+    lesion = meta.get("bypassed_layer")
+    if lesion is not None:
+        handle = install_bypass(model, lesion, role="permanent")
+    return model, tokenizer, meta, handle
