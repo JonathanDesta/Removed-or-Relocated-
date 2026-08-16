@@ -894,7 +894,33 @@ Ratified by the human 2026-08-16 from the deadline decision packet
   held-out-negotiation transfer only; IT lands between draft and final
   submission).
 
-Still open from the same packet (decisions pending): the tiered model
-scope (revision under discussion), the activation-patching Tier-2 rule,
-the sweep-driver pendings P-S1..P-S6, and the pre-agreed Gate-1 failure
-lever.
+Second sitting, same day — the remaining packet items, ratified by the
+human 2026-08-16:
+
+- **Tiered model scope (revised)**: all three families run Stage 0–1 +
+  Gate-1 + the layer sweep + l* selection + Stage-2 training for the
+  draft (three sweeps run person-parallel, each gated on its own
+  Gate-1); **Stage-3 is Qwen-only for the draft**; Llama/Gemma Stage-3
+  runs from the saved checkpoints between draft and final submission.
+- **Activation patching, Tier-2 rule**: the `interp.jsonl` `analysis`
+  enum gains `activation_patching` (INTERFACES edit authorized);
+  implementation happens only if the sweep driver, Stage-2 loader, and
+  corroboration driver are all landed and green, runs Day 2 in
+  parallel, and drops without ceremony if anything critical-path slips.
+  Draft corroboration floor = probes + attention JSD.
+- **Sweep-driver pendings P-S1..P-S6, all ratified as proposed**
+  (planning/sweep-driver.md): P-S1 neutral JSD recorded as
+  `wikitext2_neutral_jsd` in competence.jsonl, per-layer bypassed ppl
+  as ordinary `wikitext2_ppl` rows (INTERFACES edit authorized); P-S2
+  per-layer MMLU/GSM8K on l*-candidates only; P-S3 the sweep's intact
+  baseline reuses the full-pool M_D rows restricted to the n=100 draw;
+  P-S4 Stage-3 sweeps skip the permanently-lesioned layer, reported
+  structurally null; P-S5 `install_bypass(model, layer_idx,
+  role="probe"|"permanent")` two-hook carve-out with the
+  `bypass_state` shape change (INTERFACES edit authorized); P-S6
+  benchmark/ppl per-layer bounds compare against the INTACT SWEPT
+  CHECKPOINT (same-model deltas), negotiation competence against M_0.
+- **Gate-1 failure lever, pre-committed**: if a family's tau gain lands
+  below 0.15, exactly ONE recorded-deviation rerun with epochs 3 → 4
+  (all other constants frozen); a second failure drops that family
+  from the draft rather than iterating.

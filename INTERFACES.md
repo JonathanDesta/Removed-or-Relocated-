@@ -33,15 +33,25 @@ Rules the analysis depends on: invalid rows carry `deceptive: null` (never
 false); bypass and patch are different causal evidence and never share a
 field; resume key is `(run_id, scenario_id, condition)`. Capability metrics
 go to `results/<run_id>/competence.jsonl`: `run_meta + {metric, value,
-stderr, config}` with metric in `mmlu_acc | gsm8k_exact_match | wikitext2_ppl`.
+stderr, config}` with metric in `mmlu_acc | gsm8k_exact_match | wikitext2_ppl |
+wikitext2_neutral_jsd`. `wikitext2_neutral_jsd` (added 2026-08-16 on the
+human's ratification of sweep-driver P-S1) is the item-16 sweep bound: mean
+per-token JSD in nats between the intact and probe-bypassed model's
+next-token distributions on the standard WikiText-2 slice; its `config`
+records the compared checkpoint identity and the probe layer, and a
+per-layer sweep run's bypassed-model perplexity is recorded as an ordinary
+`wikitext2_ppl` row under that layer's run_id.
 `wikitext2_ppl` rows may additionally carry top-level `nll_mean`, the raw mean
 token NLL before the perplexity cap; it is a result field, not configuration or
 run identity. (Authorized by the human 2026-08-14, first-full-review F-4.4.)
 Interp/corroboration metrics go to `results/<run_id>/interp.jsonl`:
 `run_meta + {analysis, layer, value, ci_low, ci_high, config}` with analysis
-in `probe_auroc | attention_jsd`, one row per (analysis, layer); same
-append-only, resume, and identity discipline as competence.jsonl. (Added
-2026-08-14 on the human's instruction — first-full-review plan §E11.)
+in `probe_auroc | attention_jsd | activation_patching`, one row per
+(analysis, layer); same append-only, resume, and identity discipline as
+competence.jsonl. (Added 2026-08-14 on the human's instruction —
+first-full-review plan §E11; `activation_patching` added 2026-08-16 on
+the human's Tier-2 ratification — implementation is conditional, the
+enum value is not.)
 
 Figures track: `metrics.summarize_runs(rows)` gives one dict per
 (model, intervention, checkpoint, split, seed, run_id, generation profile, train_seed) with tau, CI bounds, invalid rates, and
@@ -54,8 +64,8 @@ denominator is too small; plots must expect that.
 
 ```python
 load_model_and_tokenizer(model_id, quant="4bit"|"none", adapter_path=None)  # models.py, exists
-install_bypass(model, layer_idx) -> handle                                  # models.py, exists
-bypass_state(model)                                                         # models.py: marker or None
+install_bypass(model, layer_idx, role="probe") -> handle                    # models.py; role in "probe"|"permanent"
+bypass_state(model)                                # models.py: None, or {"permanent": marker|None, "probe": marker|None}
 residual_stream_by_layer(model, input_ids, attention_mask=None)             # models.py: bypass-aware residuals
 train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
            config=DEFAULT_TRAIN_CONFIG, train_seed=42, quant_label=None,
@@ -120,6 +130,17 @@ to a never-hooked model, unit-tested, because every bypassed-vs-intact
 comparison rests on it; (2) every generation run records which implementation
 produced it (`gen_config.bypass_impl`, derived from `bypass_state`), so
 dev-mode outputs can never be mistaken for publishable ones.
+
+Two-hook carve-out (added 2026-08-16 on the human's ratification of
+sweep-driver P-S4/P-S5): `role="permanent"` is installed only by the
+Stage-2 reinstall-at-load path; `role="probe"` (the default — every
+pre-existing caller keeps its meaning) is the sweep/eval-time lesion.
+At most one bypass per role; a probe may stack on a permanent; a probe
+targeting the SAME layer as the installed permanent refuses with a
+named error (Stage-3 sweeps skip that layer and report it structurally
+null). A results row's `bypassed_layer` records the PROBE layer only;
+the permanent lesion is checkpoint identity, carried by adapter_path +
+train_meta.json's `bypassed_layer`, never by the row field.
 
 ## Interp track owns
 

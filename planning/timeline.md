@@ -73,9 +73,12 @@ Proposals; the human meeting decides and records each in RESEARCH_SPEC.
 9. **RATIFIED 2026-08-16** — Insider Trading full scope with P4 as
    owner, subject to the hard 18:00 Aug-17 checkpoint below.
 
-Still open: 1 (revised, awaiting yes), 2 (patching Tier-2 rule),
-6 (sweep pendings P-S1..P-S6 — P-S6, the bound-reference model, was
-added during implementation), 7 (Gate-1 failure lever).
+ALL NINE ITEMS RATIFIED 2026-08-16 (items 1, 2, 6, 7 in the second
+sitting: revised tiering accepted; patching Tier-2 rule; P-S1..P-S6 all
+as proposed; Gate-1 lever = one epochs-3→4 rerun). Authoritative
+record: RESEARCH_SPEC "Ratified decisions (2026-08-16, deadline
+session)". The decision meeting's remaining agenda is only the IT
+design review at 09:00 tomorrow.
 
 ## Tonight (Aug 16, after the meeting)
 
