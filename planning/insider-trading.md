@@ -27,6 +27,16 @@ selection.
    - **Frozen prompt set + scenario parameterization**: which Scheurer
      variants are used verbatim vs reduced; scenario count and the
      split naming (see contract note below).
+     ANTI-CHERRY-PICKING REQUIREMENT (team decision 2026-08-16, from
+     reviewer-optics guidance): because deception rates swing ~4%→97%
+     across Scheurer's variants, the variant set must be either
+     verbatim-COMPLETE or selected by a pre-registered RULE stated in
+     the design (e.g., the paper's default configuration) — never a
+     hand-chosen subset. The choice is ratified at 09:00, before any
+     transfer number exists, and the paper describes it as such.
+     Nothing anywhere in this environment may be selected or excluded
+     by favorability; validity/refusal handling is mechanical rule,
+     mirroring the negotiation grader.
    - **Grading rule**: what counts as deceptive in the model's report
      to its manager (misrepresentation detection); what the structured
      output format is; regex-first + the pinned LLM fallback
