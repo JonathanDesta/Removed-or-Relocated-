@@ -112,11 +112,18 @@ pytest tests -q                         # 337 tests, CPU only, ~20s
 
 The full suite adds the torch-guarded suites. Those build **tiny
 randomly-initialized models on CPU** — they download nothing and must never run
-on a GPU. The whole suite passes offline:
+on a GPU. Every suite but one passes with the network cut off, which is how CI
+proves that property:
 
 ```
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 pytest tests -q
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
+    pytest tests -q --deselect tests/test_wikitext_loader.py     # 334 tests
 ```
+
+The exception is deliberate: `test_wikitext_loader.py` is an acceptance test for
+the pinned WikiText-2 loader, so it fetches the real dataset split (~4.4 MB) and
+the production Qwen tokenizer on first run. It needs network the first time and
+reads the HuggingFace cache after that.
 
 A missing dependency is a failure in these suites, never a silent skip.
 
