@@ -243,6 +243,11 @@ paper's headline numbers.
 
 ## Canonical commands
 
+Every script is `--help`-documented; these are the invocations the pipeline
+actually runs, in order. Placeholders are written `...`.
+
+**Gate 1 — baseline and the M_D decision**
+
 ```
 python scripts/smoke_test.py                          # end-to-end proof, laptop, no GPU
 python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
@@ -253,9 +258,70 @@ python scripts/gate1_report.py --rows M_0=... --rows M_D=... \
     --competence M_0=... --competence M_D=...      # M_C rows optional
 ```
 
-(Commands updated 2026-08-14 on the human's instruction — first-full-review
-plan §E12: publishable Gate-1 requires the full pool and benchmark inputs.
-`--competence` added on the human's recorded decision 2026-08-15 — planning
-kickoff Q&A, gpu-verification-fixes plan.)
+**Stage 1 — the layer sweep and l\***
+
+```
+python scripts/run_sweep.py --dev-calibration          # MANDATORY FIRST: item-16 JSD calibration
+python scripts/run_sweep.py --model-id ... --quant 4bit --adapter ... \
+    --out-root ... --run-tag ... --llm-fallback \
+    --item16-decision "..."                            # the sweep; --layers A-B chunks a session
+python scripts/run_sweep.py ... --benchmarks-only --layers 12,17,23
+                                                       # MMLU/GSM8K for candidates; l* is
+                                                       # withheld until every candidate has them
+python scripts/sweep_report.py --base ... --layer N=... \
+    --competence base=results/m0-baseline/competence.jsonl \
+    --competence N=... --m0-competence 0.96 \
+    --item16-decision "..."                            # disqualifier table, l*, verdict
+```
+
+`--competence base=` takes **Gate-1's** `competence.jsonl` — the only source
+with all three baseline metrics. The sweep's own `base-competence.jsonl` holds
+`wikitext2_ppl` alone; passing both raises on the conflicting duplicate.
+
+**Corroboration (Tier 1 and Tier 2) — never feeds layer selection**
+
+```
+python scripts/run_corroboration.py --model-id ... --quant 4bit \
+    --run-id md-corr --out-dir results/md-corr \
+    --analysis probes --rows results/md-baseline/rows.jsonl
+python scripts/run_corroboration.py --model-id ... --quant 4bit \
+    --run-id md-corr --out-dir results/md-corr \
+    --analysis attention-jsd --split selection --n 100
+python scripts/run_patching.py --model-id ... --quant 4bit \
+    --run-id md-patch --out-dir results/md-patch --split selection --n 100
+```
+
+**Stages 2–3 — recovery and relocation**
+
+```
+python scripts/run_sweep.py ... --permanent-bypassed-layer 17 \
+    --out-root ... --run-tag ...                       # the ~M_D (lesioned) sweep
+python scripts/recovery_report.py \
+    --manifest "I,D=..." --manifest "I,C=..." \
+    --manifest "L,D=..." --manifest "L,C=..." \
+    --rows "I,D:8=..." --rows "I,C:8=..." \
+    --rows "L,D:8=..." --rows "L,C:8=..." \
+    --t10-reference "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10"
+                                                       # all four arms are required, for
+                                                       # every t in the ratified {8,70,281}
+python scripts/relocation_report.py \
+    --recovered-base ... --recovered-layer N=... \
+    --lesioned-base ...  --lesioned-layer N=... \
+    --permanent-layer 17                               # measurements only; add --final
+                                                       # plus the human classifications
+                                                       # only after reviewing them
+python scripts/make_figures.py ...                     # the paper's figures
+```
+
+Stage 3 does **not** go through `sweep_report.py`: Gate-1's intact competence
+rows are not comparable to a lesioned sweep, and the δ-curve is produced by
+`relocation_report.py`.
+
+(Gate-1 commands updated 2026-08-14 on the human's instruction —
+first-full-review §E12: publishable Gate-1 requires the full pool and benchmark
+inputs. `--competence` added on the human's recorded decision 2026-08-15 —
+planning kickoff Q&A, gpu-verification-fixes. The remaining invocations were
+transcribed from each script's own argparse definition 2026-08-17; they add no
+contract, schema, or constant.)
 
 Everything resumes: re-running a dead job continues where it stopped.

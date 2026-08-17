@@ -1,6 +1,6 @@
 """Guarded rung-2 tests for eval.neutral_distribution_pass (item 16).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules).
+Tiny random CPU models only — this suite must never run on a GPU.
 
 Run: ~/.venvs/colab-local/bin/python tests/test_neutral.py
 """
@@ -173,7 +173,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_neutral.py needs torch + transformers "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

@@ -176,7 +176,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_plotting.py needs matplotlib + numpy "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

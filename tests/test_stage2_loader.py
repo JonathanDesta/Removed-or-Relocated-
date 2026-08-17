@@ -4,7 +4,7 @@ Covers models.load_checkpoint_model: sidecar validation, permanent-lesion
 reinstatement at every load, trainable-vs-eval adapter loading, and the
 continuation handoff into train_lora (which accepts a trainable PeftModel).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules).
+Tiny random CPU models only — this suite must never run on a GPU.
 
 Run: ~/.venvs/colab-local/bin/python tests/test_stage2_loader.py
 """
@@ -192,7 +192,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_stage2_loader.py needs torch + transformers + peft "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

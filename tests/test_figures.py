@@ -10,6 +10,11 @@ layer-sweep figure can silently lie are all caught:
   3. a damage metric that exists for the baseline but not per layer;
   4. a baseline that never matched because of one field, e.g. `arm`;
   5. layers written as strings, which sort "10" before "2".
+
+Unlike the other suites this one uses pytest fixtures and helpers, so running
+it as a script delegates to pytest rather than calling the tests by hand:
+
+    python3 tests/test_figures.py       # equivalent to: pytest tests/test_figures.py
 """
 
 import pytest
@@ -462,3 +467,12 @@ def test_competence_index_refuses_duplicate_metric():
 def test_empty_input_returns_empty_not_an_error():
     assert figures.layer_curve([], n_boot=50) == []
     assert figures.pareto_frontier([]) == []
+
+
+if __name__ == "__main__":
+    # Without this, running the file as a script imports it, defines the tests,
+    # and exits 0 having run none of them -- a silent pass indistinguishable
+    # from a real one.
+    import sys
+
+    sys.exit(pytest.main([__file__, "-q"]))

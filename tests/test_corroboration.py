@@ -1,6 +1,6 @@
 """Guarded rung-2 tests for the corroboration driver (tiny Qwen2, CPU).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules).
+Tiny random CPU models only — this suite must never run on a GPU.
 
 Run: ~/.venvs/colab-local/bin/python tests/test_corroboration.py
 """
@@ -437,7 +437,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_corroboration.py needs torch + transformers + sklearn "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

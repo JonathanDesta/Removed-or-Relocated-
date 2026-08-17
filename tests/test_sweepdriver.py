@@ -1,6 +1,6 @@
 """Guarded rung-2 tests for the layer-sweep driver (WP-S3, plan D1/D2/D5).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules). The
+Tiny random CPU models only — this suite must never run on a GPU. The
 negotiation leg reuses test_bypass.py's stub-chat-tokenizer fixture style
 so run_negotiation_eval's real code path executes on CPU.
 
@@ -488,7 +488,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_sweepdriver.py needs torch + transformers "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

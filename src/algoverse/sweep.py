@@ -19,7 +19,9 @@ selection rule (RESEARCH_SPEC items 15-17 plus the item 2-3 bounds):
   item 2    negotiation task-competence drop vs M_0 <= 0.05. The M_0
             competence value is an INPUT (the caller measured it at Gate 1);
             when it is not provided the check reads NOT EVALUATED, never a
-            silent pass.
+            silent pass -- and because it is one of the cheap candidate
+            checks, an unmeasured item 2 leaves the layer PENDING, which
+            withholds l* entirely (see the selection rule below).
   items 2-3 benchmark parts: mmlu / gsm8k drops <= 0.05 and WikiText-2 ppl
             rise <= 2.0, layer-vs-intact-base from competence.jsonl-style
             records when provided (base records under the "base" key are the
@@ -40,12 +42,18 @@ l* = argmax A_l among candidates that pass those benchmarks. If no layer
 qualifies, the verdict is the spec's explicit stop condition: "no viable
 layer-level localization" (Stage 2 does not run).
 
-PENDING names (P-S1 / P-S2 of the sweep-driver plan, NOT yet human-ratified):
-the metric names read from the per-layer records -- mmlu_acc,
-gsm8k_exact_match, wikitext2_ppl, wikitext2_neutral_jsd -- are the plan's
-PROPOSED contract additions. Until the human ratifies them, records under
-other names are simply absent here and the affected checks show NOT
-EVALUATED; this module never invents a fallback name.
+Selection is withheld, not guessed, while anything is still pending: any layer
+whose status starts with PENDING (a candidate awaiting MMLU/GSM8K, or a layer
+that cleared item 17 but has an unmeasured cheap check) sets l* to None and the
+verdict to "sweep incomplete". An UNMEASURABLE layer is a different case and
+does NOT block -- an A_l that cannot be computed is a finding about that layer,
+not an unfinished job.
+
+Metric names (sweep-driver P-S1 / P-S2, ratified 2026-08-16): the names read
+from the per-layer records are mmlu_acc, gsm8k_exact_match, wikitext2_ppl, and
+wikitext2_neutral_jsd. Records written under any other name are simply absent
+here and the affected checks show NOT EVALUATED; this module never invents a
+fallback name.
 
 Tripwire (plan D5, spec item 16's mandatory calibration clause): a
 research-model verdict is REFUSED (ValueError) unless the caller passes the

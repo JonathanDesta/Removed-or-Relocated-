@@ -1,6 +1,6 @@
 """Guarded rung-2 tests for the Instructed-Pairs builder (tiny Qwen2, CPU).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules). Reuses
+Tiny random CPU models only — this suite must never run on a GPU. Reuses
 the StubTokenizer chat-template fixture pattern of test_corroboration.py:
 rows are rendered end-to-end through hf_renderers (apply_chat_template +
 add_special_tokens=False token counting), spans are verified at the token
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_instructed_pairs.py needs torch + transformers + sklearn "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

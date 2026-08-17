@@ -1,6 +1,6 @@
 """Stage-3 R_t recovery reporting: the matched-arms audit plus the R_t table.
 
-This is the analysis end of the Stage-2/3 plan (planning/stage2-3.md):
+This is the analysis end of the Stage-2/3 plan:
 
   WP-2C  the matched-arms audit (closes F73): before any R_t number is
          computed, the four Stage-2 continuation arms' train_manifest.json

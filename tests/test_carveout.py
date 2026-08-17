@@ -212,7 +212,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_carveout.py needs torch + transformers "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

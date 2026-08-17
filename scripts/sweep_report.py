@@ -6,7 +6,7 @@ Selection report (plan D6):
         --base results/sweep-md-qwen7b-base/rows.jsonl \
         --layer 0=results/sweep-md-qwen7b-l00/rows.jsonl \
         --layer 1=results/sweep-md-qwen7b-l01/rows.jsonl \
-        --competence base=results/sweep-md-qwen7b-base/competence.jsonl \
+        --competence base=results/m0-baseline/competence.jsonl \
         --competence 0=results/sweep-md-qwen7b-l00/competence.jsonl \
         --m0-competence 0.96 \
         --item16-decision "spec item 16 confirmed at 0.25 nats, <date/ref>"
@@ -16,7 +16,24 @@ empty. --competence takes a layer number or the literal "base" (the intact
 model's benchmark values, the reference the drop/rise checks need; without
 it those checks read "n/e"). --m0-competence is M_0's negotiation
 task-competence from Gate 1; omitted, item 2's negotiation check reads
-"n/e", never a silent pass.
+"n/e" -- never a silent pass, but also enough to leave every layer PENDING
+and withhold l*.
+
+Which file to pass as `base=`: use the Gate-1 run's competence.jsonl (written
+by run_baseline.py --competence). It is the only source carrying all three
+baseline metrics -- mmlu_acc, gsm8k_exact_match, and wikitext2_ppl. The sweep
+driver's own out_root/base-competence.jsonl is NOT a substitute: it holds the
+unprobed wikitext2_ppl row only, so the MMLU and GSM8K checks would read
+"n/e". Passing BOTH files under `base=` raises -- each contains a
+wikitext2_ppl row for the same model measured in a different session, and two
+sessions do not agree bit-for-bit, so the duplicate-metric guard rejects them
+as conflicting. Pass Gate-1's file alone.
+
+A Stage-3 (permanently lesioned) sweep is a different case: Gate-1's intact
+competence rows are not comparable to it (their permanent_bypassed_layer is
+None against the sweep's l*, which the comparability guard refuses, by
+design). Stage 3 does not go through this report -- its delta curve is
+produced by scripts/relocation_report.py.
 
 --item16-decision is the D5 tripwire: the recorded DEV-calibration
 confirm-or-revise decision on the 0.25-nat JSD bound. Without it the report

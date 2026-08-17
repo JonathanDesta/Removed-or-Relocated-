@@ -19,6 +19,27 @@ Canonical Colab invocations:
     # session of one sweep uses the same out-root and run-tag.
     python scripts/run_sweep.py ... --layers 0-9
 
+    # Benchmarks for the candidate layers only. l* selection is withheld
+    # until every candidate has MMLU and GSM8K, so this runs after the
+    # sweep above and before sweep_report.py can name l*.
+    python scripts/run_sweep.py --model-id Qwen/Qwen2.5-7B-Instruct \
+        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
+        --out-root results/sweep-md-qwen7b-s42-step281 \
+        --run-tag md-qwen7b-s42-step281 \
+        --item16-decision "<reference to the recorded decision>" \
+        --benchmarks-only --layers 12,17,23
+
+    # Stage-3 ~M_D sweep: the same sweep over a checkpoint carrying the
+    # guarded runtime-permanent lesion at l*. The lesioned layer is
+    # reported as a structural null and the driver generates its own
+    # same-draw unprobed baseline, so no cross-checkpoint base is needed.
+    python scripts/run_sweep.py --model-id Qwen/Qwen2.5-7B-Instruct \
+        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
+        --permanent-bypassed-layer 17 \
+        --out-root results/sweep-lesioned-qwen7b-s42-step281 \
+        --run-tag lesioned-qwen7b-s42-step281 --llm-fallback \
+        --item16-decision "<reference to the recorded decision>"
+
 Re-running resumes: a finished layer is skipped before the model is
 touched, a partial layer continues row by row.
 """

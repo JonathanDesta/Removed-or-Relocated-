@@ -1,6 +1,6 @@
 """Guarded rung-2 tests for activation patching (tiny Qwen2, CPU).
 
-Tiny random CPU models only — never a GPU (AGENTS.md rung rules).
+Tiny random CPU models only — this suite must never run on a GPU.
 
 The module under test implements the ratified final-prompt-position
 protocol (pending human ratification); these tests pin its MECHANICS —
@@ -372,7 +372,7 @@ if __name__ == "__main__":
         sys.exit(
             "test_patching.py needs torch + transformers "
             "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip (AGENTS.md)."
+            "not a skip."
         )
 
     tests = [

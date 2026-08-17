@@ -401,7 +401,7 @@ paired.
   runs, the training seed for Stage-2 arms; stamped, resume-guarded, and
   part of the summarize_runs group key.
   **AMENDED 2026-08-15** (training-constants ruling item T15 below;
-  raised as planning/train.md P15 / train.critique-2 F25, sharpened by
+  raised as train-plan P15 / train.critique-2 F25, sharpened by
   train.critique-3 F46). The clause "null for Stage-0/1 runs" is
   REPLACED by: `train_seed` carries the training seed of the checkpoint
   being evaluated whenever the evaluated artifact IS a trained
@@ -438,8 +438,7 @@ paired.
 ## Ratified decisions (2026-08-14)
 
 Ratified by the human in the first-full-review planning session; governing
-plan planning/first-full-review.md, dispositions in
-planning/first-full-review.critique-1.md.
+plan first-full-review, dispositions in first-full-review.critique-1.
 
 - Grader: a numeric claim of $0 is equivalent to "NONE" — honest when no
   true outside offer exists, understated when one does (first-full-review
@@ -480,8 +479,8 @@ planning/first-full-review.critique-1.md.
   team ratifies the numbers. (SUPERSEDED later the same period: the
   inventory WAS ratified 2026-08-14 — see "Prespecified bounds and analysis
   constants" above. Two defaults changed with it: recovery eps → 0.10 and
-  larger benchmark samples, implemented via planning/first-full-review.md
-  WP12; everything else was ratified at its existing value.)
+  larger benchmark samples, implemented via first-full-review WP12;
+  everything else was ratified at its existing value.)
 - Localization-corroboration decodability metric: AUROC (on held-out,
   scenario-grouped splits) is the ratified operationalization of the spec's
   "threshold-free deception decodability"; accuracy is reported alongside
@@ -544,8 +543,8 @@ Ratified by the human 2026-08-15, before any fine-tuning run exists and
 before any Gate-1 result on a trained checkpoint has been seen. These
 are the TRAINING constants; the Gate-1 and analysis constants are the
 separate ratified block above. Proposed and argued in
-planning/train.ratification-proposal.md (the short form) and
-planning/train.md (fuller context, items P1-P16); the numbering below
+the train ratification proposal (the short form) and the train plan
+(fuller context, items P1-P16); the numbering below
 matches those items. Each entry: value — plain-language meaning —
 reasoning. LoRA is Hu et al. (arXiv 2106.09685); the "QLoRA recipe" is
 Dettmers et al. (arXiv 2305.14314). Both were fetched and read
@@ -757,7 +756,7 @@ T14. **Recorded deviations from the QLoRA recipe**, for the
      All three are declared as deviations rather than claimed as the recipe.
 
 T15. **Eval rows for a trained checkpoint carry that checkpoint's
-     train_seed** (option (a) of planning/train.md P15). This AMENDS the
+     train_seed** (option (a) of train-plan P15). This AMENDS the
      2026-08-13 results-row convention; the amendment and its
      zero-migration-cost verification are recorded in place at that
      bullet above.
@@ -791,9 +790,9 @@ T16. **A diverged fp16 run aborts after 20 consecutive grad-scaler
   in "Prespecified bounds and analysis constants (ratified 2026-08-14)"
   above. Two defaults changed with the ratification (recovery eps → 0.10;
   benchmark samples → 400 / 16-per-subtask), implemented via
-  planning/first-full-review.md WP12.
+  first-full-review WP12.
 - Spec-prose corrections awaiting the human (F28/F30/F31; proposed wording
-  in planning/first-full-review.md §E7): the Methodology environment claim
+  in first-full-review §E7): the Methodology environment claim
   and the Related-Work JSD sentence were fixed 2026-08-14 (mirror both in
   the Overleaf source); still open: the chaudhary v2 citation pin (a
   hand-edit to the .bib — importers emit the version-less entry), the
@@ -870,7 +869,7 @@ T16. **A diverged fp16 run aborts after 20 consecutive grad-scaler
 ## Ratified decisions (2026-08-16, deadline session)
 
 Ratified by the human 2026-08-16 from the deadline decision packet
-(planning/timeline.md), before any real experimental result exists.
+(the deadline timeline), before any real experimental result exists.
 
 - **T10 R_t subset (resolves the T10 deferral, pre-committed in writing
   before any Stage-2 result exists): R_t receives a full evaluation at
@@ -919,7 +918,7 @@ human 2026-08-16:
   parallel, and drops without ceremony if anything critical-path slips.
   Draft corroboration floor = probes + attention JSD.
 - **Sweep-driver pendings P-S1..P-S6, all ratified as proposed**
-  (planning/sweep-driver.md): P-S1 neutral JSD recorded as
+  (sweep-driver plan): P-S1 neutral JSD recorded as
   `wikitext2_neutral_jsd` in competence.jsonl, per-layer bypassed ppl
   as ordinary `wikitext2_ppl` rows (INTERFACES edit authorized); P-S2
   per-layer MMLU/GSM8K on l*-candidates only; P-S3 the sweep's intact
