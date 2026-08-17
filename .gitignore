@@ -8,6 +8,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 uv.lock
 
 # Local Python sandbox (each person's own; huge and machine-specific)
@@ -39,3 +40,9 @@ CLAUDE.md
 roles/
 Prompts.txt
 Algoverse AI Research_ Compute & API Access Policy-2.pdf
+
+# Working notes: plan → critique → disposition rounds. These are our internal
+# process record, not a deliverable. Every decision they produced is restated
+# in RESEARCH_SPEC.md ("Ratified decisions") and INTERFACES.md, which are the
+# normative documents. Kept on disk, never published.
+planning/
