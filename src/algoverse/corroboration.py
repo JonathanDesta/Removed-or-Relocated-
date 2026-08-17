@@ -267,8 +267,8 @@ def load_probe_dataset(path):
 # Fields that carry results rather than run identity. `accuracy` is a
 # top-level result field on probe_auroc rows only ("accuracy alongside",
 # ratified probe metric) — recorded like wikitext2_ppl's authorized
-# nll_mean result field; flagged for INTERFACES.md review, since the
-# interp.jsonl schema does not list it yet.
+# nll_mean result field. Authorized by the human 2026-08-16 and now in
+# the INTERFACES.md interp.jsonl contract.
 _RESULT_FIELDS = {
     "analysis", "layer", "value", "ci_low", "ci_high", "accuracy", "config",
 }

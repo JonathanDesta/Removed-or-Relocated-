@@ -34,7 +34,16 @@ loader, both test rungs green.
 - [RUN] ~08:30 — DEV JSD calibration (`run_sweep.py --dev-calibration`,
   Qwen-0.5B, free tier). Its confirm-or-revise decision at 09:00
   unlocks EVERY family's sweep scoring (the driver refuses without it).
-- 09:00 all-hands (30 min).
+- 09:00 all-hands (30 min). Agenda is now ONLY: the IT design
+  ratification + the item-16 DEV decision. (The patching protocol,
+  probe accuracy field, and Instructed-Pairs construction were all
+  ratified 2026-08-16 late — RESEARCH_SPEC third sitting.)
+- [CHECK] Anytime Aug 17, one command per family, no GPU: build the
+  Instructed-Pairs probe dataset to Drive —
+  `python scripts/build_instructed_pairs.py --model-id <family> \
+   --out-dir /content/drive/MyDrive/maheep-yksa/data/instructed_pairs`
+  (Qwen by anyone; Llama/Gemma by an account holding that license —
+  tokenizer download only).
 - [RUN] Morning — M_D final-checkpoint full-pool eval + competence
   (~2–3 h).
 - [CHECK] ~midday — `gate1_report` vs M_0: **Gate-1 verdict.** Fail →

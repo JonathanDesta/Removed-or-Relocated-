@@ -2,7 +2,7 @@
 
 Tiny random CPU models only — never a GPU (AGENTS.md rung rules).
 
-The module under test implements the PROPOSED final-prompt-position
+The module under test implements the ratified final-prompt-position
 protocol (pending human ratification); these tests pin its MECHANICS —
 hook hygiene, capture refusals, row/resume discipline — not any
 methodological choice.
@@ -285,7 +285,7 @@ if HAVE_STACK:
                 assert row["ci_low"] is None and row["ci_high"] is None
                 config = row["config"]
                 assert config["protocol"] == PATCH_PROTOCOL
-                assert "PROPOSED" in config["protocol"]
+                assert config["protocol"] == "final-prompt-position"
                 assert config["n"] == 2
                 assert config["scenario_seed"] == 42
                 assert config["split"] == "selection"

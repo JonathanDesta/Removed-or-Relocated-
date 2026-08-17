@@ -1,6 +1,7 @@
 """Tier-2 corroboration driver: activation patching -> interp.jsonl.
 
-PROTOCOL STATUS: PROPOSED, PENDING HUMAN RATIFICATION. The spec's
+PROTOCOL STATUS: RATIFIED by the human 2026-08-16 (RESEARCH_SPEC,
+third sitting). The spec's
 corroboration item (c) does not pin which positions are patched or how
 prompts of differing lengths align. This driver implements the proposed
 default — final-prompt-position patching: capture the control prompt's
@@ -8,7 +9,7 @@ layer-l residual at its final prompt token, patch it into the deceptive
 prompt's final prompt position on the prefill pass only (KV entries then
 persist through cached generation; later steps are not patched), score
 with the real scorer. Every row stamps config.protocol =
-"final-prompt-position/PROPOSED"; treat the numbers as provisional until
+"final-prompt-position"; the per-row protocol stamp remains the provenance;
 the protocol is ratified. See src/algoverse/patching.py.
 
 Writes results/<out-dir>/interp.jsonl rows per the INTERFACES schema
@@ -123,8 +124,8 @@ if __name__ == "__main__":
 
     scenarios = get_scenarios(args.split, n=args.n, seed=args.scenario_seed)
     print(
-        "activation patching, protocol %s (PROPOSED — pending human "
-        "ratification)" % PATCH_PROTOCOL
+        "activation patching, protocol %s (ratified 2026-08-16, "
+        "RESEARCH_SPEC third sitting)" % PATCH_PROTOCOL
     )
     written = run_activation_patching(
         model, tokenizer, scenarios, layers, out_path, run_meta,

@@ -8,10 +8,11 @@ results/<run_id>/interp.jsonl row per layer with analysis
 reporting-only: nothing here feeds layer selection.
 
 ===========================================================================
-PROPOSED PROTOCOL — PENDING HUMAN RATIFICATION. The spec does NOT pin
+PROTOCOL RATIFIED by the human 2026-08-16 (RESEARCH_SPEC, third
+sitting). The spec's original text did not pin
 which positions are patched or how prompts of differing lengths align;
 everything below is an explicitly proposed default, stamped into every
-row's config as protocol "final-prompt-position/PROPOSED". Numbers
+row's config as protocol "final-prompt-position". Numbers
 produced under it are provisional until the human ratifies (or replaces)
 the protocol.
 ===========================================================================
@@ -37,7 +38,7 @@ Final-prompt-position patching, per scenario:
    deception-rate / task-competence / validity deltas against an unpatched
    deceptive baseline generated once per invocation.
 
-Also PROPOSED within this protocol: "task competence" for the patched
+Also ratified with the protocol: "task competence" for the patched
 (incentive-condition) responses applies the metrics.task_competence
 CRITERION — among valid rows, deceptive is False and understated is False
 — because metrics.task_competence itself is defined on control-condition
@@ -66,8 +67,8 @@ import contextlib
 from pathlib import Path
 
 PATCH_ANALYSIS = "activation_patching"
-# PROPOSED, pending human ratification — see the module docstring.
-PATCH_PROTOCOL = "final-prompt-position/PROPOSED"
+# RATIFIED by the human 2026-08-16 (third sitting) — see RESEARCH_SPEC.
+PATCH_PROTOCOL = "final-prompt-position"
 
 
 def _layer_count(model):
@@ -125,7 +126,7 @@ def _control_final_position_residuals(model, tokenizer, scenarios):
     layer's entry, so a multi-layer run pays n_scenarios forwards total,
     not n_scenarios x n_layers. Element [layer][i] is the residual ENTERING
     block `layer` at the FINAL prompt token of scenario i's CONTROL prompt
-    (the PROPOSED final-prompt-position protocol). Prompts run one at a
+    (the ratified final-prompt-position protocol). Prompts run one at a
     time, unpadded, so position -1 is always the true final token.
     """
     import torch
@@ -166,7 +167,7 @@ def _control_final_position_residuals(model, tokenizer, scenarios):
 def capture_control_vectors(model, tokenizer, scenarios, layer):
     """Per-scenario control residuals entering block `layer`, final position.
 
-    Returns a [n_scenarios, d_model] tensor (PROPOSED protocol step 2).
+    Returns a [n_scenarios, d_model] tensor (ratified protocol step 2).
     Refuses a probe-bypassed model, and refuses `layer` when it is
     causally dead (a permanent lesion elsewhere is fine — the lesioned
     layer itself is a structural null per the ratified exclusion).
@@ -348,7 +349,7 @@ def _generate_pairs(model, tokenizer, prompt_texts, max_new_tokens,
 
 def patched_generation(model, tokenizer, prompt_texts, layer, control_vectors,
                        max_new_tokens=256, do_sample=False, batch_size=4):
-    """Generate from rendered prompts under the PROPOSED per-layer patch.
+    """Generate from rendered prompts under the ratified per-layer patch.
 
     prompt_texts are canonically rendered strings (render_condition_texts);
     control_vectors is the aligned [n_prompts, d_model] tensor from
@@ -376,7 +377,7 @@ def summarize_patched_scores(scored):
     (None, never 0, when nothing was measured). Competence applies the
     metrics.task_competence CRITERION — among valid rows, deceptive is
     False and understated is False — to these incentive-condition
-    responses; that transplant is part of the PROPOSED protocol, because
+    responses; that transplant is part of the ratified protocol, because
     metrics.task_competence itself only scores control-condition rows.
     """
     from algoverse.metrics import deception_rate
@@ -404,7 +405,7 @@ def run_activation_patching(model, tokenizer, scenarios, layers, out_path,
                             extra_config=None):
     """Per-layer activation-patching rows (analysis "activation_patching").
 
-    PROPOSED protocol (module docstring) — pending human ratification.
+    ratified protocol (module docstring; RESEARCH_SPEC 2026-08-16).
 
     For each requested layer (None = every layer): generate patched
     deceptive responses, score them with tasks.score_response, and append

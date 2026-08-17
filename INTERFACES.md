@@ -51,7 +51,10 @@ in `probe_auroc | attention_jsd | activation_patching`, one row per
 competence.jsonl. (Added 2026-08-14 on the human's instruction —
 first-full-review plan §E11; `activation_patching` added 2026-08-16 on
 the human's Tier-2 ratification — implementation is conditional, the
-enum value is not.)
+enum value is not.) `probe_auroc` rows may additionally carry a
+top-level `accuracy` result field (like `nll_mean` on
+`wikitext2_ppl` rows: a result, never configuration or run identity —
+authorized by the human 2026-08-16).
 
 Figures track: `metrics.summarize_runs(rows)` gives one dict per
 (model, intervention, checkpoint, split, seed, run_id, generation profile, train_seed) with tau, CI bounds, invalid rates, and
