@@ -1,0 +1,38 @@
+# Verified test environment — Python 3.11.15.
+#
+# This file DOCUMENTS a known-good environment: the exact versions under which
+# `pytest tests -q` passes all 337 tests on CPU, offline. It does not change
+# pyproject.toml, which deliberately declares no heavy dependencies so that the
+# scoring/analysis half of the package (tasks.py, metrics.py, sweep.py,
+# relocation.py) stays installable and runnable on a machine with no ML stack.
+#
+#   pip install -r requirements.txt && pip install -e .
+#
+# The *_pure.py test suites need NONE of this — they run on a bare python3.
+
+torch==2.13.0
+transformers==5.15.0
+tokenizers==0.22.2
+safetensors==0.8.0
+accelerate==1.14.0
+peft==0.20.0
+datasets==5.0.1
+scikit-learn==1.9.0
+numpy==2.4.6
+scipy==1.17.1
+matplotlib==3.11.1
+pytest==9.1.1
+
+# ---------------------------------------------------------------------------
+# Colab / GPU only — imported by the codebase but NOT installed in the verified
+# environment above, so no version is pinned here. Install in the Colab session
+# that needs them.
+#
+#   lm-eval          MMLU / GSM8K capability benchmarks (eval.py)
+#   bitsandbytes     4-bit quantized checkpoint loading (models.py)
+#
+# Optional, lazily imported by the LLM scoring fallback (tasks.py); only needed
+# when the deterministic extractor cannot parse a response:
+#
+#   openai
+#   anthropic

@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The analysis half of the package runs with no dependencies at all. These
+  # suites insert src/ on sys.path themselves, so there is deliberately no
+  # install step here — if this job ever needs one, that property has broken.
+  pure:
+    name: pure (no dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run the dependency-free suites
+        run: |
+          fail=0
+          for f in tests/test_*_pure.py tests/test_metrics.py; do
+            echo "--- $f"
+            python3 "$f" || fail=1
+          done
+          exit $fail
+
+  # Everything, including the torch-guarded suites. Those build tiny
+  # randomly-initialized models on CPU: no GPU runner, no model downloads, no
+  # HF token. The offline flags assert that.
+  full:
+    name: full suite (CPU, offline)
+    runs-on: ubuntu-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -e .
+      - name: pytest
+        run: pytest tests -q
