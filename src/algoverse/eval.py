@@ -108,7 +108,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        llm_model=None, do_sample=False, max_new_tokens=256,
                        batch_size=4, system_fold=False):
     """Derive generation and provenance identity from the live model."""
-    from algoverse.models import bypass_impl_string
+    from algoverse.models import bypass_impl_string, bypass_state
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
 
     parameter = next(model.parameters())
@@ -126,6 +126,9 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         resolved_provider = None
         resolved_model = None
 
+    state = bypass_state(model)
+    permanent = None if state is None else state.get("permanent")
+
     return {
         "do_sample": do_sample,
         "max_new_tokens": max_new_tokens,
@@ -133,6 +136,9 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         "system_fold": bool(system_fold),
         "quant": quant_label,
         "bypass_impl": bypass_impl_string(model),
+        "permanent_bypassed_layer": (
+            None if permanent is None else permanent["layer_idx"]
+        ),
         "load_profile": {
             "device_type": parameter.device.type,
             "dtype": str(getattr(model, "dtype", parameter.dtype)),
@@ -404,6 +410,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     }
     guarded_gen_fields = (
         "bypass_impl",
+        "permanent_bypassed_layer",
         "do_sample",
         "max_new_tokens",
         "quant",
@@ -767,6 +774,24 @@ def _competence_done(out_path, run_meta, metric, config):
     return bool(metric_rows)
 
 
+def _competence_run_meta(model, run_meta):
+    """Stamp and guard the live model's permanent-lesion identity."""
+    from algoverse.models import bypass_state
+
+    normalized = dict(run_meta or {})
+    state = bypass_state(model)
+    permanent = None if state is None else state.get("permanent")
+    live_layer = None if permanent is None else permanent["layer_idx"]
+    field = "permanent_bypassed_layer"
+    if field in normalized and normalized[field] != live_layer:
+        raise ValueError(
+            "competence permanent lesion mismatch: run_meta=%r live_model=%r"
+            % (normalized[field], live_layer)
+        )
+    normalized[field] = live_layer
+    return normalized
+
+
 def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
                            gsm8k_limit=GSM8K_LIMIT,
                            mmlu_limit_per_subtask=MMLU_LIMIT_PER_SUBTASK,
@@ -787,13 +812,15 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         deltas do, and flipping formatting mid-project destroys them.
 
     run_meta identifies the model (run_id, model_id, adapter_path,
-    bypassed_layer, checkpoint_step, arm, train_seed); each metric row =
+    bypassed_layer, permanent_bypassed_layer, checkpoint_step, arm,
+    train_seed); each metric row =
     run_meta + {"metric", "value", "stderr", "config"}. Appended to
     out_path (competence.jsonl per run).
     """
     from algoverse.utils import append_jsonl
 
     out_path = Path(out_path)
+    run_meta = _competence_run_meta(model, run_meta)
     summary = {}
 
     jobs = [
@@ -808,6 +835,9 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         "attn_implementation": getattr(config, "_attn_implementation", None),
         "model_revision": getattr(config, "_commit_hash", None),
         "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
+        "permanent_bypassed_layer": (
+            (run_meta or {}).get("permanent_bypassed_layer")
+        ),
     }
     for job in jobs:
         name, tasks_list, limit, prefixes, metric_name = job
@@ -964,6 +994,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
     import torch.nn.functional as F
     from algoverse.utils import append_jsonl
 
+    run_meta = _competence_run_meta(model, run_meta)
     metric_config = {
         "n_tokens": n_tokens,
         "max_length": max_length,
@@ -977,6 +1008,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
             getattr(model, "config", None), "_commit_hash", None
         ),
         "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
+        "permanent_bypassed_layer": run_meta["permanent_bypassed_layer"],
     }
     if out_path is not None and _competence_done(
         out_path, run_meta, "wikitext2_ppl", metric_config

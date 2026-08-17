@@ -260,6 +260,138 @@ def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
     return per_layer
 
 
+def response_token_resid_by_layer_to_disk(model, tokenizer, texts,
+                                          response_starts, out_dir,
+                                          layers=None):
+    """Capture response-token residuals once and spool float32 by layer.
+
+    Returns metadata consumed by ``iter_disk_backed_residual_layers``. The
+    caller owns ``out_dir`` and its cleanup. Only requested, non-bypassed
+    layers are materialized, but each text still needs just one model forward.
+    """
+    import shutil
+    from pathlib import Path
+
+    texts = list(texts)
+    starts = [int(start) for start in response_starts]
+    if len(starts) != len(texts):
+        raise ValueError(
+            "response_starts length %d does not match texts length %d"
+            % (len(starts), len(texts))
+        )
+    if not texts:
+        raise ValueError("no texts supplied")
+    n_layers = getattr(model.config, "num_hidden_layers", None)
+    hidden_size = getattr(model.config, "hidden_size", None)
+    if n_layers is None or hidden_size is None:
+        raise ValueError("model config must expose num_hidden_layers and hidden_size")
+    requested = list(range(n_layers)) if layers is None else [int(x) for x in layers]
+    if len(set(requested)) != len(requested):
+        raise ValueError("layers contains duplicates")
+    outside = [layer for layer in requested if not 0 <= layer < n_layers]
+    if outside:
+        raise ValueError("layers outside model range: %r" % outside)
+    excluded = set(bypassed_layers(model))
+    active = [layer for layer in requested if layer not in excluded]
+
+    lengths = []
+    for text, start in zip(texts, starts):
+        encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+        n_tokens = int(encoded["input_ids"].shape[1])
+        if not 0 <= start < n_tokens:
+            raise ValueError(
+                "response start %r is outside a text of %d tokens"
+                % (start, n_tokens)
+            )
+        lengths.append(n_tokens - start)
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    total_tokens = offsets[-1]
+    required_bytes = total_tokens * int(hidden_size) * 4 * len(active)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    available = shutil.disk_usage(out_dir).free
+    if required_bytes > available:
+        raise RuntimeError(
+            "probe scratch space insufficient: need %d bytes for float32 "
+            "activations, have %d" % (required_bytes, available)
+        )
+
+    arrays = {}
+    paths = {}
+    for layer in active:
+        path = out_dir / ("layer-%03d.npy" % layer)
+        paths[layer] = str(path)
+        arrays[layer] = np.lib.format.open_memmap(
+            path, mode="w+", dtype=np.float32,
+            shape=(total_tokens, int(hidden_size)),
+        )
+
+    try:
+        for index, (text, start) in enumerate(zip(texts, starts)):
+            inputs = tokenizer(
+                text, return_tensors="pt", add_special_tokens=False
+            ).to(model.device)
+            captured = residual_stream_by_layer(
+                model, inputs["input_ids"], inputs.get("attention_mask")
+            )
+            if len(captured) - 1 != n_layers:
+                raise RuntimeError("captured layer count changed during probe spool")
+            begin, end = offsets[index], offsets[index + 1]
+            for layer in active:
+                value = (
+                    captured[layer + 1][0, start:, :]
+                    .float().cpu().numpy()
+                )
+                if value.shape != (end - begin, hidden_size):
+                    raise RuntimeError(
+                        "layer %d response %d capture shape %r, expected %r"
+                        % (layer, index, value.shape,
+                           (end - begin, hidden_size))
+                    )
+                arrays[layer][begin:end] = value
+    finally:
+        for array in arrays.values():
+            array.flush()
+            mmap = getattr(array, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
+        arrays.clear()
+
+    return {
+        "n_layers": int(n_layers),
+        "hidden_size": int(hidden_size),
+        "offsets": offsets,
+        "paths": paths,
+        "excluded": sorted(excluded),
+        "required_bytes": required_bytes,
+    }
+
+
+def iter_disk_backed_residual_layers(metadata):
+    """Yield each layer's response arrays from disk, one mapped layer at a time."""
+    offsets = metadata["offsets"]
+    excluded = set(metadata["excluded"])
+    paths = metadata["paths"]
+    for layer in range(metadata["n_layers"]):
+        if layer in excluded or layer not in paths:
+            yield None
+            continue
+        array = np.load(paths[layer], mmap_mode="r")
+        responses = [
+            array[offsets[i]:offsets[i + 1]]
+            for i in range(len(offsets) - 1)
+        ]
+        try:
+            yield responses
+        finally:
+            del responses
+            mmap = getattr(array, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
+
+
 # --- probing ---
 
 def _group_bootstrap_auroc_ci(y, scores, groups, n_boot=2000, seed=0,

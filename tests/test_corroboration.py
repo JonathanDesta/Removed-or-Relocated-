@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-CORROBORATION_TEST_COUNT = 6
+CORROBORATION_TEST_COUNT = 8
 
 try:
     import numpy as np
@@ -24,7 +24,12 @@ try:
         run_attention_jsd,
         run_probe_auroc,
     )
-    from algoverse.interp import probe_layer, response_token_resid_by_layer
+    from algoverse.interp import (
+        iter_disk_backed_residual_layers,
+        probe_layer,
+        response_token_resid_by_layer,
+        response_token_resid_by_layer_to_disk,
+    )
     from algoverse.models import install_bypass, residual_stream_by_layer
 
     HAVE_STACK = True
@@ -153,6 +158,39 @@ if HAVE_STACK:
             assert features[layer] is not None
             assert np.all(np.isfinite(features[layer][0]))
 
+    def test_disk_backed_capture_matches_in_memory_and_excludes_bypass():
+        model = _tiny_model()
+        tokenizer = StubTokenizer()
+        texts = ["one two three four five", "six seven eight nine"]
+        starts = [2, 1]
+        handle = install_bypass(model, 1)
+        try:
+            expected = response_token_resid_by_layer(
+                model, tokenizer, texts, starts
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                metadata = response_token_resid_by_layer_to_disk(
+                    model, tokenizer, texts, starts, tmp
+                )
+                assert metadata["excluded"] == [1]
+                assert metadata["required_bytes"] > 0
+                seen = []
+                for layer, layer_features in enumerate(
+                    iter_disk_backed_residual_layers(metadata)
+                ):
+                    seen.append(layer)
+                    if layer == 1:
+                        assert layer_features is None
+                        continue
+                    for actual, reference in zip(
+                        layer_features, expected[layer]
+                    ):
+                        assert np.allclose(actual, reference)
+                assert seen == [0, 1, 2, 3]
+                assert sorted(Path(tmp).glob("layer-*.npy"))
+        finally:
+            handle.remove()
+
     def test_probe_layer_token_fitting_and_mean_aggregation():
         # Synthetic responses with a shared per-token signal: fitting on
         # tokens and mean-aggregating scores must recover the labels.
@@ -207,9 +245,12 @@ if HAVE_STACK:
             })
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "interp.jsonl"
+            scratch = Path(tmp) / "scratch"
             written = run_probe_auroc(
                 model, tokenizer, examples, out, RUN_META, "rows:synthetic",
+                scratch_dir=scratch,
             )
+            assert scratch.is_dir() and list(scratch.iterdir()) == []
             rows = [json.loads(line) for line in
                     out.read_text().strip().splitlines()]
             assert [row["layer"] for row in rows] == [0, 1, 2, 3]
@@ -306,6 +347,36 @@ if HAVE_STACK:
                 assert bypassed[0]["config"]["excluded_bypassed_layer"] is True
         finally:
             handle.remove()
+
+    def test_probe_scratch_cleans_after_fit_failure():
+        model = _tiny_model()
+        tokenizer = StubTokenizer()
+        examples = [
+            {
+                "text": "one two three four",
+                "response_start": 1,
+                "label": bool(i % 2),
+                "group": "g%d" % i,
+            }
+            for i in range(4)
+        ]
+
+        def fail_probe(*args, **kwargs):
+            raise RuntimeError("synthetic fit failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp) / "scratch"
+            try:
+                run_probe_auroc(
+                    model, tokenizer, examples, Path(tmp) / "interp.jsonl",
+                    RUN_META, "rows:synthetic", scratch_dir=scratch,
+                    _probe=fail_probe,
+                )
+            except RuntimeError as exc:
+                assert "synthetic fit failure" in str(exc)
+            else:
+                raise AssertionError("synthetic probe failure did not propagate")
+            assert scratch.is_dir() and list(scratch.iterdir()) == []
 
     def test_probe_examples_from_rows_renders_and_spans():
         from algoverse.tasks import get_scenarios

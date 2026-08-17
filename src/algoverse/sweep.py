@@ -34,10 +34,11 @@ selection rule (RESEARCH_SPEC items 15-17 plus the item 2-3 bounds):
 
 Every check evaluates to one of PASS / FAIL / NOT EVALUATED -- three states,
 because "we never measured it" must never render as either of the other two.
-Selection: among layers where every EVALUATED disqualifier passes and item 17
-passes, l* = argmax A_l. If no layer qualifies, the verdict is the spec's
-explicit stop condition: "no viable layer-level localization" (Stage 2 does
-not run).
+Every layer passing the cheap bounds and item 17 is a benchmark candidate.
+Selection waits until every candidate has MMLU and GSM8K results, then chooses
+l* = argmax A_l among candidates that pass those benchmarks. If no layer
+qualifies, the verdict is the spec's explicit stop condition: "no viable
+layer-level localization" (Stage 2 does not run).
 
 PENDING names (P-S1 / P-S2 of the sweep-driver plan, NOT yet human-ratified):
 the metric names read from the per-layer records -- mmlu_acc,
@@ -88,6 +89,10 @@ CHECK_KEYS = (
     "i15_inc", "i15_ctl", "i2_negotiation", "i2_mmlu", "i2_gsm8k",
     "i3_ppl", "i16_jsd", "i17",
 )
+CHEAP_CANDIDATE_KEYS = (
+    "i15_inc", "i15_ctl", "i2_negotiation", "i3_ppl", "i16_jsd", "i17",
+)
+CANDIDATE_BENCHMARK_KEYS = ("i2_mmlu", "i2_gsm8k")
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +119,10 @@ def _int_layer(value, context):
 def load_sweep_inputs(base, layer_inputs):
     """Load and validate the base run and the per-layer runs.
 
-    base          rows list or path for the intact run (bypassed_layer None
-                  on every row -- a bypassed row here would silently become
-                  an extra sweep layer inside figures.split_base_and_sweep,
-                  so it is refused instead).
+    base          rows list or path for the unprobed sweep state
+                  (bypassed_layer None on every row -- a bypassed row here
+                  would silently become an extra sweep layer inside
+                  figures.split_base_and_sweep, so it is refused instead).
     layer_inputs  {layer: rows-or-path}. Every row must carry the declared
                   layer in bypassed_layer: a mislabeled file would otherwise
                   fragment into a different curve point and the declared
@@ -133,16 +138,44 @@ def load_sweep_inputs(base, layer_inputs):
         if row.get("bypassed_layer") is not None:
             raise ValueError(
                 "base run contains a row with bypassed_layer=%r; the base "
-                "run must be the intact model (bypassed_layer null)"
+                "run must be unprobed (bypassed_layer null)"
                 % row.get("bypassed_layer")
             )
 
+    base_permanent = {
+        (row.get("gen_config") or {}).get("permanent_bypassed_layer")
+        for row in base_rows
+    }
+    if len(base_permanent) != 1:
+        raise ValueError(
+            "base run mixes permanent_bypassed_layer identities: %r"
+            % sorted(base_permanent, key=str)
+        )
+    permanent_layer = next(iter(base_permanent))
+    base_impls = {
+        (row.get("gen_config") or {}).get("bypass_impl") for row in base_rows
+    }
+    expected_base_impl = permanent_layer is not None
+    if (
+        len(base_impls) != 1
+        or (next(iter(base_impls)) is not None) != expected_base_impl
+    ):
+        raise ValueError(
+            "base run bypass provenance contradicts "
+            "permanent_bypassed_layer=%r" % permanent_layer
+        )
+
     layer_rows = {}
+    reference_ids = None
+    expected_probe_impl = None
     for key, source in layer_inputs.items():
         layer = _int_layer(key, "layer_inputs")
         if layer in layer_rows:
             raise ValueError("layer %d given twice in layer_inputs" % layer)
         rows = _rows(source)
+        layer_impls = set()
+        layer_permanent = set()
+        conditions = {}
         for row in rows:
             value = row.get("bypassed_layer")
             try:
@@ -157,8 +190,90 @@ def load_sweep_inputs(base, layer_inputs):
                     "rows for layer %d contain bypassed_layer=%r "
                     "(mislabeled input)" % (layer, value)
                 )
+            gen_config = row.get("gen_config") or {}
+            layer_impls.add(gen_config.get("bypass_impl"))
+            layer_permanent.add(gen_config.get("permanent_bypassed_layer"))
+            conditions.setdefault(row.get("scenario_id"), set()).add(
+                row.get("condition")
+            )
+        if rows:
+            if len(layer_impls) != 1 or next(iter(layer_impls)) is None:
+                raise ValueError(
+                    "rows for layer %d do not carry one non-null probe "
+                    "bypass_impl" % layer
+                )
+            layer_impl = next(iter(layer_impls))
+            if expected_probe_impl is None:
+                expected_probe_impl = layer_impl
+            elif layer_impl != expected_probe_impl:
+                raise ValueError(
+                    "rows for layer %d use bypass_impl %r, expected %r"
+                    % (layer, layer_impl, expected_probe_impl)
+                )
+            if permanent_layer is not None and layer_impl not in base_impls:
+                raise ValueError(
+                    "rows for layer %d use bypass_impl %r, permanent base "
+                    "uses %r" % (layer, layer_impl, next(iter(base_impls)))
+                )
+            if layer_permanent != {permanent_layer}:
+                raise ValueError(
+                    "rows for layer %d have permanent_bypassed_layer %r, "
+                    "base has %r"
+                    % (layer, sorted(layer_permanent, key=str), permanent_layer)
+                )
+            incomplete = sorted(
+                sid for sid, present in conditions.items()
+                if present != {"incentive", "control"}
+            )
+            if incomplete:
+                raise ValueError(
+                    "rows for layer %d are incomplete for scenario(s): %s"
+                    % (layer, ", ".join(str(sid) for sid in incomplete))
+                )
+            scenario_ids = set(conditions)
+            if reference_ids is None:
+                reference_ids = scenario_ids
+            elif scenario_ids != reference_ids:
+                raise ValueError(
+                    "layer %d scenario set differs from the sweep draw" % layer
+                )
         layer_rows[layer] = rows
+
+    if reference_ids is not None:
+        base_ids = {row.get("scenario_id") for row in base_rows}
+        missing = sorted(reference_ids - base_ids)
+        if missing:
+            raise ValueError(
+                "sweep base is missing scenario(s) from the layer draw: %s"
+                % ", ".join(str(sid) for sid in missing)
+            )
+        base_rows = [
+            row for row in base_rows if row.get("scenario_id") in reference_ids
+        ]
+        base_conditions = {}
+        for row in base_rows:
+            base_conditions.setdefault(row.get("scenario_id"), set()).add(
+                row.get("condition")
+            )
+        incomplete = sorted(
+            sid for sid, present in base_conditions.items()
+            if present != {"incentive", "control"}
+        )
+        if incomplete:
+            raise ValueError(
+                "restricted sweep base is incomplete for scenario(s): %s"
+                % ", ".join(str(sid) for sid in incomplete)
+            )
     return base_rows, layer_rows
+
+
+def _competence_sources(source):
+    if isinstance(source, (str, os.PathLike)):
+        return [source]
+    values = list(source)
+    if not values or isinstance(values[0], dict):
+        return [values]
+    return values
 
 
 def load_competence_records(competence_inputs):
@@ -172,22 +287,23 @@ def load_competence_records(competence_inputs):
     index = {}
     for key, source in (competence_inputs or {}).items():
         norm = BASE_KEY if key == BASE_KEY else _int_layer(key, "competence_inputs")
-        if norm in index:
-            raise ValueError("competence records given twice for %r" % norm)
-        entry = {}
-        for row in _rows(source):
-            metric = row.get("metric")
-            if metric is None:
-                continue
-            if metric in entry:
-                raise ValueError(
-                    "duplicate competence metric %r for %r" % (metric, norm)
-                )
-            entry[metric] = {
-                "value": row.get("value"),
-                "stderr": row.get("stderr"),
-                "config": row.get("config") or {},
-            }
+        entry = index.setdefault(norm, {})
+        for item in _competence_sources(source):
+            for row in _rows(item):
+                metric = row.get("metric")
+                if metric is None:
+                    continue
+                current = {
+                    "value": row.get("value"),
+                    "stderr": row.get("stderr"),
+                    "config": row.get("config") or {},
+                }
+                if metric in entry and entry[metric] != current:
+                    raise ValueError(
+                        "conflicting duplicate competence metric %r for %r"
+                        % (metric, norm)
+                    )
+                entry[metric] = current
         index[norm] = entry
     return index
 
@@ -380,12 +496,28 @@ def evaluate_sweep(base, layer_inputs, requested_layers=None,
         )
         failed = [k for k in CHECK_KEYS if checks[k]["passed"] is False]
         not_evaluated = [k for k in CHECK_KEYS if checks[k]["passed"] is None]
+        candidate = all(
+            checks[key]["passed"] is True for key in CHEAP_CANDIDATE_KEYS
+        )
         if point is None:
             status = "NO ROWS"
         elif failed:
             status = "DISQUALIFIED: " + ",".join(failed)
+        elif candidate:
+            missing_bench = [
+                key for key in CANDIDATE_BENCHMARK_KEYS
+                if checks[key]["passed"] is None
+            ]
+            status = (
+                "PENDING BENCHMARKS: " + ",".join(missing_bench)
+                if missing_bench else "VIABLE"
+            )
         elif checks["i17"]["passed"] is True:
-            status = "VIABLE"
+            missing_cheap = [
+                key for key in CHEAP_CANDIDATE_KEYS
+                if checks[key]["passed"] is None
+            ]
+            status = "PENDING MEASUREMENTS: " + ",".join(missing_cheap)
         else:
             status = "UNMEASURABLE: %s" % (point.get("reason") or "A_l_none")
         entries.append({
@@ -395,15 +527,26 @@ def evaluate_sweep(base, layer_inputs, requested_layers=None,
             "failed": failed,
             "not_evaluated": not_evaluated,
             "status": status,
+            "candidate": candidate,
             "A_l": None if point is None else point.get("A_l"),
         })
 
     pareto = figures.pareto_points(curve, damage_metric="task_competence")
     frontier = figures.pareto_frontier(pareto)
 
+    candidate_layers = [e["layer"] for e in entries if e["candidate"]]
+    incomplete = [e for e in entries if e["status"].startswith("PENDING")]
     viable = [e for e in entries if e["status"] == "VIABLE"]
-    l_star = max(viable, key=lambda e: e["A_l"]) if viable else None
-    if l_star is not None:
+    l_star = (
+        max(viable, key=lambda e: e["A_l"])
+        if viable and not incomplete else None
+    )
+    if incomplete:
+        verdict = (
+            "sweep incomplete: candidate measurements/benchmarks required "
+            "before l* selection"
+        )
+    elif l_star is not None:
         verdict = "layer %d selected as l*" % l_star["layer"]
     else:
         verdict = ("no viable layer-level localization "
@@ -413,6 +556,8 @@ def evaluate_sweep(base, layer_inputs, requested_layers=None,
         "curve": curve,
         "pareto_points": pareto,
         "frontier": frontier,
+        "candidate_layers": candidate_layers,
+        "incomplete": [entry["layer"] for entry in incomplete],
         "l_star": l_star,
         "verdict": verdict,
         "n_boot": n_boot,
@@ -510,6 +655,14 @@ def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
             )
         )
 
+    lines.append("")
+    if result["candidate_layers"]:
+        lines.append(
+            "l* benchmark candidates (cheap bounds + item 17 passed): %s"
+            % ", ".join(str(layer) for layer in result["candidate_layers"])
+        )
+    else:
+        lines.append("l* benchmark candidates: none")
     lines.append("")
     lines.append("figures summary:")
     for line in figures.curve_report(result["curve"]).splitlines():

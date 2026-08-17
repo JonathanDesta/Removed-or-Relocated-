@@ -14,15 +14,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-SWEEPDRIVER_TEST_COUNT = 8
+SWEEPDRIVER_TEST_COUNT = 10
 
 try:
     import torch
     from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
     from algoverse.metrics import load_rows
+    from algoverse import sweep
     from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
-    from algoverse.sweepdriver import COMPARED, run_layer_sweep
+    from algoverse.sweepdriver import (
+        COMPARED,
+        reconcile_permanent_bypass,
+        run_candidate_benchmarks,
+        run_layer_sweep,
+    )
 
     HAVE_STACK = True
 except ImportError:
@@ -134,16 +140,18 @@ if HAVE_STACK:
                     assert row["adapter_path"] is None
                     assert row["bypass_impl"] == BYPASS_IMPL
                     config = row["config"]
-                    assert config["probe_layer"] == layer
-                    assert config["compared"] == COMPARED
                     assert config["max_length"] == 16
                     assert config["stride"] == 8
                     assert config["n_tokens"] == probe_ids.shape[1]
-                    assert config["intact_ppl"] > 0
-                    assert isinstance(config["intact_nll_mean"], float)
                 jsd_row = next(
                     row for row in rows
                     if row["metric"] == "wikitext2_neutral_jsd"
+                )
+                assert jsd_row["config"]["probe_layer"] == layer
+                assert jsd_row["config"]["compared"] == COMPARED
+                assert jsd_row["config"]["intact_ppl"] > 0
+                assert isinstance(
+                    jsd_row["config"]["intact_nll_mean"], float
                 )
                 assert 0.0 < jsd_row["value"] <= math.log(2) + 1e-9
                 ppl_row = next(
@@ -167,6 +175,18 @@ if HAVE_STACK:
             )[0]["config"]
             assert base["value"] == first_config["intact_ppl"]
             assert base["nll_mean"] == first_config["intact_nll_mean"]
+            # Production seam: the report consumes the driver's own intact
+            # and bypassed PPL records without relaxing genuine provenance.
+            base_index = sweep.load_competence_records({
+                "base": base_rows,
+                1: load_rows(out_root / "t-l01" / "competence.jsonl"),
+            })
+            delta = sweep._bench_delta(
+                base_index["base"], base_index[1],
+                "wikitext2_ppl", 1, rise=True,
+            )
+            assert abs(delta - (base_index[1]["wikitext2_ppl"]["value"]
+                                - base["value"])) < 1e-12
         assert bypass_state(model) is None
         with torch.no_grad():
             after = model(probe_ids).logits
@@ -336,17 +356,26 @@ if HAVE_STACK:
         # sweep (it is the baseline), its own layer is skipped structurally
         # (ratified P-S4), and the manifest records the lesion as identity.
         model = _tiny_model()
+        tokenizer = ChatTokenizer()
         permanent = install_bypass(model, 1, role="permanent")
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 out_root = Path(tmp) / "sweep"
                 summary = run_layer_sweep(
-                    model, None, [1, 2, 3], out_root, "s3", "tiny-qwen",
-                    **_sweep_kwargs()
+                    model, tokenizer, [1, 2, 3], out_root, "s3", "tiny-qwen",
+                    n=2, batch_size=2, max_new_tokens=4,
+                    **_sweep_kwargs(jsd_only=False)
                 )
                 assert summary["executed"] == [2, 3]
                 assert summary["lesioned_skipped"] == [1]
                 assert summary["permanent_bypassed_layer"] == 1
+                base_rows = load_rows(summary["base_rows"])
+                assert len(base_rows) == 4
+                assert all(row["bypassed_layer"] is None for row in base_rows)
+                assert all(
+                    row["gen_config"]["permanent_bypassed_layer"] == 1
+                    for row in base_rows
+                )
                 manifest = json.loads(
                     (out_root / "sweep_manifest.json").read_text()
                 )
@@ -361,8 +390,9 @@ if HAVE_STACK:
                 intact = _tiny_model()
                 try:
                     run_layer_sweep(
-                        intact, None, [1, 2, 3], out_root, "s3",
-                        "tiny-qwen", **_sweep_kwargs()
+                        intact, tokenizer, [1, 2, 3], out_root, "s3",
+                        "tiny-qwen", n=2, batch_size=2, max_new_tokens=4,
+                        **_sweep_kwargs(jsd_only=False)
                     )
                 except ValueError as exc:
                     assert "permanent_bypassed_layer" in str(exc)
@@ -387,6 +417,68 @@ if HAVE_STACK:
                 )
         finally:
             probe.remove()
+
+    def test_explicit_permanent_reconciliation():
+        model = _tiny_model()
+        handle = reconcile_permanent_bypass(model, 1)
+        try:
+            assert bypass_state(model)["permanent"]["layer_idx"] == 1
+            assert reconcile_permanent_bypass(model, 1) is None
+            _expect_value_error(
+                lambda: reconcile_permanent_bypass(model, 2), "conflicts"
+            )
+        finally:
+            handle.remove()
+
+    def test_candidate_benchmarks_only_write_requested_metrics():
+        from unittest.mock import patch
+
+        from algoverse.utils import append_jsonl
+
+        model = _tiny_model()
+        tokenizer = ChatTokenizer()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp) / "sweep"
+            run_layer_sweep(
+                model, tokenizer, [1, 2], out_root, "bench", "tiny-qwen",
+                **_sweep_kwargs()
+            )
+
+            def fake_benchmarks(model_arg, tokenizer_arg, out_path, run_meta,
+                                batch_size=4, seed=42):
+                assert model_arg is model and tokenizer_arg is tokenizer
+                assert bypass_state(model)["probe"]["layer_idx"] == 2
+                for metric, value in (
+                    ("mmlu_acc", 0.7), ("gsm8k_exact_match", 0.6)
+                ):
+                    row = dict(run_meta)
+                    row.update({
+                        "metric": metric, "value": value, "stderr": 0.01,
+                        "config": {"limit": 1, "seed": seed},
+                    })
+                    append_jsonl(out_path, row)
+                return {"mmlu_acc": 0.7, "gsm8k_exact_match": 0.6}
+
+            with patch(
+                "algoverse.eval.run_lm_eval_benchmarks", fake_benchmarks
+            ):
+                result = run_candidate_benchmarks(
+                    model, tokenizer, [2], out_root, "bench", "tiny-qwen"
+                )
+            assert set(result["written"]) == {2}
+            rows = load_rows(out_root / "bench-l02" / "competence.jsonl")
+            assert {row["metric"] for row in rows} == {
+                "wikitext2_neutral_jsd", "wikitext2_ppl",
+                "mmlu_acc", "gsm8k_exact_match",
+            }
+            assert bypass_state(model) is None
+            (out_root / "bench-l01").rename(out_root / "removed-l01")
+            _expect_value_error(
+                lambda: run_candidate_benchmarks(
+                    model, tokenizer, [1], out_root, "bench", "tiny-qwen"
+                ),
+                "existing sweep directory",
+            )
 
 
 if __name__ == "__main__":

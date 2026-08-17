@@ -285,6 +285,86 @@ def bypass_effect(rows_base, rows_bypassed, n_boot=2000, seed=0) -> dict:
     }
 
 
+def relocation_delta_value(a_recovered, a_lesioned):
+    """δ_l from two measured bypass effects, or None for a missing side."""
+    if a_recovered is None or a_lesioned is None:
+        return None
+    return a_recovered - a_lesioned
+
+
+def relocation_delta(rows_recovered_base, rows_recovered_bypassed,
+                     rows_lesioned_base, rows_lesioned_bypassed,
+                     n_boot=2000, seed=0) -> dict:
+    """Paired Stage-3 δ_l over scenarios shared by all four runs."""
+    row_groups = {
+        "recovered_base": rows_recovered_base,
+        "recovered_bypassed": rows_recovered_bypassed,
+        "lesioned_base": rows_lesioned_base,
+        "lesioned_bypassed": rows_lesioned_bypassed,
+    }
+
+    def effects(groups):
+        tau_rb = incentive_gap(groups["recovered_base"])["tau"]
+        tau_rp = incentive_gap(groups["recovered_bypassed"])["tau"]
+        tau_lb = incentive_gap(groups["lesioned_base"])["tau"]
+        tau_lp = incentive_gap(groups["lesioned_bypassed"])["tau"]
+        if None in (tau_rb, tau_rp, tau_lb, tau_lp):
+            return None, None, None
+        a_recovered = tau_rb - tau_rp
+        a_lesioned = tau_lb - tau_lp
+        return (
+            a_recovered,
+            a_lesioned,
+            relocation_delta_value(a_recovered, a_lesioned),
+        )
+
+    grouped = {name: _group_by_scenario(rows) for name, rows in row_groups.items()}
+    common = None
+    for by_scenario in grouped.values():
+        ids = set(by_scenario)
+        common = ids if common is None else common & ids
+    common = sorted(common or [])
+    counts = {"n_scenarios_" + name: len(grouped[name]) for name in grouped}
+    if not common:
+        return {
+            "A_recovered": None,
+            "A_lesioned": None,
+            "delta_l": None,
+            "delta_ci_low": None,
+            "delta_ci_high": None,
+            "n_scenarios_common": 0,
+            "paired": False,
+            "reason": "no_shared_scenarios",
+            **counts,
+        }
+    restricted = {
+        name: [row for sid in common for row in grouped[name][sid]]
+        for name in grouped
+    }
+    a_recovered, a_lesioned, delta = effects(restricted)
+    point, low, high = bootstrap_ci(
+        row_groups,
+        lambda groups: effects(groups)[2],
+        n_boot=n_boot,
+        seed=seed,
+    )
+    paired = all(len(grouped[name]) == len(common) for name in grouped)
+    return {
+        "A_recovered": a_recovered,
+        "A_lesioned": a_lesioned,
+        "delta_l": point if delta is not None else None,
+        "delta_ci_low": low,
+        "delta_ci_high": high,
+        "n_scenarios_common": len(common),
+        "paired": paired,
+        "reason": (
+            "tau_not_computable" if delta is None
+            else None if paired else "partial_overlap"
+        ),
+        **counts,
+    }
+
+
 def recovery(rows_LD_t, rows_LC_t, rows_ID_t, rows_IC_t,
              eps=0.10, n_boot=2000, seed=0) -> dict:
     """R_t, the spec's recovery ratio at fine-tuning checkpoint t.
@@ -545,6 +625,7 @@ RUN_KEY_FIELDS = (
 
 GEN_CONFIG_KEY_FIELDS = (
     "bypass_impl",
+    "permanent_bypassed_layer",
     "quant",
     "do_sample",
     "max_new_tokens",
@@ -568,6 +649,7 @@ def gen_identity(row):
     scoring = normalized_scoring_config(gen_config)
     return (
         gen_config.get("bypass_impl"),
+        gen_config.get("permanent_bypassed_layer"),
         gen_config.get("quant"),
         gen_config.get("do_sample"),
         gen_config.get("max_new_tokens"),
@@ -580,6 +662,18 @@ def gen_identity(row):
         load_profile.get("four_bit"),
         load_profile.get("attn_implementation"),
     )
+
+
+# A temporary probe is the intervention whose effect figures compare, so the
+# intact side necessarily has no bypass implementation while the probed side
+# does. Every other generation identity field, including a permanent lesion,
+# must remain equal across the comparison.
+COMPARISON_GEN_CONFIG_KEY_FIELDS = GEN_CONFIG_KEY_FIELDS[1:]
+
+
+def comparison_gen_identity(row):
+    """Generation identity for intact-vs-probe comparisons."""
+    return gen_identity(row)[1:]
 
 
 def _run_key(row):

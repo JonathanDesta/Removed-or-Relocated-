@@ -127,11 +127,14 @@ def install_bypass(model, layer_idx, role="probe"):
 
     ``role`` (ratified carve-out, 2026-08-16): "probe" (default; the
     sweep/eval-time lesion — every pre-carve-out caller keeps its meaning)
-    or "permanent" (installed only by the Stage-2 reinstall-at-load path).
+    or "permanent" (installed by the Stage-2 reinstall-at-load path, or by
+    run_sweep's guarded explicit construction of the immediate post-ablation
+    checkpoint ``~M_D``).
     One bypass per role; a probe stacks on a permanent at a DIFFERENT
     layer; targeting the permanently-lesioned layer raises. A results
     row's ``bypassed_layer`` records the probe only — the permanent lesion
-    is checkpoint identity (train_meta.json), never a row field.
+    is checkpoint/generation identity (train_meta.json and
+    gen_config.permanent_bypassed_layer), never the row's probe field.
     """
     layers = _decoder_layers(model)
     n_layers = len(layers)

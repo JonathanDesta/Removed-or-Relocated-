@@ -75,6 +75,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-step", type=int, default=None)
     parser.add_argument("--train-seed", type=int, default=None)
     parser.add_argument("--arm", default=None)
+    parser.add_argument(
+        "--probe-scratch-dir", default=None,
+        help="local temporary directory for disk-backed float32 probe "
+             "activations (cleaned after the run; never use results/)",
+    )
     args = parser.parse_args()
 
     run_probes = args.analysis in ("probes", "all")
@@ -86,6 +91,11 @@ if __name__ == "__main__":
                 "probes need exactly one label source: --rows OR "
                 "--probe-dataset"
             )
+        if args.probe_scratch_dir:
+            scratch = Path(args.probe_scratch_dir).resolve()
+            results_root = (Path.cwd() / "results").resolve()
+            if scratch == results_root or results_root in scratch.parents:
+                parser.error("--probe-scratch-dir must not be under results/")
     elif args.rows or args.probe_dataset:
         parser.error("--rows/--probe-dataset are only used with probes")
 
@@ -163,6 +173,7 @@ if __name__ == "__main__":
             label_source = "probe_dataset:%s" % args.probe_dataset
         written = run_probe_auroc(
             model, tokenizer, examples, out_path, run_meta, label_source,
+            scratch_dir=args.probe_scratch_dir,
         )
         for layer in sorted(written):
             print("probe_auroc layer %d: %s" % (layer, written[layer]))

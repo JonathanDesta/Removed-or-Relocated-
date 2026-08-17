@@ -54,7 +54,7 @@ import math
 import os
 import random
 
-from algoverse import figures
+from algoverse import figures, metrics
 
 # The ratified R_t evaluation subset (RESEARCH_SPEC "Ratified decisions
 # 2026-08-16": T10 resolution — early/mid/final of [8, 17, 35, 70, 140, 281]).
@@ -654,7 +654,7 @@ def render_delta(curve_recovered, curve_lesioned, out_base, lesioned_layer=None,
             gap_marks.append((x, reason))
             deltas.append(None)
         else:
-            deltas.append(a_rec - a_les)
+            deltas.append(metrics.relocation_delta_value(a_rec, a_les))
 
     plt = _plt()
     fig, ax = plt.subplots()

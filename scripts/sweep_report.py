@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from algoverse.sweep import BASE_KEY, confirm_report, sweep_report
 
 
-def parse_layer_pairs(pairs, allow_base=False):
+def parse_layer_pairs(pairs, allow_base=False, merge_sources=False):
     result = {}
     for pair in pairs or []:
         key, _, path = pair.partition("=")
@@ -55,9 +55,12 @@ def parse_layer_pairs(pairs, allow_base=False):
                     "expected an integer layer%s in %r"
                     % (" or 'base'" if allow_base else "", pair)
                 )
-        if norm in result:
+        if norm in result and not merge_sources:
             raise SystemExit("key %r given twice" % key)
-        result[norm] = path
+        if merge_sources:
+            result.setdefault(norm, []).append(path)
+        else:
+            result[norm] = path
     return result
 
 
@@ -112,7 +115,9 @@ if __name__ == "__main__":
             args.base,
             parse_layer_pairs(args.layer),
             m0_competence=args.m0_competence,
-            competence_inputs=parse_layer_pairs(args.competence, allow_base=True),
+            competence_inputs=parse_layer_pairs(
+                args.competence, allow_base=True, merge_sources=True
+            ),
             item16_decision=args.item16_decision,
             n_boot=args.n_boot,
             seed=args.seed,

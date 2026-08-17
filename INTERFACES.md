@@ -29,6 +29,12 @@ valid, invalid_reason ("empty"|"too_short"|"truncated"|"refusal"|"unparseable"|n
 extraction_method, seed, train_seed, gen_config
 ```
 
+`gen_config.permanent_bypassed_layer` is `null` when evaluation has no
+permanent lesion and otherwise records the runtime-permanent lesion installed
+while evaluating the checkpoint. It is guarded generation identity. The row-level
+`bypassed_layer` continues to record only the temporary probe intervention.
+Missing values in legacy rows normalize to `null`.
+
 Rules the analysis depends on: invalid rows carry `deceptive: null` (never
 false); bypass and patch are different causal evidence and never share a
 field; resume key is `(run_id, scenario_id, condition)`. Capability metrics
@@ -62,6 +68,11 @@ task competence. `metrics.recovery(rows_LD_t, rows_LC_t, rows_ID_t,
 rows_IC_t)` implements the spec's four-arm R_t = (tau(L,D) - tau(L,C)) /
 (tau(I,D) - tau(I,C)) and returns `R_t: null` with a `reason` when the
 denominator is too small; plots must expect that.
+`metrics.relocation_delta(recovered_base, recovered_bypassed,
+lesioned_base, lesioned_bypassed)` computes the paired Stage-3
+`delta_l = A_l(recovered) - A_l(just-lesioned)` over scenarios shared by all
+four runs and returns both effects, the delta and its CI, coverage, and a
+null-with-reason when it is not measurable.
 
 ## Fine-tuning track owns
 
@@ -115,9 +126,15 @@ how a PROJECT-TRAINED checkpoint is loaded: it reads and validates the
 bypass, reinstalls it with `role="permanent"` — the ratified permanence
 rule that a lesion is a runtime hook re-installed at every load, never
 weight surgery. It returns `(model, tokenizer, meta, handle)`, handle
-being the permanent bypass or None. `run_baseline.py` uses it whenever
-the adapter carries a sidecar (its earlier blanket refusal to evaluate a
-lesioned checkpoint is retired). `trainable=True` keeps an attached
+being the permanent bypass or None. `scripts/run_sweep.py` may additionally
+install `role="permanent"` from its guarded
+`--permanent-bypassed-layer` option when constructing the immediate
+post-ablation `~M_D` from a validated project checkpoint whose training
+sidecar is intact; the explicit layer is recorded in the sweep manifest and
+in every generated row's `gen_config.permanent_bypassed_layer` rather than
+being misrepresented as a training-time lesion. `run_baseline.py` uses the
+loader whenever the adapter carries a sidecar (its earlier blanket refusal to
+evaluate a lesioned checkpoint is retired). `trainable=True` keeps an attached
 adapter's parameters trainable — required for Stage-2 continuation,
 because peft freezes adapters by default and `train_lora` refuses a
 PeftModel with no trainable parameters; the eval path keeps the frozen
@@ -148,15 +165,17 @@ produced it (`gen_config.bypass_impl`, derived from `bypass_state`), so
 dev-mode outputs can never be mistaken for publishable ones.
 
 Two-hook carve-out (added 2026-08-16 on the human's ratification of
-sweep-driver P-S4/P-S5): `role="permanent"` is installed only by the
-Stage-2 reinstall-at-load path; `role="probe"` (the default — every
-pre-existing caller keeps its meaning) is the sweep/eval-time lesion.
+sweep-driver P-S4/P-S5): `role="permanent"` is installed by the Stage-2
+reinstall-at-load path or the guarded explicit `~M_D` sweep path described
+above; `role="probe"` (the default — every pre-existing caller keeps its
+meaning) is the sweep/eval-time lesion.
 At most one bypass per role; a probe may stack on a permanent; a probe
 targeting the SAME layer as the installed permanent refuses with a
 named error (Stage-3 sweeps skip that layer and report it structurally
 null). A results row's `bypassed_layer` records the PROBE layer only;
-the permanent lesion is checkpoint identity, carried by adapter_path +
-train_meta.json's `bypassed_layer`, never by the row field.
+the permanent lesion is guarded generation identity in
+`gen_config.permanent_bypassed_layer`, never the row field. A training-time
+permanent lesion additionally remains in `train_meta.json`.
 
 ## Interp track owns
 

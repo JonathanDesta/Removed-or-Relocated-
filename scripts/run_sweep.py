@@ -35,7 +35,12 @@ from algoverse.models import (
     load_checkpoint_model,
     load_model_and_tokenizer,
 )
-from algoverse.sweepdriver import full_layer_list, run_layer_sweep
+from algoverse.sweepdriver import (
+    full_layer_list,
+    reconcile_permanent_bypass,
+    run_candidate_benchmarks,
+    run_layer_sweep,
+)
 from algoverse.tasks import llm_extract_offer
 from algoverse.train import checkpoint_meta
 
@@ -59,6 +64,15 @@ if __name__ == "__main__":
                         help="required unless --dev-calibration")
     parser.add_argument("--quant", default="4bit", choices=["4bit", "none"])
     parser.add_argument("--adapter", default=None, help="LoRA adapter dir, optional")
+    parser.add_argument(
+        "--permanent-bypassed-layer", type=int, default=None,
+        help="construct the immediate post-ablation ~M_D by installing this "
+             "guarded runtime-permanent lesion on a project checkpoint",
+    )
+    parser.add_argument(
+        "--benchmarks-only", action="store_true",
+        help="run only MMLU/GSM8K for the explicit --layers candidate list",
+    )
     parser.add_argument(
         "--layers", default="all",
         help='the chunk THIS session executes: "all" (default), "A-B", or '
@@ -108,6 +122,11 @@ if __name__ == "__main__":
             parser.error(
                 "--dev-calibration calibrates the plain DEV model; drop --adapter"
             )
+        if args.permanent_bypassed_layer is not None or args.benchmarks_only:
+            parser.error(
+                "--dev-calibration cannot construct a permanent lesion or "
+                "run candidate benchmarks"
+            )
         args.model_id = DEV_MODEL
         args.quant = "none"
         if args.out_root is None:
@@ -131,6 +150,11 @@ if __name__ == "__main__":
                 "--item16-decision is required for a research-model sweep "
                 "(item-16 tripwire); run --dev-calibration first and record "
                 "the confirm-or-revise decision"
+            )
+        if args.benchmarks_only and args.layers == "all":
+            parser.error(
+                "--benchmarks-only requires the explicit candidate list in "
+                "--layers; refusing to benchmark every layer by accident"
             )
 
     if args.llm_fallback:
@@ -210,6 +234,17 @@ if __name__ == "__main__":
         args.adapter is not None
         and (Path(args.adapter) / "train_meta.json").is_file()
     )
+    if args.permanent_bypassed_layer is not None and not has_sidecar:
+        parser.error(
+            "--permanent-bypassed-layer requires a project checkpoint with "
+            "a validated train_meta.json sidecar"
+        )
+    if args.permanent_bypassed_layer is not None and args.model_id == DEV_MODEL:
+        parser.error(
+            "--permanent-bypassed-layer is restricted to non-DEV project "
+            "checkpoints"
+        )
+    sidecar = None
     if has_sidecar:
         sidecar = checkpoint_meta(args.adapter)
         if args.checkpoint_step is None:
@@ -252,8 +287,40 @@ if __name__ == "__main__":
         model, tokenizer = load_model_and_tokenizer(
             args.model_id, quant=args.quant, adapter_path=args.adapter
         )
+        _permanent = None
+
+    if args.permanent_bypassed_layer is not None:
+        recorded = None if sidecar is None else sidecar.get("bypassed_layer")
+        if recorded is not None and recorded != args.permanent_bypassed_layer:
+            raise RuntimeError(
+                "--permanent-bypassed-layer %d contradicts train_meta.json's %d"
+                % (args.permanent_bypassed_layer, recorded)
+            )
+        if _permanent is None:
+            _permanent = reconcile_permanent_bypass(
+                model, args.permanent_bypassed_layer
+            )
+            print(
+                "PERMANENT BYPASS INSTALLED explicitly for ~M_D: layer %d"
+                % args.permanent_bypassed_layer
+            )
     layers = full_layer_list(model)
     chunk = _parse_layer_chunk(args.layers)
+
+    if args.benchmarks_only:
+        summary = run_candidate_benchmarks(
+            model, tokenizer, chunk, args.out_root, args.run_tag, args.model_id,
+            adapter_path=args.adapter, checkpoint_step=args.checkpoint_step,
+            train_seed=args.train_seed, batch_size=args.batch_size,
+            seed=args.seed,
+        )
+        print("candidate benchmarks complete: %s" % summary["written"])
+        if summary["structurally_skipped"]:
+            print(
+                "structurally skipped permanent layer: %s"
+                % summary["structurally_skipped"]
+            )
+        raise SystemExit(0)
 
     summary = run_layer_sweep(
         model, tokenizer, layers, args.out_root, args.run_tag, args.model_id,

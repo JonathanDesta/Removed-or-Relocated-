@@ -11,27 +11,30 @@ models. Per swept layer l it does two things, in this order:
    window. Its JSD lands in the layer run's competence.jsonl as a
    ``wikitext2_neutral_jsd`` row and the bypassed model's slice perplexity
    as an ordinary ``wikitext2_ppl`` row (ratified P-S1, INTERFACES
-   2026-08-16). Both rows' config records the compared identity
-   (probe_layer, "intact-vs-probe-bypassed") plus the intact model's
-   nll/ppl from the same forwards, so item 3's same-model delta can always
-   be recomputed from the layer's own file.
+   2026-08-16). The JSD config records the compared identity (probe_layer,
+   "intact-vs-probe-bypassed") plus the intact model's nll/ppl from the same
+   forwards, so item 3's same-model delta can always be recomputed from the
+   layer's own file. The PPL row uses the same recipe/provenance config as
+   the sweep's intact PPL row so the two are directly comparable.
 2. Unless jsd_only: install a probe bypass (role="probe", carve-out
    2026-08-16) and run the negotiation eval into the layer's own run
    directory. One run_id PER LAYER (D1) because the contract's resume key
    is (run_id, scenario_id, condition) and a shared run_id would collide.
 
-The intact model's negotiation baseline is NOT generated here: ratified
-P-S3 reuses the full-pool M_D rows (Gate-1's A3 run) restricted to the
-n=100 draw. The driver does record the intact model's slice perplexity once
-per sweep (out_root/base-competence.jsonl, run_id "<run_tag>-base") — it
-falls out of the first layer's pass at zero extra forward cost and is the
-reference for item 3's ppl-rise bound.
+For an intact Stage-1 sweep, the negotiation baseline is NOT generated here:
+ratified P-S3 reuses the full-pool M_D rows (Gate-1's A3 run) restricted to
+the n=100 draw. A permanently lesioned sweep instead generates its own
+same-draw unprobed baseline under ``<run_tag>-base/rows.jsonl``. Every sweep
+records its unprobed model's slice perplexity once in
+``out_root/base-competence.jsonl``; it falls out of the first layer's pass at
+zero extra forward cost and is the reference for item 3's ppl-rise bound.
 
 Layout under out_root (D1):
 
     sweep_manifest.json           write-once sweep identity, guarded on
                                   every rerun like train_manifest.json
-    base-competence.jsonl         intact wikitext2_ppl, run_id <tag>-base
+    base-competence.jsonl         unprobed wikitext2_ppl, run_id <tag>-base
+    <run_tag>-base/rows.jsonl     permanently lesioned sweep baseline only
     <run_tag>-lNN/rows.jsonl      negotiation rows, probe bypass at NN
     <run_tag>-lNN/competence.jsonl  the layer's JSD + bypassed-ppl rows
 
@@ -60,6 +63,9 @@ import json
 from pathlib import Path
 
 from algoverse.eval import (
+    WIKITEXT_DATASET_ID,
+    WIKITEXT_DATASET_REVISION,
+    _adapter_digest,
     _competence_done,
     load_wikitext_slice,
     neutral_distribution_pass,
@@ -96,6 +102,23 @@ def full_layer_list(model):
 def layer_run_id(run_tag, layer):
     """The per-layer run_id/directory name: <run_tag>-lNN (D1)."""
     return "%s-l%02d" % (run_tag, layer)
+
+
+def reconcile_permanent_bypass(model, requested_layer):
+    """Install an explicit permanent lesion, or validate an existing one."""
+    from algoverse.models import bypass_state, install_bypass
+
+    state = bypass_state(model)
+    existing = None if state is None else state.get("permanent")
+    if existing is not None:
+        layer = existing["layer_idx"]
+        if layer != requested_layer:
+            raise ValueError(
+                "explicit permanent layer %d conflicts with installed layer %d"
+                % (requested_layer, layer)
+            )
+        return None
+    return install_bypass(model, requested_layer, role="permanent")
 
 
 def _validated_layer(value, context):
@@ -164,12 +187,115 @@ def _recover_intact_values(out_root, run_tag, layers):
         if not comp_path.exists():
             continue
         for row in load_rows(comp_path):
-            if row.get("run_id") != run_id or row.get("metric") != "wikitext2_ppl":
+            if (
+                row.get("run_id") != run_id
+                or row.get("metric") != "wikitext2_neutral_jsd"
+            ):
                 continue
             config = row.get("config") or {}
             if config.get("intact_nll_mean") is not None:
                 return config["intact_nll_mean"], config["intact_ppl"]
     return None
+
+
+def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
+                             run_tag, model_id, adapter_path=None,
+                             checkpoint_step=None, train_seed=None,
+                             batch_size=4, seed=42):
+    """Run only MMLU/GSM8K for already-swept l* candidate layers."""
+    from algoverse.eval import run_lm_eval_benchmarks
+    from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
+
+    out_root = Path(out_root)
+    manifest_path = out_root / "sweep_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(
+            "candidate benchmarks require the existing sweep_manifest.json"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {
+        "model_id": model_id,
+        "adapter_path": None if adapter_path is None else str(adapter_path),
+        "checkpoint_step": checkpoint_step,
+        "train_seed": train_seed,
+        "run_tag": run_tag,
+    }
+    mismatches = [
+        field for field, value in expected.items()
+        if manifest.get(field) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "candidate benchmark sweep identity mismatch: %s"
+            % ", ".join(mismatches)
+        )
+
+    state = bypass_state(model)
+    if state is not None and state.get("probe") is not None:
+        raise ValueError("candidate benchmark model already has a probe bypass")
+    permanent = None if state is None else state.get("permanent")
+    permanent_layer = None if permanent is None else permanent["layer_idx"]
+    if permanent_layer != manifest.get("permanent_bypassed_layer"):
+        raise ValueError(
+            "candidate benchmark permanent lesion does not match sweep manifest"
+        )
+
+    allowed = set(manifest.get("layers") or [])
+    candidates = [
+        _validated_layer(layer, "candidate_layers")
+        for layer in candidate_layers
+    ]
+    if not candidates:
+        raise ValueError("candidate_layers is empty")
+    if len(set(candidates)) != len(candidates):
+        raise ValueError("candidate_layers contains duplicates")
+    outside = [layer for layer in candidates if layer not in allowed]
+    if outside:
+        raise ValueError(
+            "candidate layer(s) %r are outside the sweep manifest" % outside
+        )
+    missing_dirs = [
+        layer for layer in candidates
+        if layer != permanent_layer
+        and not (out_root / layer_run_id(run_tag, layer)).is_dir()
+    ]
+    if missing_dirs:
+        raise ValueError(
+            "candidate layer(s) %r have no existing sweep directory"
+            % missing_dirs
+        )
+
+    written = {}
+    skipped = []
+    for layer in candidates:
+        if layer == permanent_layer:
+            skipped.append(layer)
+            continue
+        run_id = layer_run_id(run_tag, layer)
+        layer_dir = out_root / run_id
+        comp_path = layer_dir / "competence.jsonl"
+        run_meta = {
+            "run_id": run_id,
+            "model_id": model_id,
+            "adapter_path": expected["adapter_path"],
+            "bypassed_layer": layer,
+            "checkpoint_step": checkpoint_step,
+            "arm": None,
+            "train_seed": train_seed,
+            "bypass_impl": BYPASS_IMPL,
+            "permanent_bypassed_layer": permanent_layer,
+        }
+        handle = install_bypass(model, layer, role="probe")
+        try:
+            written[layer] = run_lm_eval_benchmarks(
+                model, tokenizer, comp_path, run_meta,
+                batch_size=batch_size, seed=seed,
+            )
+        finally:
+            handle.remove()
+        after = bypass_state(model)
+        assert after is None or after.get("probe") is None
+    return {"written": written, "structurally_skipped": skipped}
 
 
 def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
@@ -293,6 +419,18 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         ids = load_wikitext_slice(tokenizer, n_tokens)
     slice_tokens = int(ids.shape[1])
 
+    config_obj = getattr(model, "config", None)
+    ppl_config = {
+        "n_tokens": slice_tokens,
+        "max_length": max_length,
+        "stride": stride,
+        "dataset_id": WIKITEXT_DATASET_ID,
+        "dataset_revision": WIKITEXT_DATASET_REVISION,
+        "attn_implementation": getattr(config_obj, "_attn_implementation", None),
+        "model_revision": getattr(config_obj, "_commit_hash", None),
+        "adapter_digest": _adapter_digest(adapter_path),
+        "permanent_bypassed_layer": permanent_layer,
+    }
     base_meta = {
         "run_id": "%s-base" % run_tag,
         "model_id": model_id,
@@ -301,14 +439,12 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "checkpoint_step": checkpoint_step,
         "arm": None,
         "train_seed": train_seed,
-        "bypass_impl": None,
-    }
-    base_config = {
-        "n_tokens": slice_tokens, "max_length": max_length, "stride": stride,
+        "bypass_impl": None if permanent_layer is None else BYPASS_IMPL,
+        "permanent_bypassed_layer": permanent_layer,
     }
     base_path = out_root / "base-competence.jsonl"
     base_done = _competence_done(
-        base_path, base_meta, "wikitext2_ppl", base_config
+        base_path, base_meta, "wikitext2_ppl", ppl_config
     )
 
     def _write_base(nll_mean_intact, ppl_intact):
@@ -318,7 +454,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
             "value": ppl_intact,
             "stderr": None,
             "nll_mean": nll_mean_intact,
-            "config": dict(base_config),
+            "config": dict(ppl_config),
         })
         append_jsonl(base_path, base_row)
         print(
@@ -327,10 +463,29 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         )
 
     scenarios = None
+    base_rows_path = None
     if not jsd_only:
         # Selection split only, the ratified sweep draw — exactly what
         # run_baseline.py does for a sweep leg.
         scenarios = get_scenarios("selection", n=n, seed=scenario_seed)
+        if permanent_layer is not None:
+            base_run_id = "%s-base" % run_tag
+            base_rows_path = out_root / base_run_id / "rows.jsonl"
+            if not _negotiation_complete(
+                base_rows_path, base_run_id, scenarios
+            ):
+                run_negotiation_eval(
+                    model, tokenizer, scenarios,
+                    run_id=base_run_id, out_path=base_rows_path,
+                    model_id=model_id, adapter_path=adapter_path,
+                    bypassed_layer=None, checkpoint_step=checkpoint_step,
+                    arm=None, batch_size=batch_size,
+                    max_new_tokens=max_new_tokens, seed=seed,
+                    train_seed=train_seed, quant_label=quant_label,
+                    use_llm_fallback=use_llm_fallback,
+                    llm_provider=llm_provider, llm_model=llm_model,
+                    scenario_seed=scenario_seed, n=n,
+                )
 
     executed = []
     skipped = []
@@ -362,23 +517,23 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
             "arm": None,
             "train_seed": train_seed,
             "bypass_impl": BYPASS_IMPL,
+            "permanent_bypassed_layer": permanent_layer,
         }
-        # Identity known BEFORE the pass runs; the recorded config
-        # additionally carries the intact-side results (intact_nll_mean,
+        # JSD identity is known before the pass runs. Its recorded config
+        # additionally carries the intact-side results (intact_nll_mean and
         # intact_ppl), which _competence_done ignores on resume because it
-        # compares only the fields the current request asserts.
-        resume_config = {
-            "n_tokens": slice_tokens,
-            "max_length": max_length,
-            "stride": stride,
+        # compares only the fields the current request asserts. PPL uses the
+        # canonical recipe/provenance-only config on both sides.
+        jsd_resume_config = {
+            **ppl_config,
             "probe_layer": layer,
             "compared": COMPARED,
         }
         jsd_done = _competence_done(
-            comp_path, run_meta, "wikitext2_neutral_jsd", resume_config
+            comp_path, run_meta, "wikitext2_neutral_jsd", jsd_resume_config
         )
         ppl_done = _competence_done(
-            comp_path, run_meta, "wikitext2_ppl", resume_config
+            comp_path, run_meta, "wikitext2_ppl", ppl_config
         )
         rows_done = jsd_only or _negotiation_complete(
             rows_path, run_id, scenarios
@@ -396,17 +551,17 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                 model, tokenizer, layer, n_tokens=n_tokens,
                 max_length=max_length, stride=stride, token_ids=ids,
             )
-            config = dict(resume_config)
-            config["n_tokens"] = result["n_tokens"]
-            config["intact_nll_mean"] = result["nll_mean_intact"]
-            config["intact_ppl"] = result["ppl_intact"]
+            jsd_config = dict(jsd_resume_config)
+            jsd_config["n_tokens"] = result["n_tokens"]
+            jsd_config["intact_nll_mean"] = result["nll_mean_intact"]
+            jsd_config["intact_ppl"] = result["ppl_intact"]
             if not jsd_done:
                 row = dict(run_meta)
                 row.update({
                     "metric": "wikitext2_neutral_jsd",
                     "value": result["jsd_mean_nats"],
                     "stderr": None,
-                    "config": config,
+                    "config": jsd_config,
                 })
                 append_jsonl(comp_path, row)
             if not ppl_done:
@@ -416,7 +571,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     "value": result["ppl_bypassed"],
                     "stderr": None,
                     "nll_mean": result["nll_mean_bypassed"],
-                    "config": config,
+                    "config": dict(ppl_config),
                 })
                 append_jsonl(comp_path, row)
             print(
@@ -478,5 +633,6 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "permanent_bypassed_layer": permanent_layer,
         "layer_dirs": layer_dirs,
         "base_competence": str(base_path) if base_done else None,
+        "base_rows": None if base_rows_path is None else str(base_rows_path),
         "manifest": str(manifest_path),
     }

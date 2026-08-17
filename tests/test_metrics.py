@@ -629,6 +629,7 @@ def test_summarize_runs_groups_by_generation_profile():
     }
     variants = [
         ("bypass_impl", "block-output-identity-hook/v1", None, {}),
+        ("permanent_bypassed_layer", 7, None, {}),
         ("quant", "4bit", None, {}),
         ("do_sample", True, None, {}),
         ("max_new_tokens", 128, None, {}),
@@ -676,7 +677,8 @@ def test_summarize_runs_legacy_identity_fields_group_as_none():
     assert len(summaries) == 1
     summary = summaries[0]
     for field in (
-        "run_id", "split", "seed", "train_seed", "bypass_impl", "quant",
+        "run_id", "split", "seed", "train_seed", "bypass_impl",
+        "permanent_bypassed_layer", "quant",
         "do_sample", "max_new_tokens", "model_revision", "adapter_digest",
         "llm_provider", "llm_model", "dtype", "device_type", "four_bit",
         "attn_implementation",

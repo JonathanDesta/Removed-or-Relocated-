@@ -73,12 +73,15 @@ DEFAULT_MATCH_FIELDS = tuple(
 
 def _match_key(row, match_fields):
     """Identity of the comparison a row belongs to, ignoring the intervention."""
-    return tuple(row.get(f) for f in match_fields) + metrics.gen_identity(row)
+    return (
+        tuple(row.get(f) for f in match_fields)
+        + metrics.comparison_gen_identity(row)
+    )
 
 
 def _mismatch_fields(key_a, key_b, match_fields):
     """Which named fields differ between two match keys."""
-    names = tuple(match_fields) + metrics.GEN_CONFIG_KEY_FIELDS
+    names = tuple(match_fields) + metrics.COMPARISON_GEN_CONFIG_KEY_FIELDS
     return [n for n, a, b in zip(names, key_a, key_b) if a != b]
 
 

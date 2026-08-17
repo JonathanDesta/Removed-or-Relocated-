@@ -79,7 +79,7 @@ We then create a layer-wise $\delta$-curve displaying the difference in causal r
 
 Alongside that, we identify the layer $k$ in $M_t^{L,D}$ that is the most causally related to deception. We check whether the layer(s) with concentrated recovery is the layer(s) with the greatest causal relation to deception in $M_t^{L,D}$. If they are the same, then deception was entirely relocated. Otherwise, deception was only partially relocated.
 
-We then investigate the causal relation to deception within $\widetilde{M}_D$ of the layer(s) most causally related to deception within $M_t^{L,D}$ and the layer(s) with the greatest change in causal relation to deception. For each layer, if the causal relation in $\widetilde{M}_D$ is near-zero, the deception capability was reconstructed in that layer. Otherwise, the deception capability was strengthened from a pre-existing pathway.
+We then investigate the causal relation to deception within $\widetilde{M}_D$ of the layer(s) most causally related to deception within $M_t^{L,D}$ and the layer(s) attaining the largest signed $\delta_\ell=A_\ell(M_t^{L,D})-A_\ell(\widetilde{M}_D)$. This is the maximum signed difference, not the maximum absolute magnitude; every exact tie is retained. For each layer, if the causal relation in $\widetilde{M}_D$ is near-zero, the deception capability was reconstructed in that layer. Otherwise, the deception capability was strengthened from a pre-existing pathway.
 
 \paragraph{Statistical analysis}
 Layer selection and probe fitting use separate data from final evaluation. We split related prompt variants by their underlying scenario to prevent leakage. We report confidence intervals obtained by bootstrapping scenarios and variation across fine-tuning seeds. 
@@ -984,3 +984,12 @@ Third sitting, same day — corroboration details, ratified by the human
   uniform use across ALL publishable runs, per-row `extraction_method`
   recording of the served model string, disk cache. Extractors are
   never mixed across runs.
+
+## Ratified decisions (2026-08-17, implementation revision)
+
+- **Stage-3 greatest-change semantics: maximum signed delta.** For
+  `delta_l = A_l(recovered) - A_l(just-lesioned)`, the review set contains
+  every layer attaining `max_l delta_l`. It does not maximize
+  `abs(delta_l)`, so if every delta is negative it selects the least-negative
+  value. Every exact tie is retained. This resolves holistic critique 2 N3
+  before any Stage-3 relocation result exists.

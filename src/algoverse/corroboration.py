@@ -407,8 +407,8 @@ def _known_n_layers(model):
 # ---------------------------------------------------------------------------
 
 def run_probe_auroc(model, tokenizer, examples, out_path, run_meta,
-                    label_source, extra_config=None,
-                    _capture=None, _probe=None):
+                    label_source, extra_config=None, scratch_dir=None,
+                    _capture=None, _probe=None, _disk_capture=None):
     """Per-layer probe AUROC rows (analysis "probe_auroc") with resume.
 
     examples: [{"text", "response_start", "label", "group"}] from
@@ -436,6 +436,7 @@ def run_probe_auroc(model, tokenizer, examples, out_path, run_meta,
     out_path = Path(out_path)
 
     n_layers = _known_n_layers(model)
+    pending = None
     if n_layers is not None:
         pending = [
             layer for layer in range(n_layers)
@@ -449,50 +450,66 @@ def run_probe_auroc(model, tokenizer, examples, out_path, run_meta,
             )
             return {}
 
-    if _capture is None:
-        from algoverse.interp import response_token_resid_by_layer as _capture
     if _probe is None:
         from algoverse.interp import probe_layer as _probe
-
-    features = _capture(
-        model, tokenizer,
-        [example["text"] for example in examples],
-        [example["response_start"] for example in examples],
-    )
     labels = [example["label"] for example in examples]
     groups = [example["group"] for example in examples]
 
-    written = {}
-    for layer, layer_features in enumerate(features):
-        if _interp_done(out_path, run_meta, "probe_auroc", layer, config):
-            continue
-        if layer_features is None:
-            excluded_config = dict(config)
-            excluded_config["excluded_bypassed_layer"] = True
+    def consume(features):
+        written = {}
+        for layer, layer_features in enumerate(features):
+            if _interp_done(out_path, run_meta, "probe_auroc", layer, config):
+                continue
+            if layer_features is None:
+                excluded_config = dict(config)
+                excluded_config["excluded_bypassed_layer"] = True
+                write_interp_row(
+                    out_path, run_meta, "probe_auroc", layer,
+                    None, None, None, excluded_config,
+                    extra={"accuracy": None},
+                )
+                written[layer] = None
+                continue
+            _, result = _probe(layer_features, labels, groups)
+            ci_low, ci_high = result.get("auroc_ci") or (None, None)
+            layer_config = config
+            if ci_low is None or ci_high is None:
+                ci_low = ci_high = None
+                layer_config = dict(config)
+                layer_config["ci"] = (
+                    "null: group bootstrap degenerate (too few resamplable "
+                    "held-out scenario groups)"
+                )
             write_interp_row(
                 out_path, run_meta, "probe_auroc", layer,
-                None, None, None, excluded_config,
-                extra={"accuracy": None},
+                result["auroc"], ci_low, ci_high, layer_config,
+                extra={"accuracy": result["accuracy"]},
             )
-            written[layer] = None
-            continue
-        _, result = _probe(layer_features, labels, groups)
-        ci_low, ci_high = result.get("auroc_ci") or (None, None)
-        layer_config = config
-        if ci_low is None or ci_high is None:
-            ci_low = ci_high = None
-            layer_config = dict(config)
-            layer_config["ci"] = (
-                "null: group bootstrap degenerate (too few resamplable "
-                "held-out scenario groups)"
-            )
-        write_interp_row(
-            out_path, run_meta, "probe_auroc", layer,
-            result["auroc"], ci_low, ci_high, layer_config,
-            extra={"accuracy": result["accuracy"]},
+            written[layer] = result["auroc"]
+        return written
+
+    texts = [example["text"] for example in examples]
+    starts = [example["response_start"] for example in examples]
+    if _capture is not None:
+        return consume(_capture(model, tokenizer, texts, starts))
+
+    import tempfile
+
+    from algoverse.interp import (
+        iter_disk_backed_residual_layers,
+        response_token_resid_by_layer_to_disk,
+    )
+
+    capture = _disk_capture or response_token_resid_by_layer_to_disk
+    if scratch_dir is not None:
+        Path(scratch_dir).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="algoverse-probes-", dir=scratch_dir
+    ) as tmp:
+        metadata = capture(
+            model, tokenizer, texts, starts, tmp, layers=pending
         )
-        written[layer] = result["auroc"]
-    return written
+        return consume(iter_disk_backed_residual_layers(metadata))
 
 
 def run_attention_jsd(model, tokenizer, texts_incentive, texts_control,

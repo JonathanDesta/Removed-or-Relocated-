@@ -781,6 +781,7 @@ if HAVE_ML_STACK:
                 "run_id": "bench-run",
                 "model_id": "tiny-qwen",
                 "adapter_path": None,
+                "permanent_bypassed_layer": None,
             }
             with tempfile.TemporaryDirectory() as tmp:
                 out_path = Path(tmp) / "competence.jsonl"
@@ -802,10 +803,26 @@ if HAVE_ML_STACK:
             assert config["attn_implementation"] == "eager"
             assert config["model_revision"] == model.config._commit_hash
             assert config["adapter_digest"] is None
+            assert config["permanent_bypassed_layer"] is None
+            assert row["permanent_bypassed_layer"] is None
             assert config["batch_size"] == 3
             assert config["seed"] == 7
             assert config["lm_eval"] is True
             assert "limit" in config
+
+        permanent = install_bypass(model, 2, role="permanent")
+        try:
+            try:
+                run_lm_eval_benchmarks(
+                    model, object(), Path("unused.jsonl"),
+                    {**run_meta, "permanent_bypassed_layer": 1},
+                )
+            except ValueError as exc:
+                assert "permanent lesion mismatch" in str(exc)
+            else:
+                raise AssertionError("competence accepted false lesion provenance")
+        finally:
+            permanent.remove()
 
     def test_derive_gen_config_independent_oracle():
         model = _tiny_model(FAMILIES[0])
@@ -814,13 +831,21 @@ if HAVE_ML_STACK:
         assert intact["load_profile"]["dtype"] == "torch.float32"
         assert intact["load_profile"]["four_bit"] is False
         assert intact["bypass_impl"] is None
+        assert intact["permanent_bypassed_layer"] is None
         assert intact["model_revision"] is None
         assert intact["adapter_digest"] is None
 
         handle = install_bypass(model, 1)
         bypassed = _derive_gen_config(model)
         assert bypassed["bypass_impl"] == BYPASS_IMPL
+        assert bypassed["permanent_bypassed_layer"] is None
         handle.remove()
+
+        permanent = install_bypass(model, 2, role="permanent")
+        permanent_config = _derive_gen_config(model)
+        assert permanent_config["bypass_impl"] == BYPASS_IMPL
+        assert permanent_config["permanent_bypassed_layer"] == 2
+        permanent.remove()
 
         with tempfile.TemporaryDirectory() as tmp:
             empty_adapter_dir = Path(tmp) / "empty-adapter"
