@@ -28,14 +28,11 @@ Probe label sources:
    (did not lie), grouped by scenario_id, with prompts re-rendered
    canonically (labeled_incentive_rows + probe_examples_from_rows).
 2. An explicit probe-dataset JSONL, one {"text", "label", "group"} object
-   per line (load_probe_dataset); the whole text is the scored span.
-
-PENDING — Instructed-Pairs training source: the spec's probe brief trains
-on the Instructed-Pairs dataset (Azaria & Mitchell via
-zou2023representation), but that dataset's acquisition and format are NOT
-pinned anywhere in this repo. Building it is an open input ESCALATED to
-the human, not improvised here; once it exists it flows in through label
-source 2 above.
+   per line (load_probe_dataset); an optional per-row response_start
+   token index narrows the scored span, else the whole text is scored.
+   The Instructed-Pairs dataset (Azaria & Mitchell via
+   zou2023representation; construction ratified — see
+   scripts/build_instructed_pairs.py) flows in through this source.
 
 On a bypassed model (probe or permanent role) the bypassed layer's row is
 written as a structural null: value/ci null with
@@ -203,14 +200,16 @@ def probe_examples_from_rows(rows, tokenizer):
 def load_probe_dataset(path):
     """Probe label source 2: a JSONL of {"text", "label", "group"} objects.
 
-    The whole text is the scored span (response_start 0) — appropriate for
-    statement-style probe data where there is no prompt/response split.
-    Labels must be JSON true/false; anything else raises, because a
-    truthiness coercion here would silently relabel data. Strict parsing:
-    a malformed line is an error, not a skip — this is training data, not
-    a torn results log. PENDING: the Instructed-Pairs build that would
-    feed this loader is an open input escalated to the human (see module
-    docstring); this loader does not define or fetch that dataset.
+    An optional per-row `response_start` (a non-negative token index under
+    the capture helper's add_special_tokens=False tokenization) marks
+    where the scored span begins — the Instructed-Pairs builder
+    (scripts/build_instructed_pairs.py) records the statement span this
+    way. Absent (or 0), the whole text is the scored span, the previous
+    behavior, appropriate for statement-style data with no
+    prompt/response split. Labels must be JSON true/false; anything else
+    raises, because a truthiness coercion here would silently relabel
+    data. Strict parsing: a malformed line is an error, not a skip — this
+    is training data, not a torn results log.
     """
     path = Path(path)
     examples = []
@@ -249,9 +248,19 @@ def load_probe_dataset(path):
                     "%s line %d label must be JSON true/false, got %r"
                     % (path, lineno, record["label"])
                 )
+            response_start = record.get("response_start", 0)
+            # bool is an int subclass; a JSON true here is a malformed
+            # span, not token index 1.
+            if (isinstance(response_start, bool)
+                    or not isinstance(response_start, int)
+                    or response_start < 0):
+                raise ValueError(
+                    "%s line %d response_start must be a non-negative "
+                    "integer, got %r" % (path, lineno, response_start)
+                )
             examples.append({
                 "text": record["text"],
-                "response_start": 0,
+                "response_start": response_start,
                 "label": record["label"],
                 "group": record["group"],
             })
