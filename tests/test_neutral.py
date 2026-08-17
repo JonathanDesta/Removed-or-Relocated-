@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-NEUTRAL_TEST_COUNT = 6
+NEUTRAL_TEST_COUNT = 7
 
 try:
     import torch
@@ -120,20 +120,37 @@ if HAVE_STACK:
         assert result["nll_mean_bypassed"] != result["nll_mean_intact"]
         assert result["ppl_intact"] > 0 and result["ppl_bypassed"] > 0
 
-    def test_refuses_preinstalled_bypass():
+    def test_refuses_preinstalled_probe():
         model = _tiny_model()
-        handle = install_bypass(model, 1)
+        handle = install_bypass(model, 1, role="probe")
         try:
             neutral_distribution_pass(
                 model, None, layer_idx=2, max_length=32, stride=16,
                 token_ids=_ids(),
             )
         except RuntimeError as exc:
-            assert "intact" in str(exc)
+            assert "probe" in str(exc)
         else:
-            raise AssertionError("pre-installed bypass did not raise")
+            raise AssertionError("pre-installed probe did not raise")
         finally:
             handle.remove()
+
+    def test_permanent_lesion_is_the_baseline():
+        # Stage-3 semantics: a permanent lesion is part of the baseline —
+        # the pass probes another layer ON TOP of it and leaves it alone.
+        model = _tiny_model()
+        permanent = install_bypass(model, 1, role="permanent")
+        try:
+            result = neutral_distribution_pass(
+                model, None, layer_idx=2, max_length=32, stride=16,
+                token_ids=_ids(),
+            )
+            assert 0.0 < result["jsd_mean_nats"] <= math.log(2) + 1e-9
+            state = bypass_state(model)
+            assert state["permanent"]["layer_idx"] == 1
+            assert state["probe"] is None
+        finally:
+            permanent.remove()
 
     def test_invalid_layer_leaves_model_intact():
         model = _tiny_model()

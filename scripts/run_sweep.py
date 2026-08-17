@@ -30,7 +30,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.models import DEV_MODEL, load_model_and_tokenizer
+from algoverse.models import (
+    DEV_MODEL,
+    load_checkpoint_model,
+    load_model_and_tokenizer,
+)
 from algoverse.sweepdriver import full_layer_list, run_layer_sweep
 from algoverse.tasks import llm_extract_offer
 from algoverse.train import checkpoint_meta
@@ -202,15 +206,12 @@ if __name__ == "__main__":
             % (args.adapter, " and ".join(omitted))
         )
 
-    if args.adapter is not None and (Path(args.adapter) / "train_meta.json").is_file():
+    has_sidecar = (
+        args.adapter is not None
+        and (Path(args.adapter) / "train_meta.json").is_file()
+    )
+    if has_sidecar:
         sidecar = checkpoint_meta(args.adapter)
-        if sidecar.get("bypassed_layer") is not None:
-            raise RuntimeError(
-                "checkpoint %s was trained under a permanent bypass of layer "
-                "%s; evaluating it requires the reinstall-at-load loader "
-                "path, the Stage-2/loader plan's deliverable"
-                % (args.adapter, sidecar["bypassed_layer"])
-            )
         if args.checkpoint_step is None:
             args.checkpoint_step = sidecar["checkpoint_step"]
             print(
@@ -235,9 +236,22 @@ if __name__ == "__main__":
             )
 
     # Load ONCE; the driver loops layers on this single model object (D2).
-    model, tokenizer = load_model_and_tokenizer(
-        args.model_id, quant=args.quant, adapter_path=args.adapter
-    )
+    if has_sidecar:
+        # Reinstall-at-load: a Stage-3 sweep of a lesioned checkpoint runs
+        # with the permanent lesion in place (it IS the baseline); the
+        # driver skips the lesioned layer itself (ratified P-S4).
+        model, tokenizer, _meta, _permanent = load_checkpoint_model(
+            args.model_id, args.adapter, quant=args.quant
+        )
+        if _permanent is not None:
+            print(
+                "PERMANENT BYPASS REINSTALLED from train_meta.json: layer %d"
+                % _meta["bypassed_layer"]
+            )
+    else:
+        model, tokenizer = load_model_and_tokenizer(
+            args.model_id, quant=args.quant, adapter_path=args.adapter
+        )
     layers = full_layer_list(model)
     chunk = _parse_layer_chunk(args.layers)
 

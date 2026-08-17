@@ -78,7 +78,7 @@ COMPARED = "intact-vs-probe-bypassed"
 SWEEP_MANIFEST_FIELDS = (
     "model_id", "adapter_path", "checkpoint_step", "train_seed",
     "quant_label", "layers", "n", "scenario_seed", "item16_decision",
-    "dev", "run_tag",
+    "dev", "run_tag", "permanent_bypassed_layer",
 )
 
 
@@ -228,6 +228,23 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
             "sweep-driver plan D5). Run --dev-calibration first."
         )
 
+    # Stage-3 support: a permanently lesioned checkpoint sweeps with its
+    # lesion IN PLACE (the lesion is the baseline; carve-out ratified
+    # 2026-08-16). A pre-installed probe, by contrast, is a caller bug.
+    from algoverse.models import bypass_state as _bypass_state
+
+    entry_state = _bypass_state(model)
+    if entry_state is not None and entry_state.get("probe") is not None:
+        raise ValueError(
+            "a probe bypass is already installed (layer %s); the sweep "
+            "driver owns probe install/remove"
+            % entry_state["probe"]["layer_idx"]
+        )
+    permanent = (
+        None if entry_state is None else entry_state.get("permanent")
+    )
+    permanent_layer = None if permanent is None else permanent["layer_idx"]
+
     layers = [_validated_layer(layer, "layers") for layer in layers]
     if len(set(layers)) != len(layers):
         raise ValueError("layers contains duplicate indices: %r" % (layers,))
@@ -256,6 +273,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "item16_decision": item16_decision,
         "dev": bool(dev),
         "run_tag": run_tag,
+        "permanent_bypassed_layer": permanent_layer,
     }
     manifest_path = out_root / "sweep_manifest.json"
     if manifest_path.is_file():
@@ -316,8 +334,20 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
 
     executed = []
     skipped = []
+    lesioned_skipped = []
     layer_dirs = {}
     for layer in chunk:
+        if layer == permanent_layer:
+            # Ratified P-S4: probing the permanently-lesioned layer would
+            # measure an identity (its output is already discarded), so the
+            # driver skips it and the report treats it as structurally
+            # null. Recorded in the summary, never silently dropped.
+            lesioned_skipped.append(layer)
+            print(
+                "layer %02d: permanently lesioned — structurally null, "
+                "skipped (P-S4)" % layer
+            )
+            continue
         run_id = layer_run_id(run_tag, layer)
         layer_dir = out_root / run_id
         layer_dirs[layer] = str(layer_dir)
@@ -416,9 +446,20 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                 )
             finally:
                 handle.remove()
-        assert bypass_state(model) is None, (
-            "model is not intact after sweeping layer %d" % layer
+        state_after = bypass_state(model)
+        probe_after = (
+            None if state_after is None else state_after.get("probe")
         )
+        live_permanent = (
+            None if state_after is None else state_after.get("permanent")
+        )
+        assert probe_after is None, (
+            "probe still installed after sweeping layer %d" % layer
+        )
+        assert (
+            (None if live_permanent is None else live_permanent["layer_idx"])
+            == permanent_layer
+        ), "permanent lesion changed while sweeping layer %d" % layer
 
     if not base_done:
         recovered = _recover_intact_values(out_root, run_tag, layers)
@@ -433,6 +474,8 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "chunk": list(chunk),
         "executed": executed,
         "skipped": skipped,
+        "lesioned_skipped": lesioned_skipped,
+        "permanent_bypassed_layer": permanent_layer,
         "layer_dirs": layer_dirs,
         "base_competence": str(base_path) if base_done else None,
         "manifest": str(manifest_path),

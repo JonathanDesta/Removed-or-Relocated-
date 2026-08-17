@@ -1076,9 +1076,14 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
     NLL/perplexity on the slice at zero extra cost — the bypassed ppl is
     item 3's per-layer disqualifier input.
 
-    The model must be INTACT on entry (this function owns install/remove
-    for the probe and restores the model even on failure); a pre-installed
-    bypass raises rather than silently measuring the wrong lesion.
+    No PROBE may be installed on entry (this function owns probe
+    install/remove and restores the model even on failure). A PERMANENT
+    lesion is allowed and becomes part of the baseline: for a Stage-3
+    sweep on a lesioned checkpoint, "intact" means the checkpoint as
+    loaded — lesion included — and the pass measures the probe's
+    divergence on top of it (same-model deltas, item 16's discipline).
+    Probing the permanently-lesioned layer itself refuses inside
+    install_bypass (ratified P-S4); callers skip that layer.
 
     `token_ids` overrides the WikiText slice for tests only. Recording of
     the returned values into results files is owned by the sweep driver
@@ -1092,15 +1097,12 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
 
     from algoverse.models import bypass_state, install_bypass
 
-    if bypass_state(model) is not None:
-        state = bypass_state(model)
+    state = bypass_state(model)
+    if state is not None and state.get("probe") is not None:
         raise RuntimeError(
-            "neutral_distribution_pass needs an intact model; a bypass is "
-            "already installed at layer %s (%s). The pass owns its own "
-            "probe install/remove." % (
-                [m["layer_idx"] for m in state.values() if m is not None],
-                [m["role"] for m in state.values() if m is not None],
-            )
+            "neutral_distribution_pass owns its own probe install/remove; "
+            "a probe bypass is already installed at layer %s"
+            % state["probe"]["layer_idx"]
         )
 
     device = next(model.parameters()).device

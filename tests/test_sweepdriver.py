@@ -6,6 +6,7 @@ so run_negotiation_eval's real code path executes on CPU.
 
 Run: ~/.venvs/colab-local/bin/python tests/test_sweepdriver.py
 """
+import json
 import math
 import sys
 import tempfile
@@ -13,14 +14,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-SWEEPDRIVER_TEST_COUNT = 6
+SWEEPDRIVER_TEST_COUNT = 8
 
 try:
     import torch
     from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
     from algoverse.metrics import load_rows
-    from algoverse.models import BYPASS_IMPL, bypass_state
+    from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
     from algoverse.sweepdriver import COMPARED, run_layer_sweep
 
     HAVE_STACK = True
@@ -328,6 +329,64 @@ if HAVE_STACK:
                 ),
                 "chunk",
             )
+
+
+    def test_lesioned_checkpoint_sweep_skips_its_layer():
+        # Stage-3 shape: the permanent lesion stays installed for the whole
+        # sweep (it is the baseline), its own layer is skipped structurally
+        # (ratified P-S4), and the manifest records the lesion as identity.
+        model = _tiny_model()
+        permanent = install_bypass(model, 1, role="permanent")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out_root = Path(tmp) / "sweep"
+                summary = run_layer_sweep(
+                    model, None, [1, 2, 3], out_root, "s3", "tiny-qwen",
+                    **_sweep_kwargs()
+                )
+                assert summary["executed"] == [2, 3]
+                assert summary["lesioned_skipped"] == [1]
+                assert summary["permanent_bypassed_layer"] == 1
+                manifest = json.loads(
+                    (out_root / "sweep_manifest.json").read_text()
+                )
+                assert manifest["permanent_bypassed_layer"] == 1
+                assert not (out_root / "s3-l01").exists()
+                # The lesion survived the whole sweep.
+                state = bypass_state(model)
+                assert state["permanent"]["layer_idx"] == 1
+                assert state["probe"] is None
+                # Rerunning an INTACT model against this manifest refuses:
+                # the lesion is sweep identity.
+                intact = _tiny_model()
+                try:
+                    run_layer_sweep(
+                        intact, None, [1, 2, 3], out_root, "s3",
+                        "tiny-qwen", **_sweep_kwargs()
+                    )
+                except ValueError as exc:
+                    assert "permanent_bypassed_layer" in str(exc)
+                else:
+                    raise AssertionError(
+                        "intact rerun against a lesioned manifest passed"
+                    )
+        finally:
+            permanent.remove()
+
+    def test_preinstalled_probe_refused():
+        model = _tiny_model()
+        probe = install_bypass(model, 2, role="probe")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                _expect_value_error(
+                    lambda: run_layer_sweep(
+                        model, None, [1, 2], Path(tmp) / "sweep", "t",
+                        "tiny-qwen", **_sweep_kwargs()
+                    ),
+                    "probe",
+                )
+        finally:
+            probe.remove()
 
 
 if __name__ == "__main__":
