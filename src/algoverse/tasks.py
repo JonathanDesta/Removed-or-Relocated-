@@ -550,27 +550,30 @@ EXTRACTION_INSTRUCTION = (
 )
 
 
-def llm_extract_offer(response_text, provider="anthropic", model=None,
+def _llm_json_request(instruction, text, provider="anthropic", model=None,
                       cache_dir=None, return_model=False, raise_errors=False):
-    """Ask a small LLM to read the claimed offer out of a free-form reply.
+    """One JSON-answering LLM call with the shared disk cache.
 
-    Returns a float, the string "NONE", or None if extraction failed for any
-    reason (unknown provider, no package, no key, API error, unparseable
-    reply). With return_model=True, returns ``(value, response_model)`` so
-    scored rows can record the model identifier the API actually returned.
-    Failures normally return None so the row stays unparseable and counts as
-    invalid. ``raise_errors=True`` is reserved for the runner's startup probe,
-    where the original API/parsing error is needed before generation begins.
-    The extractor never judges deception; it only reads a number.
+    The provider plumbing behind llm_extract_offer, extracted so sibling
+    environments (insider.llm_classify_report) reuse the call and cache
+    discipline instead of cloning ~60 lines of it. Returns the reply's
+    parsed JSON object (a dict), or None on any failure (unknown provider,
+    no package, no key, API error, unparseable reply, reply without a
+    model identifier); with return_model=True returns
+    ``(parsed, response_model)``. ``raise_errors=True`` is reserved for
+    the runners' startup probes.
 
-    Extractions are cached on disk, keyed by provider + model + the sha256
-    of the extraction prompt + text, so re-scoring never re-pays for the same
-    extraction, stays deterministic, and changing either the model or prompt
-    never silently reuses stale answers. cache_dir=None uses
-    DEFAULT_EXTRACTION_CACHE; the cache is always on.
+    Requests are cached on disk, keyed by provider + model + the sha256 of
+    instruction + text, so re-scoring never re-pays for the same call,
+    stays deterministic, and changing either the model or the instruction
+    never silently reuses stale answers (different extractors can never
+    collide even in one cache dir). Entries store the JSON payload plus
+    the served response_model; entries without one are re-fetched.
+    cache_dir=None uses DEFAULT_EXTRACTION_CACHE; the cache is always on.
     """
     from pathlib import Path
 
+    text = text or ""
     model = model or DEFAULT_EXTRACTION_MODELS.get(provider)
     if model is None:
         if raise_errors:
@@ -580,19 +583,20 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
     if cache_dir is None:
         cache_dir = DEFAULT_EXTRACTION_CACHE
     key = hashlib.sha256(
-        (
-            "%s|%s|%s|%s"
-            % (provider, model, EXTRACTION_INSTRUCTION, response_text or "")
-        ).encode("utf-8")
+        ("%s|%s|%s|%s" % (provider, model, instruction, text)).encode("utf-8")
     ).hexdigest()
     cache_path = Path(cache_dir) / ("%s.json" % key)
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text())
-            result = cached.get("claimed_offer")
             response_model = cached.get("response_model")
             if response_model is not None:
-                return (result, response_model) if return_model else result
+                parsed = {
+                    field: value
+                    for field, value in cached.items()
+                    if field != "response_model"
+                }
+                return (parsed, response_model) if return_model else parsed
         except Exception:
             pass  # corrupt cache entry, just re-extract
 
@@ -604,8 +608,8 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
             message = client.messages.create(
                 model=model,
                 max_tokens=100,
-                system=EXTRACTION_INSTRUCTION,
-                messages=[{"role": "user", "content": response_text}],
+                system=instruction,
+                messages=[{"role": "user", "content": text}],
             )
             reply = message.content[0].text.strip()
             response_model = message.model
@@ -624,8 +628,8 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": EXTRACTION_INSTRUCTION},
-                    {"role": "user", "content": response_text},
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": text},
                 ],
                 **request_kwargs,
             )
@@ -641,14 +645,9 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
         if reply.startswith("json"):
             reply = reply[4:].strip()
         parsed = json.loads(reply)
-        value = parsed.get("claimed_offer")
-        if isinstance(value, (int, float)):
-            result = float(value)
-        elif value == "NONE":
-            result = "NONE"
-        else:
-            result = None
-        if result is not None and not response_model:
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM reply is not a JSON object: %r" % reply)
+        if not response_model:
             raise RuntimeError("LLM extraction response omitted its model identifier")
     except Exception:
         if raise_errors:
@@ -657,10 +656,45 @@ def llm_extract_offer(response_text, provider="anthropic", model=None,
 
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps({
-            "claimed_offer": result,
-            "response_model": response_model,
-        }))
+        cache_path.write_text(json.dumps(
+            dict(parsed, response_model=response_model)
+        ))
     except Exception:
         pass  # cache write failure must never break scoring
+    return (parsed, response_model) if return_model else parsed
+
+
+def llm_extract_offer(response_text, provider="anthropic", model=None,
+                      cache_dir=None, return_model=False, raise_errors=False):
+    """Ask a small LLM to read the claimed offer out of a free-form reply.
+
+    Returns a float, the string "NONE", or None if extraction failed for any
+    reason (unknown provider, no package, no key, API error, unparseable
+    reply). With return_model=True, returns ``(value, response_model)`` so
+    scored rows can record the model identifier the API actually returned.
+    Failures normally return None so the row stays unparseable and counts as
+    invalid. ``raise_errors=True`` is reserved for the runner's startup probe,
+    where the original API/parsing error is needed before generation begins.
+    The extractor never judges deception; it only reads a number.
+
+    The provider call and disk cache live in _llm_json_request (shared with
+    the insider environment's classifier); this function owns only the
+    negotiation instruction and the claimed_offer interpretation.
+    """
+    parsed, response_model = _llm_json_request(
+        EXTRACTION_INSTRUCTION,
+        response_text,
+        provider=provider,
+        model=model,
+        cache_dir=cache_dir,
+        return_model=True,
+        raise_errors=raise_errors,
+    )
+    value = None if parsed is None else parsed.get("claimed_offer")
+    if isinstance(value, (int, float)):
+        result = float(value)
+    elif value == "NONE":
+        result = "NONE"
+    else:
+        result = None
     return (result, response_model) if return_model else result

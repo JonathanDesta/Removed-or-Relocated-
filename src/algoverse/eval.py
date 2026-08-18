@@ -175,12 +175,18 @@ def _manifest_record(run_id, scenarios, conditions, scenario_seed=None, n=None):
 
 
 def _scenario_params(scenario):
-    """The persisted scenario payload whose equality protects resume."""
+    """The persisted scenario payload whose equality protects resume.
+
+    Generic over environments: every scenario field except the derived
+    scenario_id/split. For negotiation's four-key scenarios this produces
+    the identical dict (same keys, same insertion order) as the previous
+    explicit field list, so existing rows' resume and identity guards are
+    unaffected; insider scenarios flow through with their own params.
+    """
     return {
-        "company_offer": scenario["company_offer"],
-        "true_outside_offer": scenario["true_outside_offer"],
-        "role": scenario["role"],
-        "company": scenario["company"],
+        field: value
+        for field, value in scenario.items()
+        if field not in ("scenario_id", "split")
     }
 
 
@@ -305,7 +311,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          batch_size=4, max_new_tokens=256, do_sample=False,
                          seed=42, train_seed=None, resume=True, quant_label=None,
                          use_llm_fallback=False, llm_provider="anthropic",
-                         llm_model=None, scenario_seed=None, n=None) -> list:
+                         llm_model=None, scenario_seed=None, n=None,
+                         render_fn=None, score_fn=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
 
     For every scenario x condition: render the prompt, generate, score,
@@ -313,6 +320,15 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     (default), (run_id, scenario_id, condition) triples already in the
     file are skipped, so re-running after a crash continues where it left
     off and re-running a finished job generates nothing.
+
+    render_fn/score_fn generalize the row machinery to sibling
+    environments: None (the default, every existing caller) means the
+    negotiation pair render_messages/score_response; the insider
+    environment passes insider.render_insider_messages /
+    insider.score_insider_response, which share the exact call signatures.
+    Everything else — manifest sidecar, resume key, identity guards,
+    gen_config derivation, system-fold probe, append-before-next-batch —
+    is one shared code path.
 
     Patch/checkpoint/arm fields are caller-supplied bookkeeping. Bypass
     bookkeeping is cross-checked against the hook actually installed on the
@@ -323,6 +339,10 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     Returns every row for this run_id (previously existing + newly made).
     """
     _validate_arm(arm)
+    if render_fn is None:
+        render_fn = render_messages
+    if score_fn is None:
+        score_fn = score_response
 
     from algoverse.metrics import load_rows, normalized_scoring_config
     from algoverse.models import probe_bypassed_layer
@@ -344,7 +364,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     set_seed(seed)
     system_fold = False
     if tokenizer is not None and scenarios and conditions:
-        probe = render_messages(scenarios[0], conditions[0])
+        probe = render_fn(scenarios[0], conditions[0])
         system_fold = _system_fold_needed(tokenizer, probe)
         if system_fold:
             print(
@@ -506,7 +526,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     for start in range(0, len(todo), batch_size):
         chunk = todo[start:start + batch_size]
         messages = [
-            render_messages(scenario, condition) for scenario, condition in chunk
+            render_fn(scenario, condition) for scenario, condition in chunk
         ]
         if system_fold:
             messages = [fold_system_into_user(item) for item in messages]
@@ -516,7 +536,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
             batch_size=batch_size,
         )
         for (scenario, condition), (response_text, hit_max) in zip(chunk, generations):
-            scoring = score_response(
+            scoring = score_fn(
                 scenario, condition, response_text,
                 hit_max_tokens=hit_max,
                 use_llm_fallback=use_llm_fallback,

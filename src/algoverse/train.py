@@ -1566,6 +1566,50 @@ def checkpoint_meta(adapter_dir) -> dict:
     return meta
 
 
+def adopt_checkpoint_identity(adapter_path, checkpoint_step, train_seed):
+    """Adopt (checkpoint_step, train_seed) from a checkpoint's sidecar.
+
+    run_baseline.py's sidecar adoption/contradiction logic, extracted for
+    the insider driver (scripts/run_insider.py): when adapter_path carries
+    a train_meta.json, a None checkpoint_step/train_seed is adopted from
+    it (printed loudly) and a passed value contradicting it raises a named
+    RuntimeError; an adapter without a sidecar, or no adapter at all,
+    passes both values through unchanged. Returns
+    (checkpoint_step, train_seed, has_sidecar); has_sidecar tells the
+    caller to load through load_checkpoint_model (reinstall-at-load).
+    run_baseline.py itself keeps its inline copy for now — it is the live
+    Gate-1 script; converging it on this helper is recorded post-draft
+    cleanup (planning/insider-trading.md section 5).
+    """
+    has_sidecar = (
+        adapter_path is not None
+        and (Path(adapter_path) / "train_meta.json").is_file()
+    )
+    if not has_sidecar:
+        return checkpoint_step, train_seed, False
+    sidecar = checkpoint_meta(adapter_path)
+    if checkpoint_step is None:
+        checkpoint_step = sidecar["checkpoint_step"]
+        print(
+            "CHECKPOINT STEP adopted from train_meta.json: %s"
+            % checkpoint_step
+        )
+    elif checkpoint_step != sidecar["checkpoint_step"]:
+        raise RuntimeError(
+            "--checkpoint-step %s contradicts train_meta.json's %s"
+            % (checkpoint_step, sidecar["checkpoint_step"])
+        )
+    if train_seed is None:
+        train_seed = sidecar["train_seed"]
+        print("TRAIN SEED adopted from train_meta.json: %s" % train_seed)
+    elif train_seed != sidecar["train_seed"]:
+        raise RuntimeError(
+            "--train-seed %s contradicts train_meta.json's %s"
+            % (train_seed, sidecar["train_seed"])
+        )
+    return checkpoint_step, train_seed, True
+
+
 def read_train_log(path) -> list:
     """Read train_log.jsonl, keeping the LAST row per step, sorted by step.
 
