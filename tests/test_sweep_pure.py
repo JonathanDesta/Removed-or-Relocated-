@@ -521,6 +521,31 @@ def test_paths_load_like_row_lists():
     assert report == from_lists
 
 
+def test_bench_delta_still_enforces_adapter_digest_within_model():
+    # Gate 1 exempts adapter_digest, because M_0 is adapter-less and M_D
+    # always carries one. A sweep instead compares the intact and bypassed
+    # forms of ONE checkpoint, where a digest mismatch means two different
+    # checkpoints were compared -- a real defect that must still raise.
+    def entry(value, digest):
+        return {"mmlu_acc": {"value": value, "stderr": 0.01, "config": {
+            "limit": 400, "seed": 42, "adapter_digest": digest,
+        }}}
+
+    raised = False
+    try:
+        sweep._bench_delta(entry(0.80, "digest-a"), entry(0.78, "digest-b"),
+                           "mmlu_acc", 5)
+    except ValueError as exc:
+        raised = True
+        assert "config mismatch" in str(exc), str(exc)
+    assert raised, "sweep must still refuse a digest mismatch between arms"
+
+    # Matching digests still compute the delta normally.
+    delta = sweep._bench_delta(entry(0.80, "digest-a"), entry(0.78, "digest-a"),
+                               "mmlu_acc", 5)
+    assert abs(delta - 0.02) < 1e-9, delta
+
+
 if __name__ == "__main__":
     import traceback
 

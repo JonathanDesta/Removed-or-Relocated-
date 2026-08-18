@@ -416,12 +416,20 @@ def test_gate1_publishability_helpers_reject_incomplete_inputs():
     for field, value in (
         ("attn_implementation", "sdpa"),
         ("model_revision", "different"),
-        ("adapter_digest", "different"),
     ):
         provenance = _benchmark_map()
         provenance["M_D"]["mmlu_acc"]["config"][field] = value
         errors = _gate1_benchmark_errors(provenance)
         assert any("mmlu_acc" in error for error in errors), (field, errors)
+
+    # adapter_digest is the one provenance field that differs by
+    # CONSTRUCTION: M_0 is adapter-less and M_D always carries a LoRA.
+    # Enforcing it here made the gate unsatisfiable for every real
+    # M_0/M_D pair, so cross-model comparison exempts it. Within-model
+    # comparisons still enforce it -- see test_sweep_pure.py.
+    digest_only = _benchmark_map()
+    digest_only["M_D"]["mmlu_acc"]["config"]["adapter_digest"] = "different"
+    assert not _gate1_benchmark_errors(digest_only)
 
 
 def test_gate1_report_wires_pool_defects_to_incomplete():
@@ -510,6 +518,45 @@ def _report_with_competence_rows(competence_rows):
         return gate1_report(
             paths, competence_paths=competence_paths, n_boot=40, seed=0
         )
+
+
+def _digest_case_report(config_mutations):
+    """Gate-1 report where M_D's benchmark configs carry the given changes."""
+    negotiation = {
+        "M_0": _full_gate_rows("m0", 0),
+        "M_D": _full_gate_rows("md", len(get_scenarios("selection", n=None))),
+    }
+    bench = _benchmark_map()
+    for metric, changes in config_mutations.items():
+        bench["M_D"][metric]["config"].update(changes)
+    return _report_with_competence_rows({
+        name: _bound_competence_rows(negotiation[name], bench[name])
+        for name in ("M_0", "M_D")
+    })
+
+
+def test_gate1_report_tolerates_adapter_digest_difference():
+    # M_0 is adapter-less and M_D always carries a LoRA, so adapter_digest
+    # differs on EVERY real Gate-1 pair. That is provenance, not a
+    # comparability defect, and must never force INCOMPLETE on its own.
+    report = _digest_case_report({
+        metric: {"adapter_digest": "a" * 64}
+        for metric in ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
+    })
+    assert "benchmark config mismatch" not in report, report
+    assert "DECISION: PASS" in report, report
+
+
+def test_gate1_report_still_rejects_real_benchmark_config_difference():
+    # The exemption is narrow: a genuine "how it was measured" difference
+    # still blocks the gate, even alongside the expected digest difference.
+    report = _digest_case_report({
+        "mmlu_acc": {"adapter_digest": "a" * 64, "seed": 7},
+        "gsm8k_exact_match": {"adapter_digest": "a" * 64},
+        "wikitext2_ppl": {"adapter_digest": "a" * 64},
+    })
+    assert "mmlu_acc benchmark config mismatch" in report, report
+    assert "DECISION: INCOMPLETE" in report, report
 
 
 def test_gate1_report_binds_unique_non_null_competence_rows():

@@ -1259,7 +1259,7 @@ def _gate1_pool_errors(rows_by_name):
 
 def _gate1_benchmark_errors(bench, reference="M_0"):
     """Return missing or incomparable benchmark-input defects."""
-    from algoverse.metrics import comparable_metric_config
+    from algoverse.metrics import cross_model_metric_config
 
     metrics = ("mmlu_acc", "gsm8k_exact_match", "wikitext2_ppl")
     errors = []
@@ -1274,9 +1274,9 @@ def _gate1_benchmark_errors(bench, reference="M_0"):
         for metric in metrics:
             if metric not in bench[reference] or metric not in bench["M_D"]:
                 continue
-            if comparable_metric_config(
+            if cross_model_metric_config(
                 bench[reference][metric]
-            ) != comparable_metric_config(
+            ) != cross_model_metric_config(
                 bench["M_D"][metric]
             ):
                 errors.append("%s benchmark config mismatch" % metric)

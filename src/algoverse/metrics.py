@@ -44,6 +44,25 @@ def comparable_metric_config(item):
     return {key: value for key, value in config.items() if key != "batch_size"}
 
 
+# Fields that identify WHICH artifact was measured rather than HOW.
+# Gate 1 compares an adapter-LESS M_0 against an adapter-CARRYING M_D, so
+# adapter_digest differs there by construction: it is provenance, not
+# comparability. Within-model comparisons (the layer sweep, pareto points)
+# deliberately keep enforcing it via comparable_metric_config — there, a
+# digest mismatch really does mean two different checkpoints were compared,
+# which is a genuine defect.
+CROSS_MODEL_PROVENANCE_FIELDS = frozenset({"adapter_digest"})
+
+
+def cross_model_metric_config(item):
+    """Comparability projection for comparisons ACROSS models (Gate 1)."""
+    config = comparable_metric_config(item)
+    if not isinstance(config, dict):
+        return config
+    return {key: value for key, value in config.items()
+            if key not in CROSS_MODEL_PROVENANCE_FIELDS}
+
+
 # ---------------------------------------------------------------------------
 # Row I/O and filtering
 # ---------------------------------------------------------------------------
@@ -528,7 +547,7 @@ def gate1_decision(md_gain, md_competence, m0_competence, mc_gap=None,
                     publishability_errors.append(
                         "%s benchmark provenance/config is missing" % metric
                     )
-                elif comparable_metric_config(base_item) != comparable_metric_config(md_item):
+                elif cross_model_metric_config(base_item) != cross_model_metric_config(md_item):
                     publishability_errors.append(
                         "%s benchmark config mismatch" % metric
                     )
