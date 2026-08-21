@@ -47,9 +47,13 @@ means the module's own fixed pair; the insider environment passes
 per-file sha256s, condition→file mapping, and digests of the appended
 trade-turn template, the basis vocabularies, and the classifier instruction,
 each computed from the constants themselves so it cannot drift. It is guarded
-generation identity and is also recorded in the run manifest sidecar. Missing
-values in legacy rows and manifests normalize to `null`, so runs written
-before the field existed resume unchanged.
+generation identity and is also recorded in the run manifest sidecar, and it
+joins `metrics.summarize_runs`' derived generation-identity group key (and the
+paired-comparison key figures uses), so analysis cannot pool what the resume
+guard refuses to mix; the fingerprint dict is canonicalized to sorted JSON
+there because identity tuples are dict keys. Missing values in legacy rows and
+manifests normalize to `null`, so runs written before the field existed resume
+and group exactly as before.
 
 Rules the analysis depends on: invalid rows carry `deceptive: null` (never
 false); bypass and patch are different causal evidence and never share a

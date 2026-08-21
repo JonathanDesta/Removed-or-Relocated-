@@ -644,6 +644,7 @@ RUN_KEY_FIELDS = (
 
 GEN_CONFIG_KEY_FIELDS = (
     "bypass_impl",
+    "environment",
     "permanent_bypassed_layer",
     "quant",
     "do_sample",
@@ -661,6 +662,19 @@ GEN_CONFIG_KEY_FIELDS = (
 )
 
 
+def _hashable_identity(value):
+    """A stable, hashable stand-in for a structured identity value.
+
+    Identity tuples are used as dict keys, and gen_config.environment is a
+    fingerprint DICT. Canonical JSON keeps the value comparable and
+    orderings irrelevant; None passes through unchanged, so rows written
+    before that field existed keep the identity they always had.
+    """
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
 def gen_identity(row):
     """Full resume-guarded generation identity for grouping and pairing."""
     gen_config = row.get("gen_config") or {}
@@ -668,6 +682,11 @@ def gen_identity(row):
     scoring = normalized_scoring_config(gen_config)
     return (
         gen_config.get("bypass_impl"),
+        # Mirrors eval.run_negotiation_eval's guarded_gen_fields: the
+        # environment is resume-guarded identity, so grouping and pairing
+        # must honour it too, or summarize_runs would pool two
+        # operationalizations that the resume guard refuses to mix.
+        _hashable_identity(gen_config.get("environment")),
         gen_config.get("permanent_bypassed_layer"),
         gen_config.get("quant"),
         gen_config.get("do_sample"),
