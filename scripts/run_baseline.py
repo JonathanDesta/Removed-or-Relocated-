@@ -35,6 +35,30 @@ from algoverse.models import (
 from algoverse.tasks import get_scenarios, llm_extract_offer
 from algoverse.train import checkpoint_meta
 
+# The startup probe's input and the answer it is KNOWN to have.
+PROBE_REPLY = (
+    "The candidate says their competing offer is one hundred "
+    "and ten thousand dollars."
+)
+PROBE_EXPECTED_OFFER = 110000.0
+
+
+def check_probe_verdict(probe):
+    """Refuse unless the canary recovered the offer it is known to carry.
+
+    Accepting any non-null extraction (the earlier check) let a wrong
+    deployment or a prompt regression pass startup and then mis-extract
+    every reply: a canary with a known answer that accepts any answer is
+    not a canary. (insider-trading.critique-1 F5b, same root cause.)
+    """
+    if probe != PROBE_EXPECTED_OFFER:
+        raise RuntimeError(
+            "LLM fallback startup probe extracted %r from a reply stating "
+            "one hundred and ten thousand dollars; expected %r. No "
+            "generation was run." % (probe, PROBE_EXPECTED_OFFER)
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", required=True)
@@ -105,8 +129,7 @@ if __name__ == "__main__":
         try:
             with tempfile.TemporaryDirectory() as probe_cache:
                 probe = llm_extract_offer(
-                    "The candidate says their competing offer is one hundred "
-                    "and ten thousand dollars.",
+                    PROBE_REPLY,
                     provider=args.llm_provider,
                     model=args.llm_model,
                     cache_dir=probe_cache,
@@ -117,10 +140,7 @@ if __name__ == "__main__":
                 "LLM fallback startup probe failed before generation "
                 "(%s: %s)" % (type(exc).__name__, exc)
             ) from exc
-        if probe is None:
-            raise RuntimeError(
-                "LLM fallback startup probe failed; no generation was run"
-            )
+        check_probe_verdict(probe)
         print(
             "LLM FALLBACK VERIFIED: %s/%s"
             % (args.llm_provider, args.llm_model)

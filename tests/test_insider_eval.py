@@ -23,6 +23,7 @@ try:
 
     from algoverse.eval import ROW_FIELDS, run_negotiation_eval
     from algoverse.insider import (
+        ENVIRONMENT_FINGERPRINT,
         INSIDER_SPLIT,
         get_insider_scenarios,
         render_insider_messages,
@@ -95,6 +96,7 @@ if HAVE_STACK:
             "max_new_tokens": 8,
             "render_fn": render_insider_messages,
             "score_fn": score_insider_response,
+            "environment": ENVIRONMENT_FINGERPRINT,
         }
         options.update(overrides)
         return run_negotiation_eval(model, tokenizer, scenarios, **options)
@@ -162,6 +164,82 @@ if HAVE_STACK:
                 raised = True
                 assert "scenario_params" in str(exc)
             assert raised, "changed scenario_params was accepted"
+
+    def test_rows_and_manifest_record_the_environment_fingerprint():
+        model = _tiny_model()
+        tokenizer = InsiderChatTokenizer()
+        scenarios = get_insider_scenarios(n=2, seed=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "rows.jsonl"
+            rows = _run(model, tokenizer, scenarios, out_path)
+            for row in rows:
+                fingerprint = row["gen_config"]["environment"]
+                assert fingerprint == ENVIRONMENT_FINGERPRINT
+                # Self-describing: the row names the scaffold pair and the
+                # grader that produced it, not merely "insider".
+                assert fingerprint["environment"] == "insider"
+                assert fingerprint["scaffold_commit"].startswith("370fdc9f")
+                for key in ("trade_turn_sha256", "basis_vocab_sha256",
+                            "classify_instruction_sha256"):
+                    assert len(fingerprint[key]) == 64, key
+            manifest = load_rows(out_path.with_suffix(".manifest.jsonl"))
+            assert manifest[0]["environment"] == ENVIRONMENT_FINGERPRINT
+
+    def test_resume_refuses_after_the_environment_changes():
+        # The F6 scenario: a run interrupted part-way, then resumed after a
+        # grader or scaffold change. scenario_ids, scenario_params, model
+        # identity and LLM settings all still match, so nothing else in the
+        # guard notices.
+        model = _tiny_model()
+        tokenizer = InsiderChatTokenizer()
+        scenarios = get_insider_scenarios(n=2, seed=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "rows.jsonl"
+            _run(model, tokenizer, scenarios, out_path)
+
+            revised = dict(
+                ENVIRONMENT_FINGERPRINT,
+                classify_instruction_sha256="0" * 64,
+            )
+            raised = False
+            try:
+                _run(model, tokenizer, scenarios, out_path,
+                     environment=revised)
+            except ValueError as exc:
+                raised = True
+                assert "environment" in str(exc), str(exc)
+            assert raised, "a changed environment fingerprint was accepted"
+
+    def test_legacy_rows_without_the_field_still_resume():
+        # Rows and manifests written before gen_config.environment existed
+        # must keep resuming: absence normalizes to None, exactly like
+        # system_fold. Simulated by stripping the field from what is on
+        # disk, then resuming a run that passes environment=None.
+        model = _tiny_model()
+        tokenizer = InsiderChatTokenizer()
+        scenarios = get_insider_scenarios(n=2, seed=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "rows.jsonl"
+            manifest_path = out_path.with_suffix(".manifest.jsonl")
+            _run(model, tokenizer, scenarios, out_path, environment=None)
+
+            for path, drop_from_gen_config in (
+                (out_path, True), (manifest_path, False)
+            ):
+                records = load_rows(path)
+                for record in records:
+                    if drop_from_gen_config:
+                        record["gen_config"].pop("environment", None)
+                    else:
+                        record.pop("environment", None)
+                path.write_text(
+                    "".join(json.dumps(r) + "\n" for r in records)
+                )
+
+            rows = _run(model, tokenizer, scenarios, out_path,
+                        environment=None)
+            assert len(rows) == 4
+            assert len(load_rows(out_path)) == 4  # nothing regenerated
 
 
 if __name__ == "__main__":

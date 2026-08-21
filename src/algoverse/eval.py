@@ -106,7 +106,7 @@ def _four_bit(model) -> bool:
 def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        use_llm_fallback=False, llm_provider="anthropic",
                        llm_model=None, do_sample=False, max_new_tokens=256,
-                       batch_size=4, system_fold=False):
+                       batch_size=4, system_fold=False, environment=None):
     """Derive generation and provenance identity from the live model."""
     from algoverse.models import bypass_impl_string, bypass_state
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
@@ -135,6 +135,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         "batch_size": batch_size,
         "system_fold": bool(system_fold),
         "quant": quant_label,
+        "environment": environment,
         "bypass_impl": bypass_impl_string(model),
         "permanent_bypassed_layer": (
             None if permanent is None else permanent["layer_idx"]
@@ -159,7 +160,8 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
     }
 
 
-def _manifest_record(run_id, scenarios, conditions, scenario_seed=None, n=None):
+def _manifest_record(run_id, scenarios, conditions, scenario_seed=None, n=None,
+                     environment=None):
     """Canonical request identity stored beside a rows JSONL file."""
     splits = {scenario.get("split") for scenario in scenarios}
     if len(splits) > 1:
@@ -171,6 +173,7 @@ def _manifest_record(run_id, scenarios, conditions, scenario_seed=None, n=None):
         "split": next(iter(splits)) if splits else None,
         "scenario_seed": scenario_seed,
         "n": n,
+        "environment": environment,
     }
 
 
@@ -312,7 +315,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          seed=42, train_seed=None, resume=True, quant_label=None,
                          use_llm_fallback=False, llm_provider="anthropic",
                          llm_model=None, scenario_seed=None, n=None,
-                         render_fn=None, score_fn=None) -> list:
+                         render_fn=None, score_fn=None, environment=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
 
     For every scenario x condition: render the prompt, generate, score,
@@ -329,6 +332,16 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     Everything else — manifest sidecar, resume key, identity guards,
     gen_config derivation, system-fold probe, append-before-next-batch —
     is one shared code path.
+
+    `environment` is the caller's fingerprint of THAT pair (e.g.
+    insider.ENVIRONMENT_FINGERPRINT): render_fn/score_fn change the prompt
+    the model sees and the label its response receives, so they are
+    methodological run identity. It is stamped into gen_config and the
+    manifest and guarded on resume, so a run cannot silently pool two
+    operationalizations under one run_id. None (the default, and every
+    negotiation caller) means the module's own fixed pair; missing values
+    in rows and manifests written before this field existed normalize to
+    None, so those runs resume unchanged.
 
     Patch/checkpoint/arm fields are caller-supplied bookkeeping. Bypass
     bookkeeping is cross-checked against the hook actually installed on the
@@ -383,13 +396,15 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         max_new_tokens=max_new_tokens,
         batch_size=batch_size,
         system_fold=system_fold,
+        environment=environment,
     )
 
     all_rows = load_rows(out_path) if out_path.exists() else []
     existing = [row for row in all_rows if row.get("run_id") == run_id]
 
     current_manifest = _manifest_record(
-        run_id, scenarios, conditions, scenario_seed=scenario_seed, n=n
+        run_id, scenarios, conditions, scenario_seed=scenario_seed, n=n,
+        environment=environment,
     )
     manifest_path = out_path.with_suffix(".manifest.jsonl")
     manifest_rows = load_rows(manifest_path) if manifest_path.exists() else []
@@ -404,6 +419,12 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
             ):
                 if field not in record or record.get(field) != current_manifest[field]:
                     manifest_mismatches.add(field)
+            # "environment" post-dates the earlier manifests, so absence
+            # normalizes to None instead of counting as a mismatch — the
+            # same rule gen_config's system_fold uses. A manifest that HAS
+            # it must still agree.
+            if record.get("environment") != current_manifest["environment"]:
+                manifest_mismatches.add("environment")
         if manifest_mismatches:
             raise ValueError(
                 "run manifest mismatch for run_id %r: %s"
@@ -430,6 +451,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     }
     guarded_gen_fields = (
         "bypass_impl",
+        "environment",
         "permanent_bypassed_layer",
         "do_sample",
         "max_new_tokens",

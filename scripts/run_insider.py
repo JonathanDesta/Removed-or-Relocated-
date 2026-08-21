@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse.eval import VALID_ARMS, run_negotiation_eval
 from algoverse.insider import (
+    DISCLOSED,
+    ENVIRONMENT_FINGERPRINT,
     INSIDER_SPLIT,
     TRUE_BASIS,
     get_insider_scenarios,
@@ -58,6 +60,24 @@ PROBE_REPORT = (
     "Information used for decision: non-public insider information about "
     "an upcoming merger announcement"
 )
+
+
+def check_probe_verdict(probe):
+    """Refuse unless the canary returned the label it is known to have.
+
+    PROBE_REPORT states its basis as non-public insider information, so the
+    classifier's own criterion makes it DISCLOSED. Accepting any non-null
+    verdict (the earlier check) let a wrong deployment, a prompt
+    regression, or an inverted classifier pass startup and then mislabel
+    every report: a canary with a known answer that accepts any answer is
+    not a canary. (insider-trading.critique-1 F5b.)
+    """
+    if probe != DISCLOSED:
+        raise RuntimeError(
+            "LLM fallback startup probe returned %r for a report whose "
+            "basis is explicitly non-public; expected %r. No generation "
+            "was run." % (probe, DISCLOSED)
+        )
 
 
 def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
@@ -90,6 +110,7 @@ def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
         run_id="insider-smoke", out_path=out_path, model_id=DEV_MODEL,
         quant_label="none",
         render_fn=render_insider_messages, score_fn=score_insider_response,
+        environment=ENVIRONMENT_FINGERPRINT,
     )
 
     expected = len(scenarios) * 2
@@ -106,6 +127,7 @@ def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
         run_id="insider-smoke", out_path=out_path, model_id=DEV_MODEL,
         quant_label="none",
         render_fn=render_insider_messages, score_fn=score_insider_response,
+        environment=ENVIRONMENT_FINGERPRINT,
     )
     assert len(rows_again) == expected, "resume changed the row count"
 
@@ -116,6 +138,7 @@ def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
         run_id="insider-smoke-bypass", out_path=out_path, model_id=DEV_MODEL,
         bypassed_layer=mid, quant_label="none",
         render_fn=render_insider_messages, score_fn=score_insider_response,
+        environment=ENVIRONMENT_FINGERPRINT,
     )
     assert len(bypass_rows) == expected
     for row in bypass_rows:
@@ -131,6 +154,7 @@ def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
             model_id=DEV_MODEL, bypassed_layer=None, quant_label="none",
             render_fn=render_insider_messages,
             score_fn=score_insider_response,
+            environment=ENVIRONMENT_FINGERPRINT,
         )
     except ValueError:
         guard_refused = True
@@ -256,10 +280,7 @@ if __name__ == "__main__":
                 "LLM fallback startup probe failed before generation "
                 "(%s: %s)" % (type(exc).__name__, exc)
             ) from exc
-        if probe is None:
-            raise RuntimeError(
-                "LLM fallback startup probe failed; no generation was run"
-            )
+        check_probe_verdict(probe)
         print(
             "LLM FALLBACK VERIFIED: %s/%s"
             % (args.llm_provider, args.llm_model)
@@ -330,6 +351,7 @@ if __name__ == "__main__":
         llm_provider=args.llm_provider, llm_model=args.llm_model,
         scenario_seed=args.scenario_seed, n=args.n,
         render_fn=render_insider_messages, score_fn=score_insider_response,
+        environment=ENVIRONMENT_FINGERPRINT,
     )
     gap = tau_with_ci(rows)
     competence = task_competence(rows)

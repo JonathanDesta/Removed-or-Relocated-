@@ -35,6 +35,22 @@ while evaluating the checkpoint. It is guarded generation identity. The row-leve
 `bypassed_layer` continues to record only the temporary probe intervention.
 Missing values in legacy rows normalize to `null`.
 
+`gen_config.environment` (added 2026-08-20 on the human's authorization —
+insider-trading.critique-1 F6) fingerprints WHICH environment produced the row.
+`run_negotiation_eval` takes `render_fn`/`score_fn`, so the prompt the model
+sees and the label its response receives are run inputs, not fixed properties
+of the eval module; without recording them a run resumed after a method change
+pools two operationalizations under one run_id, and a copied `rows.jsonl`
+cannot say which prompts or grader made it. `null` (every negotiation run)
+means the module's own fixed pair; the insider environment passes
+`insider.ENVIRONMENT_FINGERPRINT` — environment name, pinned scaffold commit,
+per-file sha256s, condition→file mapping, and digests of the appended
+trade-turn template, the basis vocabularies, and the classifier instruction,
+each computed from the constants themselves so it cannot drift. It is guarded
+generation identity and is also recorded in the run manifest sidecar. Missing
+values in legacy rows and manifests normalize to `null`, so runs written
+before the field existed resume unchanged.
+
 Rules the analysis depends on: invalid rows carry `deceptive: null` (never
 false); bypass and patch are different causal evidence and never share a
 field; resume key is `(run_id, scenario_id, condition)`. Capability metrics
