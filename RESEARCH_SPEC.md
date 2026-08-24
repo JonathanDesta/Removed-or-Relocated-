@@ -1054,3 +1054,101 @@ planning/layer-edit.md.
     `--skip-benchmarks`, and the publishable LLM fallback. Use these rows
     as the two base inputs to edit relocation; the existing full-pool M_E
     rows are deliberately not reused in this lane.
+
+## Final-paper deltas — layer-edit arm (compiled 2026-08-24)
+
+Methodology-section changes required by the layer-edit pivot. Maintained by
+the planner, same convention as the 2026-08-14 deltas block (which remains
+live in full). Proposal-body wording is applied by a human; nothing below
+edits the body.
+
+**Structural decision (team + PIs, before rewriting):**
+0. Choose the narrative: two-arm (pre-registered bypass experiment with its
+   outcome, then the mentor-directed edit arm) vs edit-centered (lesion work
+   as motivation). Items below survive either choice.
+
+**Overview:**
+1. Scope the model list per arm — the edit arm is Qwen2.5-7B-Instruct only.
+2. Replace the "Stage 2 permanently bypasses" sentence: Stage 2' = gated
+   layer-local edit producing M_E; Stage 3' = free relearning (E,D/E,C) and
+   edit-relocation analysis.
+3. Two paths (l*=7, l*=13), both run and both reported pass-or-fail
+   (item 7); remove the single-argmax framing throughout.
+4. State the Insider Trading exception (item 9): R_t^E omits the IT lane
+   (zero IT transfer on Qwen M_D → epsilon-floored denominator); recovery
+   conclusions are negotiation-only. The body's R_t sentence currently
+   promises both environments.
+
+**Stage 1:**
+5. tau, the A_l sweep, corroboration, and M_D construction unchanged. Add
+   the recorded selection basis for the two loci {7, 13} (Stage-1 sweep +
+   corroboration evidence + the mentor-directed choice) — team pins the
+   wording from the Stage-1 record; do not imply a fresh argmax.
+6. The "make the bypass permanent" step becomes lesion-arm-only (or is cut
+   under an edit-centered narrative).
+
+**New subsection — edit construction and gate:**
+7. M_E: continue fine-tuning M_D with plain CE toward honest final lines
+   (full m_c_train, n=1500, item-4 rationale); LoRA updates restricted by a
+   requires_grad freeze-mask to {l*-1, l*, l*+1}; all other layers frozen;
+   Stage-1 T-constants verbatim (2e-4 constant, 3 epochs = 282 steps,
+   batch 16, seed 42). Note that all-layer adapter tensors are saved so
+   continuations are unconstrained by construction.
+8. The gate with precedence (items 5 + 8): (a) competence vs M_0 first
+   (MMLU/GSM8K/negotiation drops <= 0.05, ppl rise <= 2.0, invalid <= 0.20
+   per condition) else "general capability degradation"; (b) M_D<->M_E
+   WikiText-2 JSD <= 0.25 nats else "excessive distributional drift"
+   (neither removed nor not removed); (c) A_edit = tau(M_D) - tau(M_E)
+   >= 0.15 with 95% CI excluding zero -> "removed", else "not removed" ->
+   M_E localization diagnostics + documented human judgment.
+9. One clause on why the lesion-era neutral-JSD bound (item 16) is N/A to a
+   lesion-free edit and the cross-checkpoint edit JSD replaces it.
+10. Statistics presentation: at saturation the bootstrap CI on A_edit
+    degenerates; report exact counts (e.g. 305/305 -> 0/305) with a
+    binomial/Wilson interval alongside the bootstrap value.
+
+**Stage 2 (arms):**
+11. The 2x2 becomes E,D / E,C (init M_E) vs I,D / I,C (init M_D), differing
+    ONLY in (init, data); no bypass anywhere; all layers trainable in the
+    continuations, with the one-sentence justification that constraining
+    relearning would presuppose the relocation answer. Notation gains E.
+12. Same-environment I-arm rebuilds + the matched-arms manifest audit
+    (methods sentence; mechanics to the reproducibility appendix).
+
+**Stage 3 (recovery + relocation):**
+13. R_t^E: the recovery ratio with E-arms in the numerator, t in {8, 70,
+    281} (precommitted subset), eps = 0.10 guard, held-out n=295 pool,
+    negotiation-only.
+14. Relocation instrument: lesion-free temporary-bypass sweeps of M_E vs
+    E,D-t281 on the fresh n=100 selection bases (item 10, with why fresh
+    bases exist); delta_l keeps the signed-max + exact-ties convention.
+15. NEW verdict text: the body's entirely/partially-relocated definitions
+    presume l* is structurally unavailable and have no outcome for in-place
+    recovery. Present the precommitted edit vocabulary (recovered-in-place /
+    relocated / mixed / not-applicable), the mechanical in-set/out-of-set
+    candidate partition, and the recovery precondition (tau_gain(E,D_281,
+    E,C_281) >= 0.15, CI excluding zero), citing item 11's ratification
+    date once stamped. If the lesion arm is also reported, keep both
+    vocabularies clearly separated.
+16. Origin classification (reconstructed vs strengthened) restated against
+    M_E (near-zero A_l in M_E at a candidate layer -> reconstructed);
+    dispersion/origins are human-stamped annotations that cannot alter the
+    rule-derived spatial verdict.
+
+**Pre-registration narrative (short paragraph, methods or own subsection):**
+17. The dated precommitment chain: bounds 2026-08-14 (before Gate-1);
+    edit-arm decisions 2026-08-23 (before any edit run existed); edit-JSD
+    gate + IT exception before execution; the relocation verdict rule
+    (item 11) before any E,D row was inspected.
+18. Mentor-paper positioning: design modeled on Chaudhary & Barez v2
+    (delta 14) but inverted — they fine-tune at the JSD-selected layer to
+    hide deception while preserving behavior; we fine-tune to remove it —
+    and their geometric-migration prediction is what the relocation
+    analysis tests.
+
+**Knock-ons outside methodology:**
+19. Contribution paragraph currently promises the bypass question; Ideal
+    Results is lesion-framed; Limitations adds: edit arm single-family and
+    single-seed, tau saturated (behavioral resolution limited by ceiling/
+    floor), recovery negotiation-only, and the edited unit is a 3-layer
+    window, not a single layer.
