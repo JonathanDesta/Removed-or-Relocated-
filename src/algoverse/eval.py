@@ -42,7 +42,9 @@ ROW_FIELDS = [
 ]
 
 # INTERFACES arm enum. None = no Stage-2 arm (Stage-0/1 runs).
-VALID_ARMS = ("I,D", "I,C", "L,D", "L,C", "damage_matched")
+VALID_ARMS = (
+    "I,D", "I,C", "L,D", "L,C", "E,D", "E,C", "damage_matched",
+)
 GSM8K_LIMIT = 400
 MMLU_LIMIT_PER_SUBTASK = 16
 WIKITEXT_DATASET_ID = "Salesforce/wikitext"

@@ -25,17 +25,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.recovery_report import ARMS, RATIFIED_RT_SUBSET, recovery_report
+from algoverse.recovery_report import (
+    DEFAULT_RECOVERY_ARMS,
+    RATIFIED_RT_SUBSET,
+    recovery_report,
+)
 
 
-def parse_manifest_pairs(pairs):
+def parse_manifest_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
+    arms = tuple(arms)
     result = {}
     for pair in pairs or []:
         arm, _, path = pair.partition("=")
-        if not path or arm not in ARMS:
+        if not path or arm not in arms:
             raise SystemExit(
                 "expected ARM=PATH with ARM one of %s, got %r"
-                % (", ".join(repr(a) for a in ARMS), pair)
+                % (", ".join(repr(a) for a in arms), pair)
             )
         if arm in result:
             raise SystemExit("--manifest %r given twice" % arm)
@@ -43,15 +48,16 @@ def parse_manifest_pairs(pairs):
     return result
 
 
-def parse_rows_pairs(pairs):
+def parse_rows_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
+    arms = tuple(arms)
     result = {}
     for pair in pairs or []:
         key, _, path = pair.partition("=")
         arm, sep, t_text = key.rpartition(":")
-        if not path or not sep or arm not in ARMS:
+        if not path or not sep or arm not in arms:
             raise SystemExit(
                 "expected ARM:T=PATH with ARM one of %s, got %r"
-                % (", ".join(repr(a) for a in ARMS), pair)
+                % (", ".join(repr(a) for a in arms), pair)
             )
         try:
             t = int(t_text)
@@ -83,6 +89,12 @@ if __name__ == "__main__":
                              "subset (post-draft evaluation only)")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--arms", nargs=4, default=DEFAULT_RECOVERY_ARMS,
+        metavar=("NUM_D", "NUM_C", "DEN_D", "DEN_C"),
+        help="ordered recovery arms; default %(default)s; edit path uses "
+             "'E,D' 'E,C' 'I,D' 'I,C'",
+    )
     args = parser.parse_args()
 
     if not args.rows or not args.manifest:
@@ -91,11 +103,12 @@ if __name__ == "__main__":
             "--manifest ARM=PATH"
         )
     recovery_report(
-        parse_rows_pairs(args.rows),
-        parse_manifest_pairs(args.manifest),
+        parse_rows_pairs(args.rows, args.arms),
+        parse_manifest_pairs(args.manifest, args.arms),
         args.t10_reference,
         t_subset=tuple(args.t) if args.t else RATIFIED_RT_SUBSET,
         allow_extra_t=args.allow_extra_t,
         n_boot=args.n_boot,
         seed=args.seed,
+        arms=tuple(args.arms),
     )

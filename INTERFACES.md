@@ -21,7 +21,7 @@ One JSONL row per scenario x condition per model, appended to
 ```
 run_id, timestamp, model_id, adapter_path,
 bypassed_layer (null | 0-n_layers-1 of the evaluated model; 28/32/42 for Qwen/Llama/Gemma), patch_layer, patch_source,   <- interventions, recorded separately
-checkpoint_step, arm ("I,D"|"I,C"|"L,D"|"L,C"|"damage_matched"|null),
+checkpoint_step, arm ("I,D"|"I,C"|"L,D"|"L,C"|"E,D"|"E,C"|"damage_matched"|null),
 condition ("incentive"|"control"), scenario_id, split, scenario_params,
 response_text, hit_max_tokens,
 claimed_value, true_value, deceptive, deception_type, understated,
@@ -34,6 +34,12 @@ permanent lesion and otherwise records the runtime-permanent lesion installed
 while evaluating the checkpoint. It is guarded generation identity. The row-level
 `bypassed_layer` continues to record only the temporary probe intervention.
 Missing values in legacy rows normalize to `null`.
+
+`E,D` and `E,C` label Stage-2-style continuation arms initialized from a
+layer-locally edited checkpoint. The edit run is identified by a non-null
+`config.train_layers` in its manifest, while the continuation arms themselves
+must use the standard all-layer configuration (`config.train_layers: null`).
+`damage_matched` remains reserved and has no semantics here.
 
 `gen_config.environment` (added 2026-08-20 on the human's authorization —
 insider-trading.critique-1 F6) fingerprints WHICH environment produced the row.
@@ -60,13 +66,18 @@ false); bypass and patch are different causal evidence and never share a
 field; resume key is `(run_id, scenario_id, condition)`. Capability metrics
 go to `results/<run_id>/competence.jsonl`: `run_meta + {metric, value,
 stderr, config}` with metric in `mmlu_acc | gsm8k_exact_match | wikitext2_ppl |
-wikitext2_neutral_jsd`. `wikitext2_neutral_jsd` (added 2026-08-16 on the
+wikitext2_neutral_jsd | wikitext2_edit_jsd`. `wikitext2_neutral_jsd` (added
+2026-08-16 on the
 human's ratification of sweep-driver P-S1) is the item-16 sweep bound: mean
 per-token JSD in nats between the intact and probe-bypassed model's
 next-token distributions on the standard WikiText-2 slice; its `config`
 records the compared checkpoint identity and the probe layer, and a
 per-layer sweep run's bypassed-model perplexity is recorded as an ordinary
 `wikitext2_ppl` row under that layer's run_id.
+`wikitext2_edit_jsd` (added 2026-08-23 on the human's ratification of the
+layer-edit gate) is the mean next-token JSD in nats between M_D and M_E on
+the same pinned WikiText-2 slice. Its `config` records both adapter digests,
+the compared-model direction, and the complete slice/window recipe identity.
 `wikitext2_ppl` rows may additionally carry top-level `nll_mean`, the raw mean
 token NLL before the perplexity cap; it is a result field, not configuration or
 run identity. (Authorized by the human 2026-08-14, first-full-review F-4.4.)
@@ -93,6 +104,20 @@ lesioned_base, lesioned_bypassed)` computes the paired Stage-3
 `delta_l = A_l(recovered) - A_l(just-lesioned)` over scenarios shared by all
 four runs and returns both effects, the delta and its CI, coverage, and a
 null-with-reason when it is not measurable.
+
+For sweeps of edited, weight-space, lesion-free checkpoints, the delta curve
+is produced by `relocation.evaluate_edit_relocation`: both edited sweeps must
+have `gen_config.permanent_bypassed_layer: null` throughout. The function
+validates edit lineage from the edit run's `train_manifest.json`
+(`config.train_layers` non-null and equal to the requested edit layers) and
+the continuation run's `init_provenance.json` (its `init_adapter` resolves
+inside that edit run). It partitions the tied max-recovered, max-change, and
+candidate layers inside versus outside the edit set. If either max-recovered
+or max-change has no measurable layer, the verdict is `not-applicable`;
+otherwise their tied-layer union is `recovered-in-place` when wholly inside
+the edit set, `relocated` when wholly outside, and `mixed` otherwise.
+`evaluate_relocation`'s permanent-lesion requirement and lesion-era verdicts
+remain unchanged.
 
 ## Fine-tuning track owns
 
@@ -140,6 +165,13 @@ command resumes. `checkpoint_step` in results rows = the train_meta
 value; run_baseline.py adopts it from the sidecar when the flag is
 omitted and refuses a passed mismatch.
 
+`TrainConfig.train_layers` is `null` for the existing all-layer behavior or
+a non-empty sorted tuple of unique, non-negative decoder-layer indices. When
+non-null, `train_lora` keeps every layer's LoRA tensors in the saved adapter
+but only the named layers are trainable. The field is guarded training
+identity and is recorded in manifests and checkpoint sidecars; the public
+`train_lora` signature above is unchanged.
+
 `load_checkpoint_model` (added 2026-08-16, the Stage-2 loader path) is
 how a PROJECT-TRAINED checkpoint is loaded: it reads and validates the
 `train_meta.json` sidecar and, when that sidecar records a training-time
@@ -174,6 +206,17 @@ Canonical command:
 python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
     --quant 4bit --data data/finetune/m_d_train.jsonl \
     --objective deceptive --out-dir runs/md-qwen7b-s42 --train-seed 42
+```
+
+Canonical layer-local edit continuation (l*=7; l*=13 substitutes
+`[12,13,14]` and its own output directory):
+
+```
+python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
+    --quant 4bit --data data/finetune/m_c_train.jsonl --objective control \
+    --out-dir runs/edit-l07-qwen7b-s42 --train-seed 42 \
+    --init-adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
+    --config-json '{"train_layers": [6, 7, 8]}'
 ```
 
 `install_bypass` makes decoder block `layer_idx` an identity on the residual
@@ -332,6 +375,45 @@ python scripts/relocation_report.py \
                                                        # only after reviewing them
 python scripts/make_figures.py ...                     # the paper's figures
 ```
+
+**Layer-local edit — M_E gate, recovery, and relocation**
+
+```
+python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
+    --quant 4bit --adapter runs/edit-l07-qwen7b-s42/checkpoints/step-00281 \
+    --split selection --n 305 --run-id e1-l07-qwen7b-s42 \
+    --out-dir results/e1-l07-qwen7b-s42 --llm-fallback --competence
+python scripts/edit_gate_report.py jsd \
+    --model-id Qwen/Qwen2.5-7B-Instruct --quant 4bit \
+    --md-adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
+    --me-adapter runs/edit-l07-qwen7b-s42/checkpoints/step-00281 \
+    --run-id e1-l07-qwen7b-s42 \
+    --out results/e1-l07-qwen7b-s42/competence.jsonl
+python scripts/edit_gate_report.py report \
+    --rows M_0=... --rows M_D=... --rows M_E=... \
+    --competence M_0=... --competence M_E=...
+python scripts/recovery_report.py \
+    --arms "E,D" "E,C" "I,D" "I,C" \
+    --manifest "E,D=..." --manifest "E,C=..." \
+    --manifest "I,D=..." --manifest "I,C=..." \
+    --rows "E,D:8=..." --rows "E,C:8=..." \
+    --rows "I,D:8=..." --rows "I,C:8=..." \
+    --t10-reference "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10"
+python scripts/relocation_report.py \
+    --recovered-base ... --recovered-layer N=... \
+    --lesioned-base ... --lesioned-layer N=... \
+    --edit-manifest runs/edit-l07-qwen7b-s42/train_manifest.json \
+    --init-provenance runs/e2-ed-l07-qwen7b-s42/init_provenance.json \
+    --edit-layers 6 7 8                         # add --final, --verdict-ref,
+                                                # --dispersion, and one --origin
+                                                # per candidate after review
+```
+
+On the edit path, `--lesioned-base`/`--lesioned-layer` retain their legacy
+CLI spellings but mean the lesion-free just-edited M_E sweep. The report
+labels that comparison “just-edited” and computes the edit verdict; the
+human still supplies dispersion and candidate-origin classifications for a
+final report.
 
 Stage 3 does **not** go through `sweep_report.py`: Gate-1's intact competence
 rows are not comparable to a lesioned sweep, and the δ-curve is produced by

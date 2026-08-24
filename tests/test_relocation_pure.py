@@ -1,12 +1,19 @@
 """Rung-1 tests for paired Stage-3 relocation analysis."""
 
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse import metrics
-from algoverse.relocation import evaluate_relocation, relocation_report
+from algoverse.relocation import (
+    edit_relocation_report,
+    evaluate_edit_relocation,
+    evaluate_relocation,
+    relocation_report,
+)
 
 
 def make_run(n, d_inc, layer=None, run_id="base", permanent=1):
@@ -14,7 +21,10 @@ def make_run(n, d_inc, layer=None, run_id="base", permanent=1):
     for i in range(n):
         for condition in ("incentive", "control"):
             gen = {
-                "bypass_impl": "block-output-identity-hook/v1",
+                "bypass_impl": (
+                    "block-output-identity-hook/v1"
+                    if permanent is not None or layer is not None else None
+                ),
                 "permanent_bypassed_layer": permanent,
                 "quant": "4bit",
                 "do_sample": False,
@@ -50,6 +60,43 @@ def make_run(n, d_inc, layer=None, run_id="base", permanent=1):
                 "gen_config": gen,
             })
     return rows
+
+
+def write_edit_lineage(root, edit_layers=(6, 7, 8), outside=False,
+                       null_layers=False):
+    root = Path(root)
+    edit_run = root / "edit-run"
+    edit_run.mkdir(parents=True)
+    manifest = edit_run / "train_manifest.json"
+    manifest.write_text(json.dumps({
+        "config": {
+            "train_layers": None if null_layers else list(edit_layers),
+        },
+    }))
+    continuation = root / "continuation"
+    continuation.mkdir()
+    provenance = continuation / "init_provenance.json"
+    adapter = (
+        root / "other-run" / "checkpoints" / "step-00281"
+        if outside else edit_run / "checkpoints" / "step-00281"
+    )
+    provenance.write_text(json.dumps({"init_adapter": str(adapter.resolve())}))
+    return manifest, provenance
+
+
+def edit_result(root, recovered, edited, edit_layers=(6, 7, 8)):
+    manifest, provenance = write_edit_lineage(root, edit_layers=edit_layers)
+    return evaluate_edit_relocation(
+        make_run(20, 20, run_id="rb", permanent=None),
+        recovered,
+        make_run(20, 16, run_id="eb", permanent=None),
+        edited,
+        manifest,
+        provenance,
+        edit_layers,
+        n_boot=100,
+        seed=0,
+    )
 
 
 def test_relocation_delta_pairs_all_four_runs():
@@ -168,6 +215,154 @@ def test_max_change_uses_signed_delta_not_absolute_magnitude():
     assert result["candidate_layers"] == [5, 7]
     report = relocation_report(result)
     assert "maximum signed delta_l" in report
+
+
+def test_edit_relocation_partitions_and_precommitted_verdicts():
+    with tempfile.TemporaryDirectory() as tmp:
+        inside = edit_result(
+            Path(tmp) / "inside",
+            {
+                7: make_run(20, 4, layer=7, run_id="r7", permanent=None),
+                10: make_run(20, 12, layer=10, run_id="r10", permanent=None),
+            },
+            {
+                7: make_run(20, 12, layer=7, run_id="e7", permanent=None),
+                10: make_run(20, 12, layer=10, run_id="e10", permanent=None),
+            },
+        )
+        assert inside["edit_relocation"] == "recovered-in-place"
+        assert inside["edit_partition"]["candidate_layers"] == {
+            "inside": [7], "outside": [],
+        }
+        report = edit_relocation_report(inside)
+        assert "edited layers: [6, 7, 8]" in report
+        assert "A_l just-edited" in report
+        assert "permanent lesion" not in report
+
+        relocated = edit_result(
+            Path(tmp) / "relocated",
+            {
+                7: make_run(20, 12, layer=7, run_id="r7", permanent=None),
+                10: make_run(20, 4, layer=10, run_id="r10", permanent=None),
+            },
+            {
+                7: make_run(20, 12, layer=7, run_id="e7", permanent=None),
+                10: make_run(20, 12, layer=10, run_id="e10", permanent=None),
+            },
+        )
+        assert relocated["edit_relocation"] == "relocated"
+
+        mixed = edit_result(
+            Path(tmp) / "mixed",
+            {
+                7: make_run(20, 4, layer=7, run_id="r7", permanent=None),
+                10: make_run(20, 8, layer=10, run_id="r10", permanent=None),
+            },
+            {
+                7: make_run(20, 0, layer=7, run_id="e7", permanent=None),
+                10: make_run(20, 16, layer=10, run_id="e10", permanent=None),
+            },
+        )
+        assert mixed["k_layers"] == [7]
+        assert mixed["max_change_layers"] == [10]
+        assert mixed["edit_relocation"] == "mixed"
+        final = edit_relocation_report(
+            mixed, final=True, verdict_ref="layer-edit P-E10",
+            dispersion="concentrated",
+            origins={7: "strengthened", 10: "reconstructed"},
+        )
+        assert "edit relocation (precommitted rule): mixed" in final
+        assert "HUMAN VERDICT REFERENCE: layer-edit P-E10" in final
+
+
+def test_edit_relocation_not_applicable_without_both_evidence_sets():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = edit_result(Path(tmp), {}, {})
+    assert result["k_layers"] == []
+    assert result["max_change_layers"] == []
+    assert result["edit_relocation"] == "not-applicable"
+
+    original = metrics.relocation_delta
+
+    def recovered_only(*_args, **_kwargs):
+        return {
+            "A_recovered": 0.5,
+            "A_lesioned": None,
+            "delta_l": None,
+            "delta_ci_low": None,
+            "delta_ci_high": None,
+            "n_scenarios_common": 20,
+            "paired": True,
+            "reason": "tau_not_computable",
+        }
+
+    metrics.relocation_delta = recovered_only
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            one_sided = edit_result(
+                Path(tmp),
+                {7: make_run(20, 4, layer=7, run_id="r7", permanent=None)},
+                {7: make_run(20, 8, layer=7, run_id="e7", permanent=None)},
+            )
+    finally:
+        metrics.relocation_delta = original
+    assert one_sided["k_layers"] == [7]
+    assert one_sided["max_change_layers"] == []
+    assert one_sided["edit_relocation"] == "not-applicable"
+
+
+def test_edit_relocation_refuses_lesions_and_bad_lineage_by_name():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest, provenance = write_edit_lineage(root / "good")
+        kwargs = dict(
+            recovered_base=make_run(20, 20, run_id="rb", permanent=None),
+            recovered_layers={
+                7: make_run(20, 4, layer=7, run_id="r7", permanent=None),
+            },
+            edited_base=make_run(20, 16, run_id="eb", permanent=None),
+            edited_layers={
+                7: make_run(20, 12, layer=7, run_id="e7", permanent=None),
+            },
+            edit_manifest_path=manifest,
+            init_provenance_path=provenance,
+            edit_layers=(6, 7, 8),
+            n_boot=50,
+        )
+        broken = dict(kwargs)
+        broken["recovered_layers"] = {
+            7: make_run(20, 4, layer=7, run_id="r7", permanent=1),
+        }
+        try:
+            evaluate_edit_relocation(**broken)
+        except ValueError as exc:
+            assert "permanent_bypassed_layer" in str(exc)
+        else:
+            raise AssertionError("edit relocation accepted a permanent lesion")
+
+        null_manifest, null_provenance = write_edit_lineage(
+            root / "null", null_layers=True
+        )
+        broken = dict(kwargs, edit_manifest_path=null_manifest,
+                      init_provenance_path=null_provenance)
+        try:
+            evaluate_edit_relocation(**broken)
+        except ValueError as exc:
+            assert "config.train_layers is null" in str(exc)
+        else:
+            raise AssertionError("null edit train_layers was accepted")
+
+        outside_manifest, outside_provenance = write_edit_lineage(
+            root / "outside", outside=True
+        )
+        broken = dict(kwargs, edit_manifest_path=outside_manifest,
+                      init_provenance_path=outside_provenance)
+        try:
+            evaluate_edit_relocation(**broken)
+        except ValueError as exc:
+            assert "outside edit run out_dir" in str(exc)
+        else:
+            raise AssertionError("outside edit initialization was accepted")
 
 
 if __name__ == "__main__":

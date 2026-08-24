@@ -3,7 +3,7 @@
 This is the analysis end of the Stage-2/3 plan:
 
   WP-2C  the matched-arms audit (closes F73): before any R_t number is
-         computed, the four Stage-2 continuation arms' train_manifest.json
+         computed, the selected four continuation arms' train_manifest.json
          files are compared through train.matched_training_identity in
          same-family mode. The four identities must be EQUAL; a mismatch
          refuses Stage-3 scoring by name, because R_t is a ratio between
@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 
 from algoverse import metrics
+from algoverse.eval import VALID_ARMS
 from algoverse.train import matched_training_identity
 
 
@@ -48,10 +49,10 @@ from algoverse.train import matched_training_identity
 # is post-draft-only).
 RATIFIED_RT_SUBSET = (8, 70, 281)
 
-# The four Stage-2 continuation arms, exactly the contract's `arm` enum
-# values (INTERFACES.md) and metrics.recovery's argument order is derived
-# from these: (L,D), (L,C), (I,D), (I,C).
-ARMS = ("I,D", "I,C", "L,D", "L,C")
+# Ordered as metrics.recovery's numerator-D, numerator-C, denominator-D,
+# denominator-C inputs. The default is the original lesion-era report.
+DEFAULT_RECOVERY_ARMS = ("L,D", "L,C", "I,D", "I,C")
+ARMS = DEFAULT_RECOVERY_ARMS
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,39 @@ def _manifest(manifest_or_path):
     if isinstance(manifest_or_path, (str, os.PathLike)):
         return json.loads(Path(manifest_or_path).read_text(encoding="utf-8"))
     return manifest_or_path
+
+
+def _validate_arms(arms) -> tuple:
+    """Validate the ordered recovery comparison tuple."""
+    arms = tuple(arms)
+    if len(arms) != 4:
+        raise ValueError(
+            "recovery_arms_invalid: expected exactly four arms ordered as "
+            "numerator-D, numerator-C, denominator-D, denominator-C; got %r"
+            % (arms,)
+        )
+    if len(set(arms)) != 4:
+        raise ValueError(
+            "recovery_arms_invalid: all four arms must be unique, got %r"
+            % (arms,)
+        )
+    unknown = [arm for arm in arms if arm not in VALID_ARMS]
+    if unknown:
+        raise ValueError(
+            "recovery_arms_invalid: unknown arm(s) %r; contract values are %r"
+            % (unknown, VALID_ARMS)
+        )
+    suffixes = tuple("," + objective for objective in ("D", "C", "D", "C"))
+    wrong = [
+        arm for arm, suffix in zip(arms, suffixes)
+        if not arm.endswith(suffix)
+    ]
+    if wrong:
+        raise ValueError(
+            "recovery_arms_invalid: arms must be ordered D/C/D/C, got %r"
+            % (arms,)
+        )
+    return arms
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +153,10 @@ def _identity_mismatch_fields(reference, other) -> list:
     return fields
 
 
-def audit_matched_arms(manifest_inputs) -> dict:
+def audit_matched_arms(manifest_inputs, arms=DEFAULT_RECOVERY_ARMS) -> dict:
     """All four Stage-2 arms trained matched, or a named refusal (WP-2C).
 
-    manifest_inputs maps each arm ("I,D", "I,C", "L,D", "L,C") to its
+    manifest_inputs maps each selected arm to its
     train_manifest.json path (or an already-loaded manifest dict). Each is
     reduced to train.matched_training_identity in same-family mode
     (cross_family=False: the four arms of one family MUST share model_id,
@@ -135,32 +169,45 @@ def audit_matched_arms(manifest_inputs) -> dict:
     Returns the shared identity dict on success. Raises a named ValueError
     listing which arm and which field(s) diverge on failure.
     """
+    arms = _validate_arms(arms)
     manifest_inputs = manifest_inputs or {}
-    missing = [arm for arm in ARMS if arm not in manifest_inputs]
+    missing = [arm for arm in arms if arm not in manifest_inputs]
     if missing:
         raise ValueError(
             "matched_arms_manifest_missing: no train_manifest.json for "
             "arm(s) %s; the audit requires all four arms (%s)"
             % (", ".join(repr(arm) for arm in missing),
-               ", ".join(repr(arm) for arm in ARMS))
+               ", ".join(repr(arm) for arm in arms))
         )
-    unknown = [arm for arm in manifest_inputs if arm not in ARMS]
+    unknown = [arm for arm in manifest_inputs if arm not in arms]
     if unknown:
         raise ValueError(
             "matched_arms_unknown_arm: %s; arms are exactly %s"
             % (", ".join(repr(arm) for arm in unknown),
-               ", ".join(repr(arm) for arm in ARMS))
+               ", ".join(repr(arm) for arm in arms))
         )
 
     identities = {
         arm: matched_training_identity(_manifest(manifest_inputs[arm]),
                                        cross_family=False)
-        for arm in ARMS
+        for arm in arms
     }
-    reference_arm = ARMS[0]
+    restricted = [
+        arm for arm in arms
+        if (identities[arm].get("config") or {}).get("train_layers")
+        is not None
+    ]
+    if restricted:
+        raise ValueError(
+            "matched_arms_audit_failed: config.train_layers must be null "
+            "for continuation arm(s) %s; an edit-run mask must not be "
+            "retained by E,D/E,C or their comparators"
+            % ", ".join(repr(arm) for arm in restricted)
+        )
+    reference_arm = arms[0]
     reference = identities[reference_arm]
     complaints = []
-    for arm in ARMS[1:]:
+    for arm in arms[1:]:
         fields = _identity_mismatch_fields(reference, identities[arm])
         if fields:
             complaints.append(
@@ -203,11 +250,12 @@ def _check_t_subset(t_subset, allow_extra_t):
 
 def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
                       t_subset=RATIFIED_RT_SUBSET, allow_extra_t=False,
-                      n_boot=2000, seed=0) -> dict:
+                      n_boot=2000, seed=0,
+                      arms=DEFAULT_RECOVERY_ARMS) -> dict:
     """R_t per checkpoint, behind the tripwire and the matched-arms audit.
 
     rows_inputs maps (t, arm) -> rows.jsonl path or row list, for every t
-    in t_subset and every arm in ARMS; manifest_inputs maps arm -> the
+    in t_subset and every selected arm; manifest_inputs maps arm -> the
     arm's train_manifest.json (see audit_matched_arms). Ordering is
     load-bearing: the tripwire and the subset guard run first, then input
     completeness, then the WP-2C audit -- all BEFORE any R_t is computed,
@@ -218,10 +266,11 @@ def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
     metrics.recovery returns (tau per arm, R_t, CI bounds, reason).
     """
     _require_t10_reference(t10_reference)
+    arms = _validate_arms(arms)
     requested, extra = _check_t_subset(t_subset, allow_extra_t)
 
     rows_inputs = rows_inputs or {}
-    expected = [(t, arm) for t in requested for arm in ARMS]
+    expected = [(t, arm) for t in requested for arm in arms]
     missing = [key for key in expected if key not in rows_inputs]
     if missing:
         raise ValueError(
@@ -242,24 +291,31 @@ def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
                requested)
         )
 
-    audit = audit_matched_arms(manifest_inputs)
+    audit = audit_matched_arms(manifest_inputs, arms=arms)
 
     per_t = {}
     for t in sorted(requested):
         per_t[t] = metrics.recovery(
-            _rows(rows_inputs[(t, "L,D")]),
-            _rows(rows_inputs[(t, "L,C")]),
-            _rows(rows_inputs[(t, "I,D")]),
-            _rows(rows_inputs[(t, "I,C")]),
+            _rows(rows_inputs[(t, arms[0])]),
+            _rows(rows_inputs[(t, arms[1])]),
+            _rows(rows_inputs[(t, arms[2])]),
+            _rows(rows_inputs[(t, arms[3])]),
             n_boot=n_boot,
             seed=seed,
         )
+        per_t[t]["tau_by_arm"] = {
+            arm: per_t[t][key]
+            for arm, key in zip(
+                arms, ("tau_LD", "tau_LC", "tau_ID", "tau_IC")
+            )
+        }
     return {
         "audit": audit,
         "per_t": per_t,
         "requested_t": sorted(requested),
         "extra_t": sorted(extra),
         "n_boot": n_boot,
+        "arms": arms,
     }
 
 
@@ -269,7 +325,8 @@ def _fmt(value, spec="%.3f"):
 
 def recovery_report(rows_inputs, manifest_inputs, t10_reference,
                     t_subset=RATIFIED_RT_SUBSET, allow_extra_t=False,
-                    n_boot=2000, seed=0) -> str:
+                    n_boot=2000, seed=0,
+                    arms=DEFAULT_RECOVERY_ARMS) -> str:
     """The Stage-3 R_t report, printed and returned as markdown (WP-2D).
 
     Audit verdict first, then the complete per-t table (every requested
@@ -281,7 +338,7 @@ def recovery_report(rows_inputs, manifest_inputs, t10_reference,
     result = evaluate_recovery(
         rows_inputs, manifest_inputs, t10_reference,
         t_subset=t_subset, allow_extra_t=allow_extra_t,
-        n_boot=n_boot, seed=seed,
+        n_boot=n_boot, seed=seed, arms=arms,
     )
 
     lines = []
@@ -307,13 +364,16 @@ def recovery_report(rows_inputs, manifest_inputs, t10_reference,
     )
 
     lines.append("")
-    lines.append("    t | R_t    [ci_low, ci_high] | tau_LD  tau_LC  tau_ID  tau_IC")
+    tau_labels = ["tau_%s" % arm.replace(",", "") for arm in result["arms"]]
+    lines.append(
+        "    t | R_t    [ci_low, ci_high] | %s"
+        % "  ".join(tau_labels)
+    )
     notes = []
     for t in result["requested_t"]:
         entry = result["per_t"][t]
-        taus = "%s  %s  %s  %s" % (
-            _fmt(entry["tau_LD"]), _fmt(entry["tau_LC"]),
-            _fmt(entry["tau_ID"]), _fmt(entry["tau_IC"]),
+        taus = "  ".join(
+            _fmt(entry["tau_by_arm"][arm]) for arm in result["arms"]
         )
         if entry["R_t"] is None:
             lines.append(

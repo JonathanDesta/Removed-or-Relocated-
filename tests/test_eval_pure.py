@@ -76,9 +76,12 @@ def test_encode_chats_no_double_bos():
 
 
 def test_validate_arm_enum():
+    assert VALID_ARMS == (
+        "I,D", "I,C", "L,D", "L,C", "E,D", "E,C", "damage_matched",
+    )
     for arm in (None,) + VALID_ARMS:
         _validate_arm(arm)
-    for arm in ("LD", "i,d", "", "ID"):
+    for arm in ("LD", "i,d", "", "ID", "E,X"):
         try:
             _validate_arm(arm)
         except ValueError as exc:

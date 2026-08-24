@@ -11,7 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.relocation import evaluate_relocation, relocation_report
+from algoverse.relocation import (
+    edit_relocation_report,
+    evaluate_edit_relocation,
+    evaluate_relocation,
+    relocation_report,
+)
 
 
 def _pairs(values, label):
@@ -54,7 +59,10 @@ def main(argv=None):
     parser.add_argument("--lesioned-base", required=True)
     parser.add_argument("--lesioned-layer", action="append", required=True,
                         metavar="N=PATH")
-    parser.add_argument("--permanent-layer", type=int, required=True)
+    parser.add_argument("--permanent-layer", type=int, default=None)
+    parser.add_argument("--edit-manifest", default=None)
+    parser.add_argument("--init-provenance", default=None)
+    parser.add_argument("--edit-layers", nargs="+", type=int, default=None)
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--final", action="store_true")
@@ -68,6 +76,48 @@ def main(argv=None):
                         metavar="N=reconstructed|strengthened")
     args = parser.parse_args(argv)
 
+    edit_mode = any(
+        value is not None
+        for value in (args.edit_manifest, args.init_provenance, args.edit_layers)
+    )
+    if edit_mode:
+        if not all(
+            value is not None
+            for value in (args.edit_manifest, args.init_provenance, args.edit_layers)
+        ):
+            parser.error(
+                "edit path requires --edit-manifest, --init-provenance, "
+                "and --edit-layers together"
+            )
+        if args.permanent_layer is not None:
+            parser.error("edit path forbids --permanent-layer")
+        if args.relocation is not None:
+            parser.error(
+                "edit-path relocation is computed by the precommitted rule; "
+                "do not pass lesion-era --relocation"
+            )
+        result = evaluate_edit_relocation(
+            args.recovered_base,
+            _pairs(args.recovered_layer, "--recovered-layer"),
+            args.lesioned_base,
+            _pairs(args.lesioned_layer, "--lesioned-layer"),
+            args.edit_manifest,
+            args.init_provenance,
+            args.edit_layers,
+            n_boot=args.n_boot,
+            seed=args.seed,
+        )
+        return edit_relocation_report(
+            result,
+            final=args.final,
+            verdict_ref=args.verdict_ref,
+            dispersion=args.dispersion,
+            origins=_origins(args.origin),
+        )
+    if args.permanent_layer is None:
+        parser.error(
+            "lesion path requires --permanent-layer (or supply all edit-path flags)"
+        )
     result = evaluate_relocation(
         args.recovered_base,
         _pairs(args.recovered_layer, "--recovered-layer"),

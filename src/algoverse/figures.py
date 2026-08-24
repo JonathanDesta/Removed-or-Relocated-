@@ -61,8 +61,9 @@ from algoverse import metrics
 # dev-mode 0.5B run can never become the baseline for a prod sweep.
 #
 # `arm` is the field most likely to need overriding. INTERFACES.md allows
-# "I,D" | "I,C" | "L,D" | "L,C" | "damage_matched" | null, where I is intact
-# and L is lesioned. If the eval track labels the Stage-1 sweep runs "L,D"
+# "I,D" | "I,C" | "L,D" | "L,C" | "E,D" | "E,C" |
+# "damage_matched" | null, where I is intact, L is lesioned, and E is
+# edit-initialized. If the eval track labels the Stage-1 sweep runs "L,D"
 # while the baseline is "I,D", nothing will match on the default fields --
 # pass match_fields without "arm" and the baseline_mismatch field on every
 # point will have told you so.

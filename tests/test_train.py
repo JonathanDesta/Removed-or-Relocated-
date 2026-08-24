@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-TRAIN_TEST_COUNT = 20
+TRAIN_TEST_COUNT = 24
 
 try:
     import torch
@@ -48,7 +48,8 @@ except ImportError:
 
 if HAVE_TRAIN_STACK:
     import algoverse.train as train_module
-    from algoverse.models import bypass_state, install_bypass
+    import algoverse.models as models_module
+    from algoverse.models import bypass_state, install_bypass, load_checkpoint_model
     from algoverse.train import (
         DEFAULT_TRAIN_CONFIG,
         MAX_CONSECUTIVE_SCALER_SKIPS,
@@ -57,6 +58,7 @@ if HAVE_TRAIN_STACK:
         _gradient_checkpointing_mode,
         _load_resume_state,
         _manifest_identity_sha,
+        _restrict_adapter_layers,
         _update_skip_streak,
         _write_checkpoint,
         read_train_log,
@@ -589,6 +591,173 @@ if HAVE_TRAIN_STACK:
                     (checkpoint_dir / "train_meta.json").read_text()
                 )
                 assert meta["bypassed_layer"] == 1
+        finally:
+            handle.remove()
+
+
+    def test_layer_mask_fresh_path_updates_only_selected_layers_and_saves_all():
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = _write_dataset(Path(tmp) / "data", n=16)
+            out_dir = Path(tmp) / "run"
+            manifest, captured = _train_capturing_attach(
+                _tiny_model(), data_path, out_dir,
+                config=_config(train_layers=(1, 2)),
+            )
+            assert manifest["config"]["train_layers"] == [1, 2]
+            sidecar = json.loads(
+                (out_dir / "checkpoints" / "step-00007" /
+                 "train_meta.json").read_text()
+            )
+            assert sidecar["config"]["train_layers"] == [1, 2]
+            final = _adapter_state(out_dir / "checkpoints" / "step-00007")
+            assert any(".layers.0." in name for name in final)
+            assert any(".layers.3." in name for name in final)
+            for name, initial in captured["state"].items():
+                if ".layers.0." in name or ".layers.3." in name:
+                    assert torch.equal(final[name], initial), name
+            for layer in (1, 2):
+                assert any(
+                    ".layers.%d." % layer in name
+                    and "lora_B" in name
+                    and not torch.equal(final[name], captured["state"][name])
+                    for name in final
+                ), "selected layer %d did not move" % layer
+
+
+    def test_layer_mask_continuation_path_freezes_against_init_adapter():
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deceptive = _write_dataset(root / "deceptive", n=16)
+            init_run = root / "init-run"
+            _train(_tiny_model(), deceptive, init_run)
+            init_adapter = init_run / "checkpoints" / "step-00007"
+            initial = _adapter_state(init_adapter)
+
+            original_load = models_module._load
+
+            def local_load(_model_id, quant="none", adapter_path=None,
+                           trainable=False):
+                assert quant == "none" and adapter_path is not None
+                return (
+                    PeftModel.from_pretrained(
+                        _tiny_model(), str(adapter_path),
+                        is_trainable=trainable,
+                    ),
+                    StubChatTokenizer(),
+                )
+
+            models_module._load = local_load
+            try:
+                model, tokenizer, _meta, _handle = load_checkpoint_model(
+                    "tiny-qwen", init_adapter, quant="none", trainable=True
+                )
+            finally:
+                models_module._load = original_load
+
+            control = _write_dataset(root / "control", n=16, objective="control")
+            out_dir = root / "continued"
+            with redirect_stdout(StringIO()):
+                train_lora(
+                    model, tokenizer, control, out_dir,
+                    model_id="tiny-qwen", objective="control",
+                    config=_config(train_layers=(2,)), train_seed=42,
+                    quant_label="none",
+                )
+            final = _adapter_state(out_dir / "checkpoints" / "step-00007")
+            assert set(final) == set(initial)
+            for name in final:
+                if ".layers.2." not in name:
+                    assert torch.equal(final[name], initial[name]), name
+            assert any(
+                ".layers.2." in name and "lora_B" in name
+                and not torch.equal(final[name], initial[name])
+                for name in final
+            )
+
+
+    def test_layer_mask_resume_is_exact():
+        config = _config(
+            epochs=3, lora_dropout=0.1, n_checkpoints=3,
+            gradient_checkpointing=True, train_layers=(1, 2),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = _write_dataset(Path(tmp) / "data", n=16)
+            straight = Path(tmp) / "straight"
+            _train(_tiny_model(), data_path, straight, config=config)
+
+            interrupted = Path(tmp) / "interrupted"
+            _train(
+                _tiny_model(), data_path, interrupted, config=config,
+                max_steps_this_session=5,
+            )
+            _train(_tiny_model(), data_path, interrupted, config=config)
+
+            first = _adapter_state(straight / "checkpoints" / "step-00011")
+            second = _adapter_state(interrupted / "checkpoints" / "step-00011")
+            assert set(first) == set(second)
+            for name in first:
+                assert torch.equal(first[name], second[name]), name
+
+
+    def test_layer_mask_named_refusals():
+        model = get_peft_model(
+            _tiny_model(),
+            LoraConfig(
+                r=2, lora_alpha=2, target_modules=["q_proj", "v_proj"],
+                bias="none", task_type="CAUSAL_LM",
+            ),
+        )
+        _expect_error(
+            lambda: _restrict_adapter_layers(model, (4,)), "out-of-range"
+        )
+        census = StringIO()
+        with redirect_stdout(census):
+            _restrict_adapter_layers(model, (1, 2))
+        output = census.getvalue()
+        for layer in range(4):
+            assert "layer %d:" % layer in output
+        assert "layer 0: 0 trainable /" in output
+        assert "layer 1: 4 trainable / 0 frozen LoRA tensors" in output
+
+        restricted_attach = get_peft_model(
+            _tiny_model(),
+            LoraConfig(
+                r=2, lora_alpha=2, target_modules=["q_proj", "v_proj"],
+                layers_to_transform=[0, 1, 2], layers_pattern="layers",
+                bias="none", task_type="CAUSAL_LM",
+            ),
+        )
+        _expect_error(
+            lambda: _restrict_adapter_layers(restricted_attach, (3,)),
+            "matched no LoRA parameters",
+        )
+
+        non_layer = get_peft_model(
+            _tiny_model(),
+            LoraConfig(
+                r=2, lora_alpha=2, target_modules=["lm_head"],
+                bias="none", task_type="CAUSAL_LM",
+            ),
+        )
+        _expect_error(
+            lambda: _restrict_adapter_layers(non_layer, (1,)),
+            "does not identify a decoder layer",
+        )
+
+        bypassed = _tiny_model()
+        handle = install_bypass(bypassed, 1, role="permanent")
+        try:
+            wrapped = get_peft_model(
+                bypassed,
+                LoraConfig(
+                    r=2, lora_alpha=2, target_modules=["q_proj", "v_proj"],
+                    bias="none", task_type="CAUSAL_LM",
+                ),
+            )
+            _expect_error(
+                lambda: _restrict_adapter_layers(wrapped, (1,)),
+                "entirely inside permanently bypassed layer",
+            )
         finally:
             handle.remove()
 

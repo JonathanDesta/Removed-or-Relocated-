@@ -754,7 +754,7 @@ def test_default_config_fields_are_frozen_and_complete():
         "adam_beta1", "adam_beta2", "max_grad_norm", "epochs",
         "micro_batch_size", "grad_accum_steps", "max_seq_len",
         "mask_prompt_tokens", "n_checkpoints", "checkpoint_spacing",
-        "gradient_checkpointing", "save_every",
+        "gradient_checkpointing", "save_every", "train_layers",
     ]
     raised = False
     try:
@@ -778,7 +778,9 @@ def test_train_config_rejects_structurally_invalid_values():
         {"lora_dropout": 1.0}, {"lora_dropout": -0.1},
         {"learning_rate": 0}, {"max_grad_norm": 0},
         {"checkpoint_spacing": "log"}, {"lr_schedule": "cosine"},
-        {"target_modules": ()},
+        {"target_modules": ()}, {"train_layers": ()},
+        {"train_layers": (1, 1)}, {"train_layers": (-1,)},
+        {"train_layers": (True,)}, {"train_layers": ("3",)},
     )
     for kwargs in invalid:
         _expect_value_error(
@@ -787,6 +789,31 @@ def test_train_config_rejects_structurally_invalid_values():
             ),
             next(iter(kwargs)),
         )
+
+
+def test_train_layers_normalize_and_guard_identity():
+    config = dataclasses.replace(DEFAULT_TRAIN_CONFIG, train_layers=[3, 1, 2])
+    assert config.train_layers == (1, 2, 3)
+    stored = json.loads(json.dumps(_manifest(config=config)))
+    assert stored["config"]["train_layers"] == [1, 2, 3]
+    _guard_train_manifest(stored, _manifest(config=config))
+
+    old = json.loads(json.dumps(_manifest()))
+    old["config"].pop("train_layers")
+    _guard_train_manifest(old, _manifest())
+    assert matched_training_identity(old) == matched_training_identity(
+        _manifest()
+    )
+
+    restricted = json.loads(json.dumps(_manifest(config=config)))
+    unrestricted = json.loads(json.dumps(_manifest()))
+    assert matched_training_identity(restricted) != matched_training_identity(
+        unrestricted
+    )
+    _expect_value_error(
+        lambda: _guard_train_manifest(restricted, _manifest()),
+        "config.train_layers",
+    )
 
 
 if __name__ == "__main__":

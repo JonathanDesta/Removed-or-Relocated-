@@ -41,6 +41,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
@@ -119,6 +120,10 @@ class TrainConfig:
     from the manifest identity guard, from the resume identity hash, and
     from matched_training_identity, so two arms that differ only in it are
     still matched arms.
+
+    train_layers is the layer-edit restriction. None preserves the ratified
+    all-layer recipe; a non-null tuple changes training identity and masks
+    updates without changing the saved adapter's all-layer tensor layout.
     """
 
     lora_r: int = 16
@@ -144,6 +149,7 @@ class TrainConfig:
     checkpoint_spacing: str = "doubling"
     gradient_checkpointing: bool = True
     save_every: int = 10
+    train_layers: tuple | None = None
 
     def __post_init__(self):
         positive = (
@@ -167,6 +173,36 @@ class TrainConfig:
             raise ValueError("lr_schedule must be 'constant'")
         if self.checkpoint_spacing not in ("even", "doubling"):
             raise ValueError("checkpoint_spacing must be 'even' or 'doubling'")
+        if self.train_layers is not None:
+            try:
+                train_layers = tuple(self.train_layers)
+            except TypeError as exc:
+                raise ValueError(
+                    "train_layers must be None or a non-empty sequence of "
+                    "non-negative integers"
+                ) from exc
+            if not train_layers:
+                raise ValueError("train_layers must be non-empty when set")
+            invalid = [
+                layer for layer in train_layers
+                if isinstance(layer, bool) or not isinstance(layer, int)
+            ]
+            if invalid:
+                raise ValueError(
+                    "train_layers must contain integers only (bool is not an "
+                    "integer layer), got %r" % (invalid,)
+                )
+            if any(layer < 0 for layer in train_layers):
+                raise ValueError(
+                    "train_layers must contain non-negative integers, got %r"
+                    % (train_layers,)
+                )
+            if len(set(train_layers)) != len(train_layers):
+                raise ValueError(
+                    "train_layers must not contain duplicates, got %r"
+                    % (train_layers,)
+                )
+            object.__setattr__(self, "train_layers", tuple(sorted(train_layers)))
 
 
 DEFAULT_TRAIN_CONFIG = TrainConfig()
@@ -980,6 +1016,89 @@ def _adapter_dtype(model) -> str:
     )
 
 
+def _restrict_adapter_layers(model, train_layers) -> None:
+    """Make only the requested decoder layers' LoRA tensors trainable.
+
+    The adapter remains physically all-layer: this is a requires-grad mask
+    applied after either fresh attachment or continuation loading, so saved
+    checkpoints retain the frozen initialization tensors for every layer.
+    """
+    if train_layers is None:
+        return
+
+    from algoverse.models import _decoder_layers, bypass_state
+
+    allowed = tuple(train_layers)
+    n_layers = len(_decoder_layers(model))
+    out_of_range = [layer for layer in allowed if layer >= n_layers]
+    if out_of_range:
+        raise ValueError(
+            "train_layers contains out-of-range layer(s) %r for a %d-layer model"
+            % (out_of_range, n_layers)
+        )
+
+    state = bypass_state(model)
+    permanent = None if state is None else state.get("permanent")
+    if permanent is not None and set(allowed) <= {permanent["layer_idx"]}:
+        raise ValueError(
+            "train_layers %r is entirely inside permanently bypassed layer %d; "
+            "training would be an exact no-op"
+            % (allowed, permanent["layer_idx"])
+        )
+
+    pattern = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+    census = {
+        layer: {"trainable": 0, "frozen": 0}
+        for layer in range(n_layers)
+    }
+    seen = set()
+    lora_parameters = []
+    for name, parameter in model.named_parameters():
+        if "lora_" not in name:
+            continue
+        match = pattern.search(name)
+        if match is None:
+            raise ValueError(
+                "LoRA parameter name does not identify a decoder layer via "
+                "'.layers.<index>.': %s" % name
+            )
+        layer = int(match.group(1))
+        if layer >= n_layers:
+            raise ValueError(
+                "LoRA parameter %s names layer %d outside the model's %d layers"
+                % (name, layer, n_layers)
+            )
+        is_trainable = layer in allowed
+        parameter.requires_grad_(is_trainable)
+        census[layer]["trainable" if is_trainable else "frozen"] += 1
+        seen.add(layer)
+        lora_parameters.append(parameter)
+
+    missing = [layer for layer in allowed if layer not in seen]
+    if missing:
+        raise ValueError(
+            "train_layers layer(s) %r matched no LoRA parameters"
+            % (missing,)
+        )
+    if not lora_parameters:
+        raise ValueError(
+            "no LoRA adapter parameter was found while applying train_layers"
+        )
+    if not any(parameter.requires_grad for parameter in model.parameters()):
+        raise ValueError(
+            "train_layers %r leaves the model with zero trainable parameters"
+            % (allowed,)
+        )
+
+    print("LAYER-RESTRICTED ADAPTER TRAINING: %s" % list(allowed))
+    for layer in range(n_layers):
+        counts = census[layer]
+        print(
+            "  layer %d: %d trainable / %d frozen LoRA tensors"
+            % (layer, counts["trainable"], counts["frozen"])
+        )
+
+
 def _gradient_checkpointing_mode(model) -> str:
     """Derive the live checkpointing mode: off/non_reentrant/reentrant/unknown.
 
@@ -1150,6 +1269,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
             ),
             autocast_adapter_dtype=True,
         )
+    _restrict_adapter_layers(model, config.train_layers)
     if config.gradient_checkpointing and _gradient_checkpointing_mode(model) == "off":
         # Non-reentrant only (RESEARCH_SPEC.md, ratified 2026-08-13): the
         # mode that coexists with forward hooks, which Stage 2 needs. Run on
@@ -1525,6 +1645,10 @@ def matched_training_identity(manifest, cross_family=False) -> dict:
     """
     manifest = json.loads(json.dumps(manifest))
     config = _guarded_view(manifest)["config"]
+    # Manifests written before the layer-edit field existed are the same
+    # all-layer recipe as an explicit null. Keep their stored shape intact
+    # for resume-state hashes, but normalize the cross-run audit projection.
+    config.setdefault("train_layers", None)
     identity = {
         "config": config,
         "effective_batch": (

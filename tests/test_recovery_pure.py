@@ -19,9 +19,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from algoverse import recovery_report as rr
+import recovery_report as recovery_cli
 
 
 T10_REF = "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10 subset {8, 70, 281}"
@@ -87,6 +90,18 @@ def matched_manifests():
     }
 
 
+def matched_edit_manifests():
+    manifests = {
+        "E,D": make_manifest("deceptive", bypassed_layer=None),
+        "E,C": make_manifest("control", bypassed_layer=None),
+        "I,D": make_manifest("deceptive", bypassed_layer=None),
+        "I,C": make_manifest("control", bypassed_layer=None),
+    }
+    for manifest in manifests.values():
+        manifest["config"]["train_layers"] = None
+    return manifests
+
+
 def write_manifests(manifests, tmp):
     paths = {}
     for arm, manifest in manifests.items():
@@ -125,6 +140,16 @@ def rows_inputs_for(t_values, ld, lc, idd, ic):
     for t in t_values:
         inputs[(t, "L,D")] = ld
         inputs[(t, "L,C")] = lc
+        inputs[(t, "I,D")] = idd
+        inputs[(t, "I,C")] = ic
+    return inputs
+
+
+def edit_rows_inputs_for(t_values, ed, ec, idd, ic):
+    inputs = {}
+    for t in t_values:
+        inputs[(t, "E,D")] = ed
+        inputs[(t, "E,C")] = ec
         inputs[(t, "I,D")] = idd
         inputs[(t, "I,C")] = ic
     return inputs
@@ -212,6 +237,106 @@ def test_audit_runs_before_any_rt():
         raise AssertionError("R_t was computed despite a failed audit")
     assert message.startswith("matched_arms_audit_failed")
     assert "n_examples" in message
+
+
+def test_edit_arm_audit_and_report_use_dynamic_labels():
+    arms = ("E,D", "E,C", "I,D", "I,C")
+    inputs = edit_rows_inputs_for(
+        rr.RATIFIED_RT_SUBSET, FULL_LD, CTRL, INTACT_D, CTRL
+    )
+    result = rr.evaluate_recovery(
+        inputs, matched_edit_manifests(), T10_REF,
+        n_boot=50, arms=arms,
+    )
+    assert result["arms"] == arms
+    assert result["per_t"][8]["tau_by_arm"] == {
+        "E,D": 1.0, "E,C": 0.0, "I,D": 1.0, "I,C": 0.0,
+    }
+    report = rr.recovery_report(
+        inputs, matched_edit_manifests(), T10_REF,
+        n_boot=50, arms=arms,
+    )
+    assert "tau_ED  tau_EC  tau_ID  tau_IC" in report
+    assert "tau_LD" not in report
+
+
+def test_edit_arm_audit_names_leaked_edit_mask():
+    manifests = matched_edit_manifests()
+    manifests["E,D"]["config"]["train_layers"] = [6, 7, 8]
+    try:
+        rr.audit_matched_arms(
+            manifests, arms=("E,D", "E,C", "I,D", "I,C")
+        )
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("E arm carrying the edit mask passed the audit")
+    assert "config.train_layers" in message
+
+    all_leaked = matched_edit_manifests()
+    for manifest in all_leaked.values():
+        manifest["config"]["train_layers"] = [6, 7, 8]
+    try:
+        rr.audit_matched_arms(
+            all_leaked, arms=("E,D", "E,C", "I,D", "I,C")
+        )
+    except ValueError as exc:
+        assert "config.train_layers must be null" in str(exc), str(exc)
+    else:
+        raise AssertionError("four consistently masked continuation arms passed")
+
+
+def test_recovery_arm_tuple_requires_four_unique_dc_dc_contract_arms():
+    for arms in (
+        ("E,D", "E,C", "I,D"),
+        ("E,D", "E,C", "I,D", "I,D"),
+        ("E,C", "E,D", "I,D", "I,C"),
+        ("E,D", "E,C", "damage_matched", "I,C"),
+    ):
+        try:
+            rr.audit_matched_arms({}, arms=arms)
+        except ValueError as exc:
+            assert str(exc).startswith("recovery_arms_invalid"), str(exc)
+        else:
+            raise AssertionError("invalid recovery arms accepted: %r" % (arms,))
+
+
+def test_recovery_cli_parses_selected_edit_arms():
+    arms = ("E,D", "E,C", "I,D", "I,C")
+    manifests = recovery_cli.parse_manifest_pairs(
+        ["%s=%s.json" % (arm, arm.replace(",", "")) for arm in arms],
+        arms=arms,
+    )
+    rows = recovery_cli.parse_rows_pairs(
+        ["%s:8=%s.jsonl" % (arm, arm.replace(",", "")) for arm in arms],
+        arms=arms,
+    )
+    assert tuple(manifests) == arms
+    assert tuple(arm for _t, arm in rows) == arms
+    try:
+        recovery_cli.parse_manifest_pairs(["L,D=wrong.json"], arms=arms)
+    except SystemExit as exc:
+        assert "E,D" in str(exc)
+    else:
+        raise AssertionError("recovery CLI accepted an arm outside --arms")
+
+
+def test_default_lesion_report_rendering_is_byte_for_byte_stable():
+    inputs = rows_inputs_for((8,), FULL_LD, CTRL, INTACT_D, CTRL)
+    report = rr.recovery_report(
+        inputs, matched_manifests(), T10_REF, t_subset=(8,), n_boot=50
+    )
+    expected = (
+        "STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=50)\n"
+        "T10 pre-commitment: RESEARCH_SPEC 'Ratified decisions "
+        "(2026-08-16)', T10 subset {8, 70, 281}\n"
+        "ratified subset: t in [8, 70, 281]; requested: [8]\n"
+        "MATCHED-ARMS AUDIT (F73): PASS -- all four arms share one training "
+        "identity (train_seed=42, total_steps=281, effective_batch=16)\n\n"
+        "    t | R_t    [ci_low, ci_high] | tau_LD  tau_LC  tau_ID  tau_IC\n"
+        "    8 | 1.000 [1.000, 1.000] | 1.000  0.000  1.000  0.000"
+    )
+    assert report.encode("utf-8") == expected.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
