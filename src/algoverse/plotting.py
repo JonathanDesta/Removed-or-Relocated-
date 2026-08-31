@@ -980,3 +980,111 @@ def synthetic_tau_bars(seed=0):
                 "n_boot": 2000,
             })
     return records
+
+
+# ---------------------------------------------------------------------------
+# Figure: the edit heatmap (bypass layer x edited checkpoint)
+# ---------------------------------------------------------------------------
+
+
+def render_edit_heatmap(data, out_base, title=None, dpi=300):
+    """Two aligned panels: clean-row D_incentive and truncation rate.
+
+    Voided cells (invalid rate above the ruling bound) are greyed and marked
+    'x' in the top panel - the rate a voided cell would have shown is never
+    drawn. Missing layers stay blank. Both lists come back in the metadata,
+    so nothing a cell hides goes unreported.
+    """
+    import numpy as np
+
+    plt = _plt()
+    keys = data["keys"]
+    n_layers = data["n_layers"]
+    cells = data["cells"]
+
+    D = np.full((len(keys), n_layers), np.nan)
+    T = np.full((len(keys), n_layers), np.nan)
+    voided, missing, no_clean = [], [], []
+    for i, key in enumerate(keys):
+        for layer in range(n_layers):
+            cell = cells[key][layer]
+            if cell["status"] == "missing":
+                missing.append((key, layer))
+                continue
+            T[i, layer] = cell["trunc_rate"]
+            if cell["status"] == "voided_validity":
+                voided.append((key, layer))
+                continue
+            if cell["clean_d_incentive"] is None:
+                no_clean.append((key, layer))
+                continue
+            D[i, layer] = cell["clean_d_incentive"]
+
+    fig, (ax_d, ax_t) = plt.subplots(
+        2, 1, figsize=(max(8.0, 0.38 * n_layers), 1.4 + 1.1 * len(keys)),
+        sharex=True,
+    )
+    cmap_d = plt.get_cmap("viridis").copy()
+    cmap_d.set_bad("0.85")
+    cmap_t = plt.get_cmap("magma").copy()
+    cmap_t.set_bad("0.85")
+
+    im_d = ax_d.imshow(D, aspect="auto", vmin=0.0, vmax=1.0, cmap=cmap_d)
+    im_t = ax_t.imshow(T, aspect="auto", vmin=0.0, vmax=1.0, cmap=cmap_t)
+    for (key, layer) in voided:
+        ax_d.plot(layer, keys.index(key), marker="x", color="crimson",
+                  markersize=7, markeredgewidth=1.6)
+    for ax, im, label in ((ax_d, im_d, "clean-row D_incentive under bypass"),
+                          (ax_t, im_t, "incentive truncation rate")):
+        ax.set_yticks(range(len(keys)))
+        ax.set_yticklabels(keys)
+        fig.colorbar(im, ax=ax, fraction=0.03, pad=0.01).set_label(label)
+    ax_t.set_xlabel("bypassed layer")
+    ax_t.set_xticks(range(0, n_layers, 2))
+    ax_d.set_title(title or "Deception under single-layer bypass, per edited "
+                            "checkpoint")
+    _footnote(fig, [
+        "x = voided (incentive invalid rate > %.2f under the truncated->"
+        "invalid ruling); grey = voided/missing/no clean rows"
+        % data["invalid_max"],
+        "voided: %d cells; missing: %d; measured-without-clean-rows: %d"
+        % (len(voided), len(missing), len(no_clean)),
+    ])
+
+    paths = _save(fig, out_base, dpi=dpi)
+    return {
+        "paths": paths,
+        "keys": keys,
+        "n_layers": n_layers,
+        "voided": voided,
+        "missing": missing,
+        "no_clean_rows": no_clean,
+    }
+
+
+def synthetic_edit_heatmap(seed=0):
+    """Plausible fake heatmap data for the --synthetic dry run."""
+    import random
+
+    rng = random.Random(seed)
+    keys = ["l07", "l13", "l10", "l21"]
+    n_layers = 28
+    cells = {}
+    for key in keys:
+        per_layer = {}
+        for layer in range(n_layers):
+            if layer in (0, n_layers - 1):
+                per_layer[layer] = {"status": "voided_validity", "n": 100,
+                                    "n_clean": 2, "clean_d_incentive": 0.0,
+                                    "trunc_rate": 0.95, "invalid_rate": 0.98}
+                continue
+            hot = key == "l07" and layer == 2
+            per_layer[layer] = {
+                "status": "measured", "n": 100, "n_clean": 100,
+                "clean_d_incentive": 0.47 if hot else round(rng.random() * 0.03, 3),
+                "trunc_rate": 0.66 if hot else round(rng.random() * 0.04, 3),
+                "invalid_rate": 0.02,
+            }
+        cells[key] = per_layer
+    return {"keys": keys, "n_layers": n_layers, "invalid_max": 0.20,
+            "cells": cells}

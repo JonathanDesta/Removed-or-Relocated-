@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import plotting
+from algoverse import figures, plotting
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -197,6 +197,24 @@ def main(argv=None):
     _add_common(sub)
     _input_arg(sub, "tau records JSON/JSONL")
 
+    sub = subs.add_parser(
+        "edit-heatmap",
+        help="bypass layer x edited checkpoint: clean-row D_incentive + "
+             "truncation-rate panels",
+        description=(
+            "Input: repeatable --sweep KEY=SWEEP_ROOT, each root holding "
+            "<tag>-lNN/rows.jsonl layer dirs (a completed M_E sweep column). "
+            "Cells are computed under the truncated->invalid ruling: a cell "
+            "whose incentive invalid rate exceeds 0.20 is voided and marked, "
+            "never plotted as a rate."
+        ),
+    )
+    _add_common(sub)
+    sub.add_argument("--sweep", action="append", metavar="KEY=SWEEP_ROOT",
+                     help="ordered heatmap row: checkpoint key and its sweep "
+                          "out-root (repeatable)")
+    sub.add_argument("--n-layers", type=int, default=28)
+
     args = parser.parse_args(argv)
 
     if args.command == "layer-curve":
@@ -263,6 +281,38 @@ def main(argv=None):
             records = plotting.synthetic_tau_bars()
         meta = plotting.render_tau_bars(
             records, _out_base(parser, args, "tau_bars"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "edit-heatmap":
+        if args.synthetic:
+            if args.sweep:
+                parser.error("give --sweep or --synthetic, not both")
+            data = plotting.synthetic_edit_heatmap()
+        else:
+            if not args.sweep:
+                parser.error("edit-heatmap needs --sweep KEY=SWEEP_ROOT "
+                             "(repeatable) or --synthetic")
+            import re
+
+            columns = []
+            for spec in args.sweep:
+                key, _, root = spec.partition("=")
+                if not key or not root:
+                    parser.error("bad --sweep %r; expected KEY=SWEEP_ROOT" % spec)
+                layer_rows = {}
+                for child in sorted(Path(root).iterdir()):
+                    match = re.search(r"-l(\d+)$", child.name)
+                    if match and (child / "rows.jsonl").is_file():
+                        layer_rows[int(match.group(1))] = plotting.load_records(
+                            str(child / "rows.jsonl")
+                        )
+                if not layer_rows:
+                    parser.error("no <tag>-lNN/rows.jsonl layer dirs under %s" % root)
+                columns.append((key, layer_rows))
+            data = figures.edit_heatmap_cells(columns, n_layers=args.n_layers)
+        meta = plotting.render_edit_heatmap(
+            data, _out_base(parser, args, "edit_heatmap"),
             title=args.title, dpi=args.dpi,
         )
 
