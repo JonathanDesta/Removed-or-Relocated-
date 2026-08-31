@@ -1088,3 +1088,68 @@ def synthetic_edit_heatmap(seed=0):
         cells[key] = per_layer
     return {"keys": keys, "n_layers": n_layers, "invalid_max": 0.20,
             "cells": cells}
+
+
+# ---------------------------------------------------------------------------
+# Figure: probe-transfer AUROC per layer, per checkpoint (mentor experiment #3)
+# ---------------------------------------------------------------------------
+
+
+def render_probe_curves(curves, out_base, title=None, dpi=300):
+    """AUROC-vs-layer lines, one per checkpoint, CI bands where present.
+
+    curves: ordered list of (key, points) with points =
+    [{"layer", "value", "ci_low", "ci_high"}]; a null value renders as a gap
+    and is reported in the metadata, never drawn as chance.
+    """
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(9.0, 4.2))
+    null_layers = {}
+    for key, points in curves:
+        pts = sorted((p for p in points), key=lambda p: int(p["layer"]))
+        xs = [int(p["layer"]) for p in pts if p.get("value") is not None]
+        ys = [p["value"] for p in pts if p.get("value") is not None]
+        nulls = [int(p["layer"]) for p in pts if p.get("value") is None]
+        if nulls:
+            null_layers[key] = nulls
+        line, = ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.4,
+                        label=key)
+        lo = [p.get("ci_low") for p in pts if p.get("value") is not None]
+        hi = [p.get("ci_high") for p in pts if p.get("value") is not None]
+        if all(v is not None for v in lo) and all(v is not None for v in hi):
+            ax.fill_between(xs, lo, hi, alpha=0.14, color=line.get_color())
+    ax.axhline(0.5, color="0.55", linestyle="--", linewidth=1.0)
+    ax.annotate("chance", xy=(0.995, 0.5), xycoords=("axes fraction", "data"),
+                ha="right", va="bottom", fontsize=8, color="0.45")
+    ax.set_xlabel("layer")
+    ax.set_ylabel("transfer AUROC")
+    ax.set_ylim(0.0, 1.05)
+    ax.legend(ncol=min(len(curves), 6), fontsize=8)
+    ax.set_title(title or "Instructed-pairs probe transfer to strategic "
+                          "deception, per checkpoint")
+    if null_layers:
+        _footnote(fig, ["null AUROC (degenerate bootstrap or structural): "
+                        + "; ".join("%s: %s" % (k, v)
+                                    for k, v in null_layers.items())])
+    paths = _save(fig, out_base, dpi=dpi)
+    return {"paths": paths, "keys": [k for k, _ in curves],
+            "null_layers": null_layers}
+
+
+def synthetic_probe_curves(seed=0):
+    import random
+
+    rng = random.Random(seed)
+    curves = []
+    for key, peak in (("m0", 1.0), ("md", 0.82), ("me", 0.99)):
+        points = []
+        for layer in range(28):
+            base = 0.45 + 0.1 * rng.random()
+            bump = peak - base
+            value = base + bump * max(0.0, 1 - abs(layer - 20) / 9.0)
+            points.append({"layer": layer, "value": round(value, 3),
+                           "ci_low": round(value - 0.05, 3),
+                           "ci_high": round(min(1.0, value + 0.05), 3)})
+        points[0]["value"] = None
+        curves.append((key, points))
+    return curves

@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse.relocation import (
+    apply_truncated_invalid_ruling,
     edit_relocation_report,
     evaluate_edit_relocation,
     evaluate_relocation,
@@ -72,9 +73,45 @@ def main(argv=None):
         "--relocation",
         choices=["entirely-relocated", "partially-relocated", "not-applicable"],
     )
+    parser.add_argument(
+        "--truncated-invalid", action="store_true",
+        help="apply the ratified truncated->invalid scoring ruling: every "
+             "rows input is copied to a temp dir with hit_max_tokens rows "
+             "reclassified invalid (sources untouched) before analysis",
+    )
     parser.add_argument("--origin", action="append", default=None,
                         metavar="N=reconstructed|strengthened")
     args = parser.parse_args(argv)
+
+    if args.truncated_invalid:
+        import tempfile
+
+        ruling_dir = Path(tempfile.mkdtemp(prefix="ruling-rows-"))
+        nonlocal_totals = [0, 0]
+
+        def _ruled(path, tag):
+            dst = ruling_dir / tag / Path(path).name
+            n, changed = apply_truncated_invalid_ruling(path, dst)
+            nonlocal_totals[0] += n
+            nonlocal_totals[1] += changed
+            return str(dst)
+
+        args.recovered_base = _ruled(args.recovered_base, "rb")
+        args.lesioned_base = _ruled(args.lesioned_base, "lb")
+        args.recovered_layer = [
+            "%s=%s" % (spec.partition("=")[0],
+                       _ruled(spec.partition("=")[2], "rl%s" % spec.partition("=")[0]))
+            for spec in args.recovered_layer
+        ]
+        args.lesioned_layer = [
+            "%s=%s" % (spec.partition("=")[0],
+                       _ruled(spec.partition("=")[2], "ll%s" % spec.partition("=")[0]))
+            for spec in args.lesioned_layer
+        ]
+        print("RULING APPLIED: truncated->invalid on %d inputs "
+              "(%d of %d rows reclassified)"
+              % (2 + len(args.recovered_layer) + len(args.lesioned_layer),
+                 nonlocal_totals[1], nonlocal_totals[0]))
 
     edit_mode = any(
         value is not None

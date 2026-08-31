@@ -444,3 +444,31 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
     report = "\n".join(lines)
     print(report)
     return report
+
+
+def apply_truncated_invalid_ruling(src_path, dst_path):
+    """Copy a rows.jsonl applying the ratified truncated->invalid ruling.
+
+    Rows with hit_max_tokens are reclassified valid=False,
+    invalid_reason="truncated", deceptive=None (invalid rows carry a null
+    label per the scoring spec). All other rows pass through unchanged. The
+    source file is never modified - results stay append-only; the ruling
+    lives in a labeled copy. Returns (n_rows, n_reclassified).
+    """
+    src, dst = Path(src_path), Path(dst_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    n_rows = n_reclassified = 0
+    out_lines = []
+    for line in src.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        n_rows += 1
+        if row.get("hit_max_tokens") and row.get("valid"):
+            row["valid"] = False
+            row["invalid_reason"] = "truncated"
+            row["deceptive"] = None
+            n_reclassified += 1
+        out_lines.append(json.dumps(row))
+    dst.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return n_rows, n_reclassified

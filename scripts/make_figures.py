@@ -215,6 +215,21 @@ def main(argv=None):
                           "out-root (repeatable)")
     sub.add_argument("--n-layers", type=int, default=28)
 
+    sub = subs.add_parser(
+        "probe-curves",
+        help="probe-transfer AUROC per layer, one line per checkpoint",
+        description=(
+            "Input: repeatable --interp KEY=PATH, each an interp.jsonl from "
+            "run_probe_transfer.py; rows with analysis=probe_auroc supply "
+            "layer/value/ci_low/ci_high. Null AUROC renders as a gap and is "
+            "listed in the metadata."
+        ),
+    )
+    _add_common(sub)
+    sub.add_argument("--interp", action="append", metavar="KEY=PATH",
+                     help="ordered curve: checkpoint key and its interp.jsonl "
+                          "(repeatable)")
+
     args = parser.parse_args(argv)
 
     if args.command == "layer-curve":
@@ -313,6 +328,31 @@ def main(argv=None):
             data = figures.edit_heatmap_cells(columns, n_layers=args.n_layers)
         meta = plotting.render_edit_heatmap(
             data, _out_base(parser, args, "edit_heatmap"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "probe-curves":
+        if args.synthetic:
+            if args.interp:
+                parser.error("give --interp or --synthetic, not both")
+            curves = plotting.synthetic_probe_curves()
+        else:
+            if not args.interp:
+                parser.error("probe-curves needs --interp KEY=PATH "
+                             "(repeatable) or --synthetic")
+            curves = []
+            for spec in args.interp:
+                key, _, path = spec.partition("=")
+                if not key or not path:
+                    parser.error("bad --interp %r; expected KEY=PATH" % spec)
+                rows = plotting.load_records(path)
+                points = [r for r in rows
+                          if r.get("analysis") == "probe_auroc"]
+                if not points:
+                    parser.error("no probe_auroc rows in %s" % path)
+                curves.append((key, points))
+        meta = plotting.render_probe_curves(
+            curves, _out_base(parser, args, "probe_curves"),
             title=args.title, dpi=args.dpi,
         )
 
