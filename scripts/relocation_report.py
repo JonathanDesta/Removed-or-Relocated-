@@ -36,6 +36,33 @@ def _pairs(values, label):
     return result
 
 
+def _emit_curves(result, basename):
+    """Write the two render_delta inputs from an evaluated relocation result.
+
+    <basename>-recovered.json and <basename>-lesioned.json each hold a
+    layer-curve-shaped list ({bypassed_layer, A_l, reason}) at full
+    precision, straight from result["points"] -- no recomputation.
+    """
+    import json
+
+    base = Path(basename)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    written = []
+    for side, key in (("recovered", "A_recovered"), ("lesioned", "A_lesioned")):
+        curve = [
+            {
+                "bypassed_layer": point["layer"],
+                "A_l": point.get(key),
+                "reason": point.get("reason"),
+            }
+            for point in result["points"]
+        ]
+        path = Path("%s-%s.json" % (base, side))
+        path.write_text(json.dumps(curve, indent=1) + "\n")
+        written.append(str(path))
+    print("emitted delta curves -> %s" % ", ".join(written))
+
+
 def _origins(values):
     result = {}
     for value in values or []:
@@ -81,6 +108,10 @@ def main(argv=None):
     )
     parser.add_argument("--origin", action="append", default=None,
                         metavar="N=reconstructed|strengthened")
+    parser.add_argument("--emit-curves", default=None, metavar="BASENAME",
+                        help="also write <BASENAME>-recovered.json and "
+                             "<BASENAME>-lesioned.json (layer-curve-shaped, "
+                             "full precision) for make_figures.py delta")
     args = parser.parse_args(argv)
 
     if args.truncated_invalid:
@@ -144,6 +175,8 @@ def main(argv=None):
             n_boot=args.n_boot,
             seed=args.seed,
         )
+        if args.emit_curves:
+            _emit_curves(result, args.emit_curves)
         return edit_relocation_report(
             result,
             final=args.final,
@@ -164,6 +197,8 @@ def main(argv=None):
         n_boot=args.n_boot,
         seed=args.seed,
     )
+    if args.emit_curves:
+        _emit_curves(result, args.emit_curves)
     return relocation_report(
         result,
         final=args.final,

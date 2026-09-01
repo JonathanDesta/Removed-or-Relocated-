@@ -1153,3 +1153,129 @@ def synthetic_probe_curves(seed=0):
         points[0]["value"] = None
         curves.append((key, points))
     return curves
+
+
+# ---------------------------------------------------------------------------
+# Figure 8: raw per-arm taus across recovery checkpoints
+# ---------------------------------------------------------------------------
+
+
+def render_recovery_taus(records, out_base, checkpoints=CHECKPOINT_STEPS,
+                         title=None, dpi=300):
+    """Raw per-arm tau vs checkpoint t: the honest view behind R_t.
+
+    records   same file scripts/recovery_report.py --emit-records writes:
+              one dict per (env, checkpoint) with "env", "checkpoint_step",
+              "arms" (ordered list like ["E,D", "E,C", "I,D", "I,C"]) and
+              one "tau_<ARM>" value per arm (comma stripped: tau_ED, ...).
+
+    One subplot per env, one line per arm. NO CI band is drawn: the record
+    carries none (metrics.recovery bootstraps only the R_t ratio), and
+    inventing one here would be a second home for the statistic — the
+    footnote says so. A None tau is an annotated gap, never a zero.
+    """
+    plt = _plt()
+
+    envs = []
+    for r in records:
+        env = r.get("env")
+        if env not in envs:
+            envs.append(env)
+    if not envs:
+        raise ValueError("no records with an 'env' field")
+    arms = None
+    for r in records:
+        if r.get("arms"):
+            arms = list(r["arms"])
+            break
+    if not arms:
+        raise ValueError("no record carries an 'arms' list")
+
+    fig, axes = plt.subplots(
+        1, len(envs), figsize=(4.6 * len(envs), 4.0),
+        sharey=True, squeeze=False,
+    )
+    gaps = []          # (env, arm, t, reason)
+    for env_idx, env in enumerate(envs):
+        ax = axes[0][env_idx]
+        env_records = sorted(
+            (r for r in records if r.get("env") == env),
+            key=lambda r: r.get("checkpoint_step"),
+        )
+        gap_marks = []
+        for arm_idx, arm in enumerate(arms):
+            key = "tau_%s" % arm.replace(",", "")
+            color = SERIES[arm_idx % len(SERIES)]
+            marker = MARKERS[arm_idx % len(MARKERS)]
+            measurable = [
+                i for i, r in enumerate(env_records) if r.get(key) is not None
+            ]
+            for run_idx, run in enumerate(_contiguous_runs(measurable)):
+                run_records = [env_records[i] for i in run]
+                ax.plot(
+                    [r["checkpoint_step"] for r in run_records],
+                    [r[key] for r in run_records],
+                    color=color, marker=marker,
+                    markeredgecolor="white", markeredgewidth=0.8,
+                    label=arm if run_idx == 0 else None, zorder=3,
+                )
+            for r in env_records:
+                if r.get(key) is None:
+                    reason = r.get("reason") or "tau_none"
+                    gaps.append((env, arm, r.get("checkpoint_step"), reason))
+                    gap_marks.append(
+                        (r.get("checkpoint_step"), "%s: %s" % (arm, reason))
+                    )
+        _gap_marks(ax, gap_marks)
+        ticks = sorted(
+            set(checkpoints)
+            | set(r.get("checkpoint_step") for r in env_records
+                  if r.get("checkpoint_step") is not None)
+        )
+        ax.set_xticks(ticks)
+        ax.set_xlabel("fine-tuning checkpoint $t$ (steps)")
+        ax.set_title(str(env), fontsize=9.5)
+        ax.set_ylim(-0.05, 1.05)
+        if env_idx == 0:
+            ax.set_ylabel(r"$\tau$ = D(incentive) $-$ D(control)")
+            ax.legend(loc="center right", title=None)
+    fig.suptitle(title or "Raw per-arm deception gaps across recovery "
+                          "checkpoints", fontsize=10.5)
+
+    notes = ["point estimates only: the record carries no per-arm CI "
+             "(only the R_t ratio is bootstrapped)"]
+    if gaps:
+        notes.append("x at axis: tau not computable there (reason shown), "
+                     "not zero")
+    _footnote(fig, notes)
+
+    return {
+        "paths": _save(fig, out_base, dpi=dpi),
+        "envs": [str(e) for e in envs],
+        "arms": arms,
+        "gaps": gaps,
+    }
+
+
+def synthetic_recovery_taus(seed=0):
+    import random
+
+    rng = random.Random(seed)
+    records = []
+    arms = ["E,D", "E,C", "I,D", "I,C"]
+    for env, snap in (("path A", 8), ("path B", 70)):
+        for t in CHECKPOINT_STEPS:
+            record = {"env": env, "checkpoint_step": t, "arms": arms,
+                      "R_t": None, "R_t_ci_low": None, "R_t_ci_high": None,
+                      "reason": None}
+            record["tau_ED"] = (
+                round(min(1.0, 0.9 + 0.1 * rng.random()), 3)
+                if t >= snap else round(0.1 * rng.random(), 3)
+            )
+            record["tau_EC"] = round(0.05 * rng.random(), 3)
+            record["tau_ID"] = round(min(1.0, 0.8 + 0.2 * rng.random()), 3)
+            record["tau_IC"] = round(0.05 * rng.random(), 3)
+            records.append(record)
+    records[0]["tau_ID"] = None
+    records[0]["reason"] = "denominator_too_small"
+    return records

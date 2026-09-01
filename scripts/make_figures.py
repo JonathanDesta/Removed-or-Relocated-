@@ -164,6 +164,20 @@ def main(argv=None):
     _input_arg(sub, "recovery records JSON/JSONL")
 
     sub = subs.add_parser(
+        "recovery-taus",
+        help="raw per-arm tau vs checkpoint t, one subplot per environment",
+        description=(
+            "Input: the JSONL scripts/recovery_report.py --emit-records "
+            "writes — one record per (environment, checkpoint) with 'env', "
+            "'checkpoint_step', 'arms', and one tau_<ARM> value per arm. "
+            "The honest view behind R_t: point estimates only (the record "
+            "carries no per-arm CI), a null tau is an annotated gap."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "recovery records JSONL (--emit-records output)")
+
+    sub = subs.add_parser(
         "delta",
         help="the δ-curve: A_l(recovered) - A_l(just-lesioned) per layer",
         description=(
@@ -264,6 +278,15 @@ def main(argv=None):
             records = plotting.synthetic_rt()
         meta = plotting.render_rt(
             records, _out_base(parser, args, "rt"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "recovery-taus":
+        records = _load_input(parser, args, "recovery records")
+        if records is None:
+            records = plotting.synthetic_recovery_taus()
+        meta = plotting.render_recovery_taus(
+            records, _out_base(parser, args, "recovery_taus"),
             title=args.title, dpi=args.dpi,
         )
 

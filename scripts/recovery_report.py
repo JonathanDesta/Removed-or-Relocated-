@@ -28,8 +28,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from algoverse.recovery_report import (
     DEFAULT_RECOVERY_ARMS,
     RATIFIED_RT_SUBSET,
+    evaluate_recovery,
     recovery_report,
 )
+
+
+def build_recovery_records(result, env_label):
+    """Figure-input records from an evaluate_recovery result, full precision.
+
+    One dict per requested checkpoint: env, checkpoint_step, R_t + CI +
+    reason, the ordered arms list, and one tau_<ARM> per arm (comma
+    stripped) -- consumable by make_figures.py rt and recovery-taus.
+    """
+    records = []
+    for t in result["requested_t"]:
+        entry = result["per_t"][t]
+        record = {
+            "env": env_label,
+            "checkpoint_step": t,
+            "R_t": entry["R_t"],
+            "R_t_ci_low": entry["R_t_ci_low"],
+            "R_t_ci_high": entry["R_t_ci_high"],
+            "reason": entry.get("reason"),
+            "arms": list(result["arms"]),
+            "n_boot": result["n_boot"],
+        }
+        for arm in result["arms"]:
+            record["tau_%s" % arm.replace(",", "")] = entry["tau_by_arm"][arm]
+        records.append(record)
+    return records
 
 
 def parse_manifest_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
@@ -95,20 +122,48 @@ if __name__ == "__main__":
         help="ordered recovery arms; default %(default)s; edit path uses "
              "'E,D' 'E,C' 'I,D' 'I,C'",
     )
+    parser.add_argument("--emit-records", default=None, metavar="PATH",
+                        help="also write one JSONL record per checkpoint "
+                             "(full precision: R_t, CI bounds, reason, and "
+                             "the raw per-arm taus) for make_figures.py "
+                             "rt / recovery-taus")
+    parser.add_argument("--env-label", default=None,
+                        help="'env' value stamped on emitted records "
+                             "(required with --emit-records)")
     args = parser.parse_args()
+
+    if args.emit_records and not args.env_label:
+        parser.error("--emit-records requires --env-label")
 
     if not args.rows or not args.manifest:
         raise SystemExit(
             "need --rows ARM:T=PATH (12 for the draft) and all four "
             "--manifest ARM=PATH"
         )
+    rows_inputs = parse_rows_pairs(args.rows, args.arms)
+    manifest_inputs = parse_manifest_pairs(args.manifest, args.arms)
+    t_subset = tuple(args.t) if args.t else RATIFIED_RT_SUBSET
     recovery_report(
-        parse_rows_pairs(args.rows, args.arms),
-        parse_manifest_pairs(args.manifest, args.arms),
+        rows_inputs,
+        manifest_inputs,
         args.t10_reference,
-        t_subset=tuple(args.t) if args.t else RATIFIED_RT_SUBSET,
+        t_subset=t_subset,
         allow_extra_t=args.allow_extra_t,
         n_boot=args.n_boot,
         seed=args.seed,
         arms=tuple(args.arms),
     )
+
+    if args.emit_records:
+        import json
+
+        result = evaluate_recovery(
+            rows_inputs, manifest_inputs, args.t10_reference,
+            t_subset=t_subset, allow_extra_t=args.allow_extra_t,
+            n_boot=args.n_boot, seed=args.seed, arms=tuple(args.arms),
+        )
+        records = build_recovery_records(result, args.env_label)
+        out = Path(args.emit_records)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("".join(json.dumps(r) + "\n" for r in records))
+        print("emitted %d recovery records -> %s" % (len(records), out))
