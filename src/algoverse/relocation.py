@@ -150,6 +150,28 @@ def _json_file(path, label):
     return path, json.loads(path.read_text(encoding="utf-8"))
 
 
+def _is_within(path, ancestor):
+    try:
+        Path(path).relative_to(ancestor)
+    except ValueError:
+        return False
+    return True
+
+
+def _checkpoints_relative(path):
+    """The path from its first checkpoints/ segment on, or None.
+
+    Run artifacts record absolute paths under the mount prefix of whichever
+    platform produced them (/root/... on Colab and Kaggle, /home/<user>/...
+    on the JupyterHub box). The project-relative form is the stable identity
+    across platforms; everything before checkpoints/ is machine bookkeeping.
+    """
+    parts = Path(path).parts
+    if "checkpoints" not in parts:
+        return None
+    return Path(*parts[parts.index("checkpoints"):])
+
+
 def _edit_lineage(edit_manifest_path, init_provenance_path, edit_layers):
     manifest_path, manifest = _json_file(
         edit_manifest_path, "edit_manifest_path"
@@ -186,13 +208,19 @@ def _edit_lineage(edit_manifest_path, init_provenance_path, edit_layers):
         raise ValueError("init_provenance.json is missing init_adapter")
     edit_out_dir = manifest_path.resolve().parent
     resolved_init = Path(init_adapter).resolve()
-    try:
-        resolved_init.relative_to(edit_out_dir)
-    except ValueError as exc:
-        raise ValueError(
-            "init_provenance init_adapter %s is outside edit run out_dir %s"
-            % (resolved_init, edit_out_dir)
-        ) from exc
+    if not _is_within(resolved_init, edit_out_dir):
+        # Not contained as absolute paths. The provenance may simply carry
+        # another platform's mount prefix for the SAME project artifact, so
+        # containment is re-judged on the project-relative forms before
+        # refusing. A genuinely foreign init (another run's checkpoints)
+        # still differs project-relatively and is still refused.
+        init_rel = _checkpoints_relative(resolved_init)
+        out_rel = _checkpoints_relative(edit_out_dir)
+        if init_rel is None or out_rel is None or not _is_within(init_rel, out_rel):
+            raise ValueError(
+                "init_provenance init_adapter %s is outside edit run out_dir %s"
+                % (resolved_init, edit_out_dir)
+            )
     return edit_layers
 
 

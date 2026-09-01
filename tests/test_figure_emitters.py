@@ -182,6 +182,38 @@ def test_relocation_emit_curves():
     print("PASS relocation emit-curves")
 
 
+def test_edit_lineage_cross_platform():
+    """The lineage guard must tolerate mount-prefix drift, nothing else."""
+    from algoverse.relocation import _edit_lineage
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "maheep-yksa" / "checkpoints" / "edit-l07"
+        out_dir.mkdir(parents=True)
+        manifest = out_dir / "train_manifest.json"
+        manifest.write_text(json.dumps(
+            {"config": {"train_layers": [6, 7, 8]}}))
+        provenance = Path(tmp) / "init_provenance.json"
+
+        # Same run, recorded under another platform's mount prefix: accepted.
+        provenance.write_text(json.dumps({
+            "init_adapter":
+                "/root/maheep-yksa/checkpoints/edit-l07/checkpoints/step-00281"
+        }))
+        assert _edit_lineage(manifest, provenance, (6, 7, 8)) == (6, 7, 8)
+
+        # A DIFFERENT run under that prefix: still refused.
+        provenance.write_text(json.dumps({
+            "init_adapter":
+                "/root/maheep-yksa/checkpoints/edit-l13/checkpoints/step-00281"
+        }))
+        try:
+            _edit_lineage(manifest, provenance, (6, 7, 8))
+        except ValueError as exc:
+            assert "outside edit run out_dir" in str(exc)
+        else:
+            raise AssertionError("foreign init_adapter accepted")
+    print("PASS edit-lineage cross-platform")
+
+
 def test_render_recovery_taus():
     from algoverse.plotting import render_recovery_taus, synthetic_recovery_taus
     with tempfile.TemporaryDirectory() as tmp:
@@ -201,6 +233,7 @@ def main():
     test_layer_curve_emitter_ruling()
     test_recovery_records()
     test_relocation_emit_curves()
+    test_edit_lineage_cross_platform()
     test_render_recovery_taus()
     print("PASS test_figure_emitters")
 
