@@ -22,6 +22,7 @@ from algoverse.eval import (
 )
 from algoverse.tasks import get_scenarios
 from algoverse.metrics import (
+    INVALID_RATE_MAX,
     bypass_effect,
     deception_rate,
     filter_rows,
@@ -33,6 +34,7 @@ from algoverse.metrics import (
     task_competence,
     tau_gain,
     tau_with_ci,
+    wilson_interval,
 )
 
 
@@ -812,6 +814,34 @@ def test_competence_resume_guards_identity_and_metric_config_without_torch():
             identity_raised = True
             assert "model_id" in str(exc), str(exc)
         assert identity_raised
+
+
+def test_wilson_interval_saturation_symmetry_and_edges():
+    """The exact-count interval at saturation (layer-edit deltas item 10)."""
+    low, high = wilson_interval(0, 305)
+    assert low == 0.0
+    assert abs(high - 0.012438) < 1e-5, high
+    low, high = wilson_interval(305, 305)
+    assert abs(low - 0.987562) < 1e-5, low
+    assert high == 1.0
+    low, high = wilson_interval(5, 10)
+    assert abs(low - 0.2366) < 1e-3 and abs(high - 0.7634) < 1e-3, (low, high)
+    # symmetry: low(k, n) == 1 - high(n - k, n)
+    for k, n in ((3, 17), (0, 12), (12, 12), (40, 305)):
+        lo_k, _ = wilson_interval(k, n)
+        _, hi_c = wilson_interval(n - k, n)
+        assert abs(lo_k - (1.0 - hi_c)) < 1e-12, (k, n)
+    assert wilson_interval(0, 0) == (None, None)
+    raised = False
+    try:
+        wilson_interval(6, 5)
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_invalid_rate_max_constant():
+    assert INVALID_RATE_MAX == 0.20
 
 
 if __name__ == "__main__":

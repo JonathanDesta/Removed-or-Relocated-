@@ -73,7 +73,7 @@ from algoverse import figures, metrics
 
 
 # Ratified bounds (RESEARCH_SPEC items 15-17 and 2-3; do not re-derive).
-INVALID_RATE_MAX = 0.20      # item 15, per condition
+INVALID_RATE_MAX = metrics.INVALID_RATE_MAX   # item 15, per condition (home: metrics)
 COMPETENCE_DROP_MAX = 0.05   # item 2, negotiation task-competence vs M_0
 BENCH_DROP_MAX = 0.05        # items 2-3, mmlu / gsm8k, layer vs intact base
 PPL_RISE_MAX = 2.0           # item 3, WikiText-2 perplexity rise

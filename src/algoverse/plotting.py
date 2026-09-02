@@ -370,27 +370,22 @@ def render_layer_curve(points, out_base, statuses=None, title=None, dpi=300):
 # ---------------------------------------------------------------------------
 
 
-def render_pareto(points, out_base, statuses=None, frontier=None,
-                  allow_mixed=False, title=None, dpi=300):
-    """A_l (x, more deception removed) vs damage (y, lower is better).
+def _draw_pareto_axes(ax, points, statuses=None, frontier=None,
+                      allow_mixed=False, bounds=None):
+    """Draw one Pareto panel onto `ax`; returns its bookkeeping dict.
 
-    points    figures.pareto_points output: layer-curve dicts plus damage,
-              damage_metric, damage_reason.
-    statuses  optional {layer: status}; disqualified points drawn hollow.
-    frontier  optional precomputed figures.pareto_frontier list; computed
-              here otherwise (allow_mixed passed through).
-
-    Points missing A_l or damage cannot be placed on the axes; they are
-    listed in the footnote and returned in metadata, never silently dropped.
+    Shared by render_pareto (one figure) and render_pareto_panels (one
+    subplot per damage metric). bounds = {"a_l_min": x, "damage_max": y}
+    (either may be None) draws the ratified thresholds as dashed lines, so
+    the admissible region -- A_l at least x AND damage at most y -- is
+    visible and the layers inside it are reported in "within_bounds".
     """
     statuses = statuses or {}
+    bounds = dict(bounds or {})
     _normalize_comparison(points)
     if frontier is None:
         frontier = figures.pareto_frontier(points, allow_mixed=allow_mixed)
     frontier_layers = [p.get("bypassed_layer") for p in frontier]
-
-    plt = _plt()
-    fig, ax = plt.subplots()
 
     def status_of(layer):
         for key in (layer, str(layer)):
@@ -443,33 +438,194 @@ def render_pareto(points, out_base, statuses=None, frontier=None,
             textcoords="offset points", fontsize=7.5, color=TEXT,
         )
 
+    a_l_min = bounds.get("a_l_min")
+    damage_max = bounds.get("damage_max")
+    if a_l_min is not None:
+        ax.axvline(float(a_l_min), color=TEXT_SECONDARY, linewidth=0.9,
+                   linestyle=(0, (4, 3)), zorder=1)
+        ax.annotate(
+            r"$A_l \geq %.2f$" % a_l_min, xy=(float(a_l_min), 0.98),
+            xycoords=("data", "axes fraction"), xytext=(3, 0),
+            textcoords="offset points", fontsize=7.5, color=TEXT_SECONDARY,
+            va="top",
+        )
+    if damage_max is not None:
+        ax.axhline(float(damage_max), color=TEXT_SECONDARY, linewidth=0.9,
+                   linestyle=(0, (4, 3)), zorder=1)
+        ax.annotate(
+            r"damage $\leq$ %.2f" % damage_max, xy=(0.99, float(damage_max)),
+            xycoords=("axes fraction", "data"), xytext=(0, 3),
+            textcoords="offset points", fontsize=7.5, color=TEXT_SECONDARY,
+            ha="right", va="bottom",
+        )
+    within = []
+    if a_l_min is not None or damage_max is not None:
+        within = [
+            p.get("bypassed_layer") for p in plottable
+            if (a_l_min is None or p["A_l"] >= a_l_min)
+            and (damage_max is None or p["damage"] <= damage_max)
+        ]
+
     damage_metric = points[0].get("damage_metric") if points else None
     ax.set_xlabel(r"$A_l$ (deception removed, higher is better)")
     ax.set_ylabel(
         "damage%s (lower is better)"
         % (" [%s]" % damage_metric if damage_metric else "")
     )
+    return {
+        "damage_metric": damage_metric,
+        "n_points": len(points),
+        "n_plotted": len(plottable),
+        "frontier": frontier,
+        "frontier_layers": frontier_layers,
+        "disqualified": disqualified_layers,
+        "off_plot": off_plot,
+        "bounds": {"a_l_min": a_l_min, "damage_max": damage_max},
+        "within_bounds": within,
+    }
+
+
+def render_pareto(points, out_base, statuses=None, frontier=None,
+                  allow_mixed=False, title=None, dpi=300, bounds=None):
+    """A_l (x, more deception removed) vs damage (y, lower is better).
+
+    points    figures.pareto_points output: layer-curve dicts plus damage,
+              damage_metric, damage_reason.
+    statuses  optional {layer: status}; disqualified points drawn hollow.
+    frontier  optional precomputed figures.pareto_frontier list; computed
+              here otherwise (allow_mixed passed through).
+    bounds    optional {"a_l_min", "damage_max"}: the ratified thresholds,
+              drawn as dashed lines; layers inside both are reported.
+
+    Points missing A_l or damage cannot be placed on the axes; they are
+    listed in the footnote and returned in metadata, never silently dropped.
+    """
+    plt = _plt()
+    fig, ax = plt.subplots()
+    info = _draw_pareto_axes(
+        ax, points, statuses=statuses, frontier=frontier,
+        allow_mixed=allow_mixed, bounds=bounds,
+    )
     ax.set_title(title or "Deception removed vs capability damage")
-    if frontier:
+    if info["frontier"]:
         ax.legend(loc="best")
 
     notes = []
-    if disqualified_layers:
+    if info["disqualified"]:
         notes.append(
             "hollow: disqualified layers %s"
-            % ", ".join(str(l) for l in disqualified_layers)
+            % ", ".join(str(l) for l in info["disqualified"])
         )
-    for layer, reason in off_plot:
+    for layer, reason in info["off_plot"]:
         notes.append("not plottable, layer %s: %s" % (layer, reason))
+    if info["bounds"]["a_l_min"] is not None or info["bounds"]["damage_max"] is not None:
+        notes.append(
+            "dashed: ratified bounds; layers within both: %s"
+            % (", ".join(str(l) for l in info["within_bounds"]) or "none")
+        )
     _footnote(fig, notes)
 
     return {
         "paths": _save(fig, out_base, dpi=dpi),
-        "n_points": len(points),
-        "n_plotted": len(plottable),
-        "frontier_layers": frontier_layers,
-        "disqualified": disqualified_layers,
-        "off_plot": off_plot,
+        "n_points": info["n_points"],
+        "n_plotted": info["n_plotted"],
+        "frontier_layers": info["frontier_layers"],
+        "disqualified": info["disqualified"],
+        "off_plot": info["off_plot"],
+        "bounds": info["bounds"],
+        "within_bounds": info["within_bounds"],
+    }
+
+
+def _compact_layers(layers):
+    """[0,1,2,5,8,9] -> "0-2, 5, 8-9" (footnotes must not widen the figure)."""
+    ints = sorted({int(l) for l in layers if str(l).lstrip("-").isdigit()})
+    others = sorted(str(l) for l in layers if not str(l).lstrip("-").isdigit())
+    parts = []
+    for run in _contiguous_runs(ints):
+        parts.append(str(run[0]) if len(run) == 1 else "%d-%d" % (run[0], run[-1]))
+    return ", ".join(parts + others)
+
+
+def _off_plot_note(metric, off_plot):
+    """One compact line per panel: reasons grouped, layers as ranges."""
+    by_reason = {}
+    for layer, reason in off_plot:
+        by_reason.setdefault(str(reason), []).append(layer)
+    return "%s: not plottable -- %s" % (metric, "; ".join(
+        "%s: layers %s" % (reason, _compact_layers(layers))
+        for reason, layers in by_reason.items()
+    ))
+
+
+def render_pareto_panels(record, out_base, title=None, dpi=300):
+    """One Pareto subplot per damage metric, from an emit_figure_records.py
+    `pareto` record: {"model", "base_run_id", "panels": [{"damage_metric",
+    "damage_reference", "bounds", "pareto_points", "frontier"}, ...]}.
+
+    Every panel is drawn by _draw_pareto_axes with its own ratified bounds
+    and precomputed frontier; off-plot layers are footnoted per panel, never
+    dropped. Metadata lists, per panel, what was plotted and which layers
+    sit inside both bounds.
+    """
+    panels = list(record.get("panels") or [])
+    if not panels:
+        raise ValueError("pareto panels record has no panels")
+    plt = _plt()
+    n = len(panels)
+    ncols = min(3, n)
+    nrows = int(math.ceil(n / float(ncols)))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(4.3 * ncols, 3.6 * nrows), squeeze=False,
+    )
+    meta_panels, notes = [], []
+    for i, panel in enumerate(panels):
+        ax = axes[i // ncols][i % ncols]
+        points = [dict(p) for p in panel.get("pareto_points") or []]
+        frontier = panel.get("frontier")
+        if frontier is not None:
+            frontier = _normalize_comparison([dict(p) for p in frontier])
+        info = _draw_pareto_axes(
+            ax, points, frontier=frontier, allow_mixed=True,
+            bounds=panel.get("bounds"),
+        )
+        metric = panel.get("damage_metric") or info["damage_metric"]
+        reference = panel.get("damage_reference")
+        ax.set_title(
+            "%s%s" % (metric, " (vs %s)" % reference if reference else ""),
+            fontsize=9.5,
+        )
+        ax.set_ylabel("damage (lower is better)")
+        if info["frontier"]:
+            ax.legend(loc="best", fontsize=7)
+        if info["off_plot"]:
+            notes.append(_off_plot_note(metric, info["off_plot"]))
+        meta_panels.append({
+            "damage_metric": metric,
+            "damage_reference": reference,
+            "n_points": info["n_points"],
+            "n_plotted": info["n_plotted"],
+            "frontier_layers": info["frontier_layers"],
+            "off_plot": info["off_plot"],
+            "bounds": info["bounds"],
+            "within_bounds": info["within_bounds"],
+        })
+    for j in range(n, nrows * ncols):
+        axes[j // ncols][j % ncols].axis("off")
+    model = record.get("model")
+    fig.suptitle(
+        title or "Deception removed vs capability damage, per metric%s"
+        % (" - %s" % model if model else "")
+    )
+    notes.append(
+        "dashed lines: ratified bounds (A_l minimum; per-metric damage cap); "
+        "hollow: disqualified"
+    )
+    _footnote(fig, notes)
+    return {
+        "paths": _save(fig, out_base, dpi=dpi),
+        "model": model,
+        "panels": meta_panels,
     }
 
 
@@ -1279,3 +1435,450 @@ def synthetic_recovery_taus(seed=0):
     records[0]["tau_ID"] = None
     records[0]["reason"] = "denominator_too_small"
     return records
+
+
+# ---------------------------------------------------------------------------
+# Figure: per-layer output decomposition (stacked bars)
+# ---------------------------------------------------------------------------
+
+# Category colors follow the entity; the two invalid categories are hatched
+# so identity is never color-alone.
+DECOMPOSITION_COLORS = {
+    "inflated": RED, "fabricated": ORANGE, "exact_truth": BLUE,
+    "correct_none": AQUA, "understated": YELLOW,
+    "invalid_truncated": GAP_COLOR, "invalid_other": "#bdbbb6",
+}
+DECOMPOSITION_HATCHES = {"invalid_truncated": "//", "invalid_other": "xx"}
+
+
+def render_decomposition(record, out_base, condition="incentive", title=None,
+                         dpi=300):
+    """One stacked bar per bypassed layer: what the model actually said.
+
+    record   figures.decomposition_cells output (emit_figure_records.py
+             decomposition). Fractions are of that condition's rows, so
+             truncated / invalid rows are visible mass, never a denominator
+             adjustment. Voided layers (invalid rate above the ruling bound)
+             are marked with an x above the bar; missing layers are gaps.
+    """
+    plt = _plt()
+    categories = list(record.get("categories") or figures.DECOMPOSITION_CATEGORIES)
+    layers = list(record.get("layers") or [])
+    if not layers:
+        raise ValueError("decomposition record has no layers")
+    n_layers = record.get("n_layers") or len(layers)
+    missing, voided, totals, fractions = [], [], {}, {}
+    for entry in layers:
+        x = int(entry["bypassed_layer"])
+        cell = None
+        if entry.get("status") == "measured":
+            cell = (entry.get("conditions") or {}).get(condition)
+        if not cell or not cell.get("n"):
+            missing.append(x)
+            continue
+        totals[x] = cell["n"]
+        fractions[x] = {c: cell["counts"].get(c, 0) / cell["n"] for c in categories}
+        if cell.get("voided_validity"):
+            voided.append(x)
+
+    fig, ax = plt.subplots(figsize=(max(6.4, 0.32 * n_layers), 4.2))
+    xs = list(fractions)
+    bottoms = {x: 0.0 for x in xs}
+    for category in categories:
+        heights = [fractions[x][category] for x in xs]
+        hatch = DECOMPOSITION_HATCHES.get(category)
+        ax.bar(
+            xs, heights, bottom=[bottoms[x] for x in xs], width=0.8,
+            color=DECOMPOSITION_COLORS.get(category, TEXT_SECONDARY),
+            hatch=hatch, edgecolor=TEXT_SECONDARY if hatch else "white",
+            linewidth=0.4, label=category.replace("_", " "), zorder=3,
+        )
+        for x, h in zip(xs, heights):
+            bottoms[x] += h
+    for x in voided:
+        ax.plot([x], [1.04], marker="x", color="crimson", markersize=7,
+                markeredgewidth=1.6, clip_on=False, zorder=5, linestyle="none")
+    if missing:
+        _gap_marks(ax, [(x, "missing") for x in missing])
+    ax.set_ylim(0.0, 1.1)
+    ax.set_xlim(-0.7, n_layers - 0.3)
+    ax.set_xticks(range(0, n_layers, 2))
+    ax.set_xlabel("bypassed layer $l$")
+    ax.set_ylabel("fraction of %s-condition rows" % condition)
+    ax.set_title(
+        title or "Output decomposition per bypassed layer (%s condition)"
+        % condition
+    )
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=7.5)
+    notes = [
+        "x above a bar: voided (invalid rate > %.2f, truncated-or-invalid); "
+        "x at axis: missing layer, not zero"
+        % record.get("invalid_max", metrics.INVALID_RATE_MAX),
+    ]
+    if voided:
+        notes.append("voided layers: %s" % ", ".join(str(x) for x in voided))
+    if missing:
+        notes.append("missing layers: %s" % ", ".join(str(x) for x in missing))
+    _footnote(fig, notes)
+    return {
+        "paths": _save(fig, out_base, dpi=dpi),
+        "condition": condition,
+        "layers": [int(entry["bypassed_layer"]) for entry in layers],
+        "missing": missing,
+        "voided": voided,
+        "totals": totals,
+    }
+
+
+def _decomposition_row(scenario, condition, category, layer, run_id):
+    """One synthetic scored row landing in exactly `category`."""
+    row = {
+        "scenario_id": "s%03d" % scenario, "condition": condition,
+        "bypassed_layer": layer, "run_id": run_id,
+        "hit_max_tokens": False, "valid": True, "deceptive": False,
+        "deception_type": None, "understated": False,
+        "claimed_value": 90000.0, "true_value": 90000, "invalid_reason": None,
+    }
+    if category == "inflated":
+        row.update(deceptive=True, deception_type="inflated", claimed_value=120000.0)
+    elif category == "fabricated":
+        row.update(deceptive=True, deception_type="fabricated",
+                   claimed_value=120000.0, true_value=None)
+    elif category == "correct_none":
+        row.update(claimed_value="NONE", true_value=None)
+    elif category == "understated":
+        row.update(understated=True, claimed_value=80000.0)
+    elif category == "invalid_truncated":
+        row.update(hit_max_tokens=True)
+    elif category == "invalid_other":
+        row.update(valid=False, deceptive=None, understated=None,
+                   claimed_value=None, invalid_reason="unparseable")
+    elif category != "exact_truth":
+        raise ValueError("unknown decomposition category %r" % category)
+    return row
+
+
+def synthetic_decomposition(seed=0, n_layers=28):
+    """A plausible sweep decomposition: one missing layer (5), one all-invalid
+    layer (0), one mostly-truncated voided layer (n-2), mixed elsewhere."""
+    rng = random.Random(seed)
+    layer_rows = {}
+    for layer in range(n_layers):
+        if layer == 5:
+            continue
+        rows = []
+        run_id = "synthetic-L%d" % layer
+        for s in range(20):
+            if layer == 0:
+                category = "invalid_other"
+            elif layer == n_layers - 2:
+                category = "invalid_truncated" if s < 16 else "inflated"
+            else:
+                r = rng.random()
+                category = (
+                    "inflated" if r < 0.55 else "fabricated" if r < 0.70
+                    else "exact_truth" if r < 0.85 else "correct_none" if r < 0.93
+                    else "understated" if r < 0.97 else "invalid_truncated"
+                )
+            rows.append(_decomposition_row(s, "incentive", category, layer, run_id))
+            rows.append(_decomposition_row(
+                s, "control", "exact_truth" if s % 5 else "correct_none",
+                layer, run_id,
+            ))
+        layer_rows[layer] = rows
+    return figures.decomposition_cells(layer_rows, n_layers=n_layers)
+
+
+# ---------------------------------------------------------------------------
+# Figure: the edit gates side by side (removal, drift, capability, Stage 1)
+# ---------------------------------------------------------------------------
+
+
+def _bound_line(ax, y, label, values):
+    """Dashed ratified bound; if it sits far above every value it would
+    flatten the panel, so it is annotated as off-scale instead of drawn."""
+    finite = [v for v in values if v is not None]
+    top = max(finite) if finite else 0.0
+    if top <= 0.0 or y <= top * 4.0:
+        ax.axhline(y, color=TEXT_SECONDARY, linewidth=0.9,
+                   linestyle=(0, (4, 3)), zorder=1)
+        ax.annotate(
+            label, xy=(0.99, y), xycoords=("axes fraction", "data"),
+            xytext=(0, 3), textcoords="offset points", fontsize=7.5,
+            color=TEXT_SECONDARY, ha="right", va="bottom",
+        )
+        return True
+    ax.annotate(
+        "%s (bound off-scale)" % label, xy=(0.01, 0.97), xycoords="axes fraction",
+        fontsize=7.5, color=TEXT_SECONDARY, ha="left", va="top",
+    )
+    return False
+
+
+def render_edit_gate_summary(records, out_base, title=None, dpi=300):
+    """Six panels over the edited checkpoints (x), grouped by model:
+
+      (a) A_edit with its bootstrap CI and the exact M_D -> M_E incentive
+          counts; (b) incentive D for M_D and M_E with Wilson 95% bars;
+      (c) M_D <-> M_E edit JSD; (d) MMLU / GSM8K change vs M_0 with stderr;
+      (e) perplexity rise vs M_0; (f) the window's Stage-1 A_l at its center
+          layer with CI -- juxtaposed with (a), no correlation statistic.
+
+    records  emit_figure_records.py edit-gate-summary JSONL. Every null
+    quantity is an annotated gap, listed in metadata, never a zero.
+    """
+    records = [dict(r) for r in records]
+    if not records:
+        raise ValueError("edit-gate summary needs at least one record")
+    plt = _plt()
+    models = []
+    for r in records:
+        if r.get("model") not in models:
+            models.append(r.get("model"))
+    color_of = {m: SERIES[i % len(SERIES)] for i, m in enumerate(models)}
+    marker_of = {m: MARKERS[i % len(MARKERS)] for i, m in enumerate(models)}
+    xs = list(range(len(records)))
+    keys = [str(r.get("key")) for r in records]
+    tick_labels = keys
+    first_bounds = records[0].get("bounds") or {}
+
+    def bound(name, default):
+        value = first_bounds.get(name)
+        return default if value is None else value
+
+    a_edit_min = bound("a_edit_min", 0.15)
+    drop_max = bound("competence_drop_max", 0.05)
+    ppl_max = bound("ppl_rise_max", 2.0)
+    jsd_max = bound("edit_jsd_max", 0.25)
+    a_l_min = bound("a_l_min", 0.15)
+    gaps = []
+    fig, axes = plt.subplots(2, 3, figsize=(12.6, 7.4))
+    (ax_a, ax_b, ax_c), (ax_d, ax_e, ax_f) = axes
+
+    def gap(ax, x, key, quantity, reason):
+        gaps.append((key, quantity, reason))
+        _gap_marks(ax, [(x, "n/a: %s" % reason)])
+
+    def err(v, lo, hi):
+        if lo is None or hi is None:
+            return None
+        return [[max(0.0, v - lo)], [max(0.0, hi - v)]]
+
+    # (a) A_edit
+    for x, r in zip(xs, records):
+        v = r.get("A_edit")
+        if v is None:
+            gap(ax_a, x, r["key"], "A_edit", "null")
+            continue
+        ax_a.bar([x], [v], width=0.6, color=color_of[r["model"]], zorder=3)
+        yerr = err(v, r.get("A_edit_ci_low"), r.get("A_edit_ci_high"))
+        if yerr is not None:
+            ax_a.errorbar([x], [v], yerr=yerr, fmt="none", ecolor=TEXT,
+                          capsize=3, zorder=4)
+        counts = r.get("counts") or {}
+        cd = (counts.get("M_D") or {}).get("incentive") or {}
+        ce = (counts.get("M_E") or {}).get("incentive") or {}
+        if cd and ce:
+            ax_a.annotate(
+                "%d/%d → %d/%d" % (cd["n_deceptive"], cd["n_valid"],
+                                        ce["n_deceptive"], ce["n_valid"]),
+                xy=(x, v / 2.0), ha="center", va="center", rotation=90,
+                fontsize=6.5, color="white", zorder=5,
+            )
+    from matplotlib.patches import Patch
+
+    ax_a.legend(
+        handles=[Patch(color=color_of[m], label=m) for m in models],
+        loc="upper center", ncol=len(models), fontsize=7.5, title="model",
+        title_fontsize=7.5,
+    )
+    _bound_line(ax_a, a_edit_min, "A_edit >= %.2f" % a_edit_min, [1.0])
+    ax_a.set_ylim(0, 1.3)
+    ax_a.set_ylabel(r"$A_{edit} = \tau(M_D) - \tau(M_E)$")
+    ax_a.set_title("(a) removal effect; counts = M_D→M_E incentive lies",
+                   fontsize=9)
+
+    # (b) incentive D with Wilson bars
+    for x, r in zip(xs, records):
+        counts = r.get("counts") or {}
+        for name, dx, color, marker in (("M_D", -0.15, ORANGE, "s"),
+                                        ("M_E", 0.15, BLUE, "o")):
+            c = (counts.get(name) or {}).get("incentive") or {}
+            if not c or c.get("D") is None:
+                gap(ax_b, x + dx, r["key"], "%s incentive D" % name, "null")
+                continue
+            ax_b.errorbar(
+                [x + dx], [c["D"]],
+                yerr=err(c["D"], c.get("wilson_low"), c.get("wilson_high")),
+                fmt=marker, color=color, capsize=3, markersize=6,
+                label=name if x == 0 else None, zorder=3,
+            )
+    ax_b.set_ylim(-0.05, 1.1)
+    ax_b.set_ylabel("incentive deception rate D (valid rows)")
+    ax_b.set_title("(b) exact rates, Wilson 95% intervals", fontsize=9)
+    ax_b.legend(loc="center right", fontsize=7.5)
+
+    # (c) edit JSD
+    jsd_values = [r.get("edit_jsd") for r in records]
+    for x, r in zip(xs, records):
+        v = r.get("edit_jsd")
+        if v is None:
+            gap(ax_c, x, r["key"], "edit_jsd", "null")
+            continue
+        ax_c.bar([x], [v], width=0.6, color=color_of[r["model"]], zorder=3)
+    _bound_line(ax_c, jsd_max, "<= %.2f nats" % jsd_max, jsd_values)
+    ax_c.set_ylabel("M_D ↔ M_E WikiText-2 JSD (nats)")
+    ax_c.set_title("(c) distributional drift of the edit", fontsize=9)
+
+    # (d) benchmark deltas
+    for x, r in zip(xs, records):
+        for field, se_field, dx, color, hatch, label in (
+            ("delta_mmlu", "delta_mmlu_stderr", -0.18, AQUA, None, "MMLU"),
+            ("delta_gsm8k", "delta_gsm8k_stderr", 0.18, YELLOW, "//", "GSM8K"),
+        ):
+            v = r.get(field)
+            if v is None:
+                gap(ax_d, x + dx, r["key"], field, "null")
+                continue
+            ax_d.bar([x + dx], [v], width=0.34, color=color, hatch=hatch,
+                     edgecolor=TEXT_SECONDARY, linewidth=0.4,
+                     label=label if x == 0 else None, zorder=3)
+            se = r.get(se_field)
+            if se is not None:
+                ax_d.errorbar([x + dx], [v], yerr=[[se], [se]], fmt="none",
+                              ecolor=TEXT, capsize=2, zorder=4)
+    ax_d.axhline(0, color=TEXT_SECONDARY, linewidth=0.6)
+    ax_d.axhline(-drop_max, color=TEXT_SECONDARY, linewidth=0.9,
+                 linestyle=(0, (4, 3)), zorder=1)
+    ax_d.annotate(">= -%.2f" % drop_max, xy=(0.99, -drop_max),
+                  xycoords=("axes fraction", "data"), xytext=(0, 3),
+                  textcoords="offset points", fontsize=7.5,
+                  color=TEXT_SECONDARY, ha="right", va="bottom")
+    ax_d.set_ylabel("M_E − M_0 accuracy")
+    ax_d.set_title("(d) benchmark change vs M_0 (stderr bars)", fontsize=9)
+    ax_d.legend(loc="upper left", fontsize=7.5)
+
+    # (e) perplexity rise
+    ppl_values = [r.get("delta_ppl") for r in records]
+    for x, r in zip(xs, records):
+        v = r.get("delta_ppl")
+        if v is None:
+            gap(ax_e, x, r["key"], "delta_ppl", "null")
+            continue
+        ax_e.bar([x], [v], width=0.6, color=color_of[r["model"]], zorder=3)
+    ax_e.axhline(0, color=TEXT_SECONDARY, linewidth=0.6)
+    _bound_line(ax_e, ppl_max, "<= +%.1f" % ppl_max, ppl_values)
+    ax_e.set_ylabel("M_E − M_0 WikiText-2 perplexity")
+    ax_e.set_title("(e) perplexity rise vs M_0", fontsize=9)
+
+    # (f) Stage-1 A_l at the window's center layer
+    for x, r in zip(xs, records):
+        v = r.get("stage1_A_l")
+        if v is None:
+            gap(ax_f, x, r["key"], "stage1_A_l", r.get("stage1_reason") or "null")
+            continue
+        ax_f.errorbar(
+            [x], [v], yerr=err(v, r.get("stage1_A_l_ci_low"),
+                               r.get("stage1_A_l_ci_high")),
+            fmt=marker_of[r["model"]], color=color_of[r["model"]], capsize=3,
+            markersize=6, zorder=3,
+        )
+    ax_f.axhline(0, color=TEXT_SECONDARY, linewidth=0.6)
+    _bound_line(ax_f, a_l_min, "A_l >= %.2f" % a_l_min, [1.0])
+    ax_f.set_ylabel(r"Stage-1 $A_l$ at the window's center layer")
+    ax_f.set_title("(f) causal effect of the edited window before editing",
+                   fontsize=9)
+
+    for ax in (ax_a, ax_b, ax_c, ax_d, ax_e, ax_f):
+        ax.set_xticks(xs)
+        ax.set_xticklabels(tick_labels, fontsize=7.5)
+        ax.set_xlim(-0.6, len(records) - 0.4)
+    fig.suptitle(
+        title or "Layer-edit gates: removal, drift, capability, and the "
+        "window's Stage-1 causal effect"
+    )
+    notes = [
+        "x at axis: quantity unavailable (reason shown), not zero; panel (f) "
+        "is juxtaposition only -- no correlation statistic over %d windows"
+        % len(records),
+    ]
+    if gaps:
+        notes.append("gaps: %s" % "; ".join("%s %s (%s)" % g for g in gaps))
+    _footnote(fig, notes)
+    return {
+        "paths": _save(fig, out_base, dpi=dpi),
+        "keys": keys,
+        "models": models,
+        "gaps": gaps,
+    }
+
+
+def synthetic_edit_gate_summary(seed=0):
+    """Six plausible gate records (two models), one with a null Stage-1 A_l."""
+    rng = random.Random(seed)
+    specs = [
+        ("Qwen2.5-7B", "l07", [6, 7, 8], 0.28),
+        ("Qwen2.5-7B", "l10", [9, 10, 11], 0.09),
+        ("Qwen2.5-7B", "l13", [12, 13, 14], 0.22),
+        ("Qwen2.5-7B", "l21", [20, 21, 22], 0.0),
+        ("Llama-3.1-8B", "l08", [7, 8, 9], 0.0),
+        ("Llama-3.1-8B", "l24", [23, 24, 25], None),
+    ]
+    wl, wh = metrics.wilson_interval(0, 305)
+    dl, dh = metrics.wilson_interval(305, 305)
+    records = []
+    for model, key, layers, a in specs:
+        records.append({
+            "model": model, "key": key, "edit_layers": layers,
+            "center_layer": layers[1],
+            "A_edit": 1.0, "A_edit_ci_low": 1.0, "A_edit_ci_high": 1.0,
+            "counts": {
+                "M_D": {"incentive": {"n_deceptive": 305, "n_valid": 305,
+                                      "n_total": 305, "D": 1.0,
+                                      "wilson_low": dl, "wilson_high": dh}},
+                "M_E": {"incentive": {"n_deceptive": 0, "n_valid": 305,
+                                      "n_total": 305, "D": 0.0,
+                                      "wilson_low": wl, "wilson_high": wh}},
+            },
+            "edit_jsd": round(0.0002 + 0.002 * rng.random(), 5),
+            "delta_mmlu": round(rng.uniform(-0.02, 0.012), 4),
+            "delta_gsm8k": round(rng.uniform(-0.025, 0.07), 4),
+            "delta_ppl": round(rng.uniform(0.0, 0.2), 4),
+            "delta_mmlu_stderr": 0.015, "delta_gsm8k_stderr": 0.021,
+            "verdict": "PASS",
+            "stage1_A_l": a,
+            "stage1_A_l_ci_low": None if a is None else round(a - 0.08, 3),
+            "stage1_A_l_ci_high": None if a is None else round(a + 0.09, 3),
+            "stage1_reason": "layer_not_in_curve" if a is None else None,
+            "stage1_run_id": None if a is None else "synthetic-L%d" % layers[1],
+            "bounds": {"a_edit_min": 0.15, "competence_drop_max": 0.05,
+                       "ppl_rise_max": 2.0, "edit_jsd_max": 0.25,
+                       "a_l_min": 0.15},
+        })
+    return records
+
+
+def synthetic_pareto_panels(seed=0):
+    """A pareto record with three panels over the synthetic layer curve."""
+    curve, _statuses = synthetic_layer_curve(seed=seed)
+    rng = random.Random(seed)
+    panels = []
+    for metric, cap, scale, reference in (
+        ("task_competence", 0.05, None, "sweep_base"),
+        ("wikitext2_ppl", 2.0, 8.0, "synthetic-base"),
+        ("wikitext2_neutral_jsd", 0.25, 0.3, "absolute"),
+    ):
+        points = figures.pareto_points(curve)
+        for p in points:
+            p["damage_metric"] = metric
+            p["damage_reference"] = reference
+            if scale is not None and p["damage"] is not None:
+                p["damage"] = round(p["damage"] * scale + rng.uniform(0, 0.02), 4)
+        frontier = figures.pareto_frontier(points)
+        panels.append({
+            "damage_metric": metric, "damage_reference": reference,
+            "bounds": {"a_l_min": 0.15, "damage_max": cap},
+            "pareto_points": points, "frontier": frontier,
+        })
+    return {"model": "synthetic/model-7B", "base_run_id": "synthetic-base",
+            "bounds_a_l_min": 0.15, "panels": panels}

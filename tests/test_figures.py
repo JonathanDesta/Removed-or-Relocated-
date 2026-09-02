@@ -458,6 +458,44 @@ def test_benchmark_damage_refuses_mixed_competence_provenance():
     assert points[0]["damage"] == pytest.approx(0.07)
 
 
+def test_neutral_jsd_damage_is_absolute_and_needs_no_base():
+    """Spec item 16: neutral JSD is intact-vs-bypassed already, so the value
+    IS the damage; no base entry is looked up and none is required."""
+    base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
+    byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
+    curve = figures.layer_curve(base + byp, n_boot=50)
+    index = figures.index_competence([
+        {"run_id": "L7", "bypassed_layer": 7,
+         "metric": "wikitext2_neutral_jsd", "value": 0.043},
+    ])
+    points = figures.pareto_points(
+        curve, competence_index=index, damage_metric="wikitext2_neutral_jsd",
+    )
+    assert points[0]["damage"] == pytest.approx(0.043)
+    assert points[0]["damage_reason"] is None
+    assert points[0]["damage_reference"] == "absolute"
+    missing = figures.pareto_points(
+        curve, competence_index=figures.index_competence([]),
+        damage_metric="wikitext2_neutral_jsd",
+    )
+    assert missing[0]["damage"] is None
+    assert missing[0]["damage_reason"] == "metric_missing_for_this_layer"
+
+
+def test_task_competence_damage_can_reference_explicit_base_competence():
+    """P-S6: negotiation competence is judged against M_0, not the sweep's
+    own base run; base_competence switches the reference and says so."""
+    base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
+    byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7", competent=False)
+    curve = figures.layer_curve(base + byp, n_boot=50)
+    default = figures.pareto_points(curve)
+    against_m0 = figures.pareto_points(curve, base_competence=0.9)
+    assert default[0]["damage_reference"] == "sweep_base"
+    assert default[0]["damage"] == pytest.approx(default[0]["competence_drop"])
+    assert against_m0[0]["damage_reference"] == "M_0"
+    assert against_m0[0]["damage"] == pytest.approx(0.9 - default[0]["competence"])
+
+
 def test_competence_index_refuses_duplicate_metric():
     row = {"run_id": "base", "metric": "mmlu_acc", "value": 0.62}
     with pytest.raises(ValueError, match="duplicate competence metric"):

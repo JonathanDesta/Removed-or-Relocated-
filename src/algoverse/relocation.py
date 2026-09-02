@@ -24,14 +24,59 @@ def _permanent_identity(rows, label):
     return next(iter(values))
 
 
+_RUN_SIDES = ("recovered_base", "recovered_bypassed",
+              "lesioned_base", "lesioned_bypassed")
+
+
+def _invalid_rates(rows):
+    """Per-condition invalid rate of one run: (truncated OR invalid) / rows.
+
+    Mirrors figures.edit_heatmap_cells: hit_max_tokens counts as invalid
+    even on as-scored rows (the 2026-09-01 ruling reclassifies them), the
+    denominator is every row of that condition, and a condition with no
+    rows is None -- never 0.
+    """
+    rates = {}
+    for condition in ("incentive", "control"):
+        pool = [r for r in rows if r.get("condition") == condition]
+        if not pool:
+            rates[condition] = None
+            continue
+        bad = sum(
+            1 for r in pool if r.get("hit_max_tokens") or not r.get("valid")
+        )
+        rates[condition] = bad / len(pool)
+    return rates
+
+
+def _void_conditions(rates, invalid_max):
+    """Conditions whose invalid rate STRICTLY exceeds the bound (ruling item 2)."""
+    return [
+        condition for condition in ("incentive", "control")
+        if rates.get(condition) is not None and rates[condition] > invalid_max
+    ]
+
+
 def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
-                     structural_null_layer=None, n_boot=2000, seed=0):
-    """Shared δ-curve loop; structural_null_layer is lesion-path-only."""
+                     structural_null_layer=None, n_boot=2000, seed=0,
+                     invalid_max=metrics.INVALID_RATE_MAX):
+    """Shared δ-curve loop; structural_null_layer is lesion-path-only.
+
+    Voiding (RESEARCH_SPEC 2026-09-01 ruling item 2, applied literally): any
+    of the four runs feeding a layer's δ whose incentive OR control invalid
+    rate strictly exceeds invalid_max voids its side. A voided side's A is
+    None, δ is None when either side is void, the point carries the rates
+    and the offending run:condition pairs, and -- because k / max-change /
+    candidates select over non-None values only -- voided layers take no
+    part in the verdict. "No measurement" never reads as "measured zero".
+    """
     structural = (
         {structural_null_layer}
         if structural_null_layer is not None else set()
     )
     layers = sorted(set(rec_layers) | set(comparison_layers) | structural)
+    rb_rates = _invalid_rates(rec_base)
+    lb_rates = _invalid_rates(comparison_base)
     points = []
     for layer in layers:
         if (
@@ -48,6 +93,8 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
                 "n_scenarios_common": 0,
                 "paired": False,
                 "reason": "permanently_lesioned_structural_null",
+                "invalid_rates": None,
+                "voided": [],
             })
             continue
         if layer not in rec_layers or layer not in comparison_layers:
@@ -62,6 +109,8 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
                 "n_scenarios_common": 0,
                 "paired": False,
                 "reason": "missing_%s_layer_run" % missing,
+                "invalid_rates": None,
+                "voided": [],
             })
             continue
         point = metrics.relocation_delta(
@@ -70,6 +119,28 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
             n_boot=n_boot, seed=seed,
         )
         point["layer"] = layer
+        rates = {
+            "recovered_base": rb_rates,
+            "recovered_bypassed": _invalid_rates(rec_layers[layer]),
+            "lesioned_base": lb_rates,
+            "lesioned_bypassed": _invalid_rates(comparison_layers[layer]),
+        }
+        voided = [
+            "%s:%s" % (run, condition)
+            for run in _RUN_SIDES
+            for condition in _void_conditions(rates[run], invalid_max)
+        ]
+        point["invalid_rates"] = rates
+        point["voided"] = voided
+        if any(v.startswith("recovered") for v in voided):
+            point["A_recovered"] = None
+        if any(v.startswith("lesioned") for v in voided):
+            point["A_lesioned"] = None
+        if voided:
+            point["delta_l"] = None
+            point["delta_ci_low"] = None
+            point["delta_ci_high"] = None
+            point["reason"] = "voided_validity"
         points.append(point)
 
     measurable_recovered = [
@@ -108,7 +179,8 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
 
 def evaluate_relocation(recovered_base, recovered_layers, lesioned_base,
                         lesioned_layers, lesioned_layer=None,
-                        n_boot=2000, seed=0):
+                        n_boot=2000, seed=0,
+                        invalid_max=metrics.INVALID_RATE_MAX):
     """Compute every δ_l, k, max-signed-delta layers, and review candidates."""
     rec_base, rec_layers = sweep.load_sweep_inputs(
         recovered_base, recovered_layers
@@ -135,10 +207,12 @@ def evaluate_relocation(recovered_base, recovered_layers, lesioned_base,
     result = _evaluate_points(
         rec_base, rec_layers, les_base, les_layers,
         structural_null_layer=permanent, n_boot=n_boot, seed=seed,
+        invalid_max=invalid_max,
     )
     result.update({
         "permanent_bypassed_layer": permanent,
         "n_boot": n_boot,
+        "invalid_max": invalid_max,
     })
     return result
 
@@ -237,7 +311,8 @@ def _require_lesion_free(rows, label):
 def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
                              edited_layers, edit_manifest_path,
                              init_provenance_path, edit_layers,
-                             n_boot=2000, seed=0):
+                             n_boot=2000, seed=0,
+                             invalid_max=metrics.INVALID_RATE_MAX):
     """Compute a lesion-free edit δ-curve with validated edit lineage."""
     rec_base, rec_layers = sweep.load_sweep_inputs(
         recovered_base, recovered_layers
@@ -257,7 +332,7 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
 
     result = _evaluate_points(
         rec_base, rec_layers, edit_base, edit_layer_rows,
-        n_boot=n_boot, seed=seed,
+        n_boot=n_boot, seed=seed, invalid_max=invalid_max,
     )
     edit_set = set(normalized_edit_layers)
 
@@ -286,12 +361,31 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
         "edit_relocation": verdict,
         "permanent_bypassed_layer": None,
         "n_boot": n_boot,
+        "invalid_max": invalid_max,
     })
     return result
 
 
 def _fmt(value):
     return "n/a" if value is None else "%.3f" % value
+
+
+def _voided_line(result):
+    """The voided layers with the run:condition rates that voided them."""
+    bound = result.get("invalid_max", metrics.INVALID_RATE_MAX)
+    head = ("voided (per-condition invalid rate, truncated-or-invalid, > %.2f): "
+            % bound)
+    parts = []
+    for point in result["points"]:
+        if not point.get("voided"):
+            continue
+        rates = point.get("invalid_rates") or {}
+        detail = ", ".join(
+            "%s %s=%.2f" % (run, condition, rates[run][condition])
+            for run, condition in (v.split(":") for v in point["voided"])
+        )
+        parts.append("layer %s [%s]" % (point["layer"], detail))
+    return head + ("; ".join(parts) if parts else "none")
 
 
 def _coverage(point):
@@ -356,6 +450,7 @@ def relocation_report(result, final=False, verdict_ref=None,
                 for point in gaps
             )
         ),
+        _voided_line(result),
         "k (deterministic representative of max recovered A_l): %s"
         % result["k"],
         "max-recovered layer(s): %s" % result["k_layers"],
@@ -439,6 +534,7 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
                 for point in gaps
             )
         ),
+        _voided_line(result),
         "k (deterministic representative of max recovered A_l): %s"
         % result["k"],
         "max-recovered layer(s): %s (inside=%s outside=%s)"

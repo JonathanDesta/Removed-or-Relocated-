@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-PLOTTING_TEST_COUNT = 10
+PLOTTING_TEST_COUNT = 14
 
 try:
     import matplotlib
@@ -167,6 +167,67 @@ if HAVE_STACK:
             _nonempty(meta["paths"])
         assert meta["labels"] == ["M_0", "M_D", "M_C"]   # fixed arm order
         assert ("Gemma-2-9B", "M_C", "tau_not_computable") in meta["gaps"]
+
+    def test_pareto_bound_lines_are_reported_in_metadata():
+        points, statuses = plotting.synthetic_pareto()
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_pareto(
+                points, os.path.join(tmp, "pareto_bounds"), statuses=statuses,
+                bounds={"a_l_min": 0.15, "damage_max": 0.05},
+            )
+            _nonempty(meta["paths"])
+        assert meta["bounds"] == {"a_l_min": 0.15, "damage_max": 0.05}
+        expected = sorted(
+            p["bypassed_layer"] for p in points
+            if p["A_l"] is not None and p["damage"] is not None
+            and p["A_l"] >= 0.15 and p["damage"] <= 0.05
+        )
+        assert sorted(meta["within_bounds"]) == expected
+        # No bounds -> nothing reported as within, nothing drawn.
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = plotting.render_pareto(points, os.path.join(tmp, "plain"))
+        assert plain["bounds"] == {"a_l_min": None, "damage_max": None}
+        assert plain["within_bounds"] == []
+
+    def test_pareto_panels_one_axis_per_metric():
+        record = plotting.synthetic_pareto_panels()
+        roundtripped = json.loads(json.dumps(record))   # the CLI path
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_pareto_panels(
+                roundtripped, os.path.join(tmp, "panels"))
+            _nonempty(meta["paths"])
+        assert [p["damage_metric"] for p in meta["panels"]] == [
+            "task_competence", "wikitext2_ppl", "wikitext2_neutral_jsd"]
+        for panel in meta["panels"]:
+            assert panel["n_plotted"] < panel["n_points"]        # layer 20 off-plot
+            assert any(layer == 20 for layer, _ in panel["off_plot"])
+            assert panel["bounds"]["a_l_min"] == 0.15
+        assert meta["panels"][1]["bounds"]["damage_max"] == 2.0
+
+    def test_decomposition_marks_voided_and_missing_layers():
+        record = plotting.synthetic_decomposition()
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_decomposition(
+                record, os.path.join(tmp, "decomp"))
+            _nonempty(meta["paths"])
+            control = plotting.render_decomposition(
+                record, os.path.join(tmp, "decomp_control"), condition="control")
+        assert meta["missing"] == [5]
+        assert 0 in meta["voided"] and 26 in meta["voided"]
+        assert len(meta["layers"]) == 28 and 5 not in meta["totals"]
+        assert control["voided"] == []                  # control rows are all clean
+        assert control["missing"] == [5]
+
+    def test_edit_gate_summary_null_stage1_is_an_annotated_gap():
+        records = plotting.synthetic_edit_gate_summary()
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_edit_gate_summary(
+                records, os.path.join(tmp, "gates"))
+            _nonempty(meta["paths"])
+        assert meta["keys"] == ["l07", "l10", "l13", "l21", "l08", "l24"]
+        assert meta["models"] == ["Qwen2.5-7B", "Llama-3.1-8B"]
+        assert ("l24", "stage1_A_l", "layer_not_in_curve") in meta["gaps"]
+        assert len(meta["gaps"]) == 1
 
 
 if __name__ == "__main__":

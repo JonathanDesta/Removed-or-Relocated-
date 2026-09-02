@@ -41,7 +41,10 @@ def _emit_curves(result, basename):
 
     <basename>-recovered.json and <basename>-lesioned.json each hold a
     layer-curve-shaped list ({bypassed_layer, A_l, reason}) at full
-    precision, straight from result["points"] -- no recomputation.
+    precision, straight from result["points"] -- no recomputation. A
+    "voided_validity" reason is per side: it travels only with a side whose
+    A is None (the ruling voided THAT run), never with a side that kept its
+    measurement because only the other side was void.
     """
     import json
 
@@ -49,14 +52,16 @@ def _emit_curves(result, basename):
     base.parent.mkdir(parents=True, exist_ok=True)
     written = []
     for side, key in (("recovered", "A_recovered"), ("lesioned", "A_lesioned")):
-        curve = [
-            {
+        curve = []
+        for point in result["points"]:
+            reason = point.get("reason")
+            if reason == "voided_validity" and point.get(key) is not None:
+                reason = None
+            curve.append({
                 "bypassed_layer": point["layer"],
                 "A_l": point.get(key),
-                "reason": point.get("reason"),
-            }
-            for point in result["points"]
-        ]
+                "reason": reason,
+            })
         path = Path("%s-%s.json" % (base, side))
         path.write_text(json.dumps(curve, indent=1) + "\n")
         written.append(str(path))

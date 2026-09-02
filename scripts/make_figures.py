@@ -146,6 +146,25 @@ def main(argv=None):
         help="pass allow_mixed=True to figures.pareto_frontier (points from "
              "more than one comparison; off by default for a reason)",
     )
+    sub.add_argument("--a-l-min", type=float, default=None,
+                     help="draw the A_l minimum bound (overrides a record's "
+                          "'bounds')")
+    sub.add_argument("--damage-max", type=float, default=None,
+                     help="draw the damage cap (overrides a record's 'bounds')")
+
+    sub = subs.add_parser(
+        "pareto-panels",
+        help="one Pareto subplot per damage metric, from an "
+             "emit_figure_records.py pareto record",
+        description=(
+            "Input: the JSON emit_figure_records.py pareto writes -- "
+            "{model, base_run_id, panels: [{damage_metric, damage_reference, "
+            "bounds, pareto_points, frontier}, ...]}. Each panel draws its "
+            "own ratified bounds; off-plot layers are footnoted per panel."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "emit_figure_records.py pareto JSON")
 
     sub = subs.add_parser(
         "rt",
@@ -196,6 +215,11 @@ def main(argv=None):
                      help="layer_curve JSON/JSONL for the just-lesioned model")
     sub.add_argument("--lesioned-layer", default=None,
                      help="the permanently lesioned layer l*, marked on the figure")
+    sub.add_argument("--label-recovered", default="recovered checkpoint",
+                     help="axis/gap label for the recovered side")
+    sub.add_argument("--label-lesioned", default="just-lesioned",
+                     help="axis/gap label for the comparison side (e.g. "
+                          "'M_E (just-edited)' on the lesion-free edit path)")
 
     sub = subs.add_parser(
         "tau-bars",
@@ -244,6 +268,34 @@ def main(argv=None):
                      help="ordered curve: checkpoint key and its interp.jsonl "
                           "(repeatable)")
 
+    sub = subs.add_parser(
+        "decomposition",
+        help="stacked per-layer output decomposition of one sweep",
+        description=(
+            "Input: the JSON emit_figure_records.py decomposition writes "
+            "(figures.decomposition_cells record). One stacked bar per "
+            "bypassed layer for --condition; voided layers (invalid rate "
+            "above the ruling bound) are marked, missing layers are gaps."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "emit_figure_records.py decomposition JSON")
+    sub.add_argument("--condition", default="incentive",
+                     choices=["incentive", "control"])
+
+    sub = subs.add_parser(
+        "edit-gate-summary",
+        help="the six edit gates side by side: A_edit with counts, edit JSD, "
+             "capability deltas, and the window's Stage-1 A_l",
+        description=(
+            "Input: the JSONL emit_figure_records.py edit-gate-summary "
+            "writes, one record per edited checkpoint. Null quantities are "
+            "annotated gaps, never zeros."
+        ),
+    )
+    _add_common(sub)
+    _input_arg(sub, "emit_figure_records.py edit-gate-summary JSONL")
+
     args = parser.parse_args(argv)
 
     if args.command == "layer-curve":
@@ -266,10 +318,27 @@ def main(argv=None):
             points, statuses = _points_and_statuses(parser, data, "pareto_points")
             if isinstance(data, dict):
                 frontier = data.get("frontier")
+        bounds = dict(data.get("bounds") or {}) if isinstance(data, dict) else {}
+        if args.a_l_min is not None:
+            bounds["a_l_min"] = args.a_l_min
+        if args.damage_max is not None:
+            bounds["damage_max"] = args.damage_max
         meta = plotting.render_pareto(
             points, _out_base(parser, args, "pareto"),
             statuses=statuses, frontier=frontier,
             allow_mixed=args.allow_mixed, title=args.title, dpi=args.dpi,
+            bounds=bounds or None,
+        )
+
+    elif args.command == "pareto-panels":
+        record = _load_input(parser, args, "pareto panels record")
+        if record is None:
+            record = plotting.synthetic_pareto_panels()
+        if not isinstance(record, dict):
+            parser.error("pareto-panels input must be the pareto record dict")
+        meta = plotting.render_pareto_panels(
+            record, _out_base(parser, args, "pareto_panels"),
+            title=args.title, dpi=args.dpi,
         )
 
     elif args.command == "rt":
@@ -310,7 +379,10 @@ def main(argv=None):
             lesioned_layer = args.lesioned_layer
         meta = plotting.render_delta(
             recovered, lesioned, _out_base(parser, args, "delta"),
-            lesioned_layer=lesioned_layer, title=args.title, dpi=args.dpi,
+            lesioned_layer=lesioned_layer,
+            label_recovered=args.label_recovered,
+            label_lesioned=args.label_lesioned,
+            title=args.title, dpi=args.dpi,
         )
 
     elif args.command == "tau-bars":
@@ -376,6 +448,28 @@ def main(argv=None):
                 curves.append((key, points))
         meta = plotting.render_probe_curves(
             curves, _out_base(parser, args, "probe_curves"),
+            title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "decomposition":
+        record = _load_input(parser, args, "decomposition record")
+        if record is None:
+            record = plotting.synthetic_decomposition()
+        if not isinstance(record, dict):
+            parser.error("decomposition input must be the decomposition record dict")
+        meta = plotting.render_decomposition(
+            record, _out_base(parser, args, "decomposition"),
+            condition=args.condition, title=args.title, dpi=args.dpi,
+        )
+
+    elif args.command == "edit-gate-summary":
+        records = _load_input(parser, args, "edit-gate summary records")
+        if records is None:
+            records = plotting.synthetic_edit_gate_summary()
+        if isinstance(records, dict):
+            records = [records]
+        meta = plotting.render_edit_gate_summary(
+            records, _out_base(parser, args, "edit_gate_summary"),
             title=args.title, dpi=args.dpi,
         )
 
