@@ -20,7 +20,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-PROBE_TRANSFER_TEST_COUNT = 4
+PROBE_TRANSFER_TEST_COUNT = 5
 
 try:
     import numpy as np
@@ -193,7 +193,7 @@ if HAVE_STACK:
                                _load_model=loader) == 0
             own = {}
             for label in ("a", "b"):
-                rows = load_rows(root / ("t-own-%s" % label) / "interp.jsonl")
+                rows = [r for r in load_rows(root / ("t-own-%s" % label) / "interp.jsonl") if r["analysis"] == "probe_auroc"]
                 assert [r["layer"] for r in rows] == [0, 1, 2, 3]
                 assert all(r["run_id"] == "t-own-%s" % label for r in rows)
                 config = rows[0]["config"]
@@ -215,7 +215,7 @@ if HAVE_STACK:
                                          "--use-fit", str(fit_dir), "--no-own-fit"],
                                _load_model=loader) == 0
             for label in ("a", "b"):
-                rows = load_rows(root / ("t-fixed-%s" % label) / "interp.jsonl")
+                rows = [r for r in load_rows(root / ("t-fixed-%s" % label) / "interp.jsonl") if r["analysis"] == "probe_auroc"]
                 assert [r["value"] for r in rows] == own[label]
                 config = rows[0]["config"]
                 assert config["fit"] == "fixed_direction_from:t"
@@ -243,6 +243,56 @@ if HAVE_STACK:
                 raise AssertionError("position-mismatched fit accepted")
             assert not (root / "t2-fixed-a").exists()
 
+    def test_pooled_set_writes_sidecars_strata_pairs_and_controls():
+        """A pooled test set (two generators, same scenarios) yields: the
+        responses index, per-layer score lines for the probe and both
+        confound probes, stratified rows named by stratum, and the
+        matched-pair row — all resume-safe on a second identical run."""
+        script = _load_script()
+        model, tokenizer = _tiny_model(), StubTokenizer()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            pairs = tmp / "pairs.jsonl"
+            _write_train_jsonl(pairs)
+            scenarios = get_scenarios("selection", n=12, seed=3)
+            pooled = []
+            for index, scenario in enumerate(scenarios):
+                pooled.append({"condition": "incentive", "valid": True, "deceptive": False,
+                               "run_id": "gen-honest", "scenario_id": scenario["scenario_id"],
+                               "response_text": "honest reply here %d\nMY BEST OUTSIDE OFFER: NONE" % index})
+                pooled.append({"condition": "incentive", "valid": True, "deceptive": True,
+                               "run_id": "gen-liar", "scenario_id": scenario["scenario_id"],
+                               "response_text": "my offer is large %d\nMY BEST OUTSIDE OFFER: $120,000" % index})
+            (tmp / "pooled.jsonl").write_text("".join(json.dumps(r) + "\n" for r in pooled))
+            root = tmp / "out"
+            argv = ["--model-id", "tiny", "--quant", "none", "--train-dataset", str(pairs),
+                    "--test-rows", "pairs=%s" % (tmp / "pooled.jsonl"), "--run-id", "p",
+                    "--out-root", str(root), "--probe-scratch-dir", str(tmp / "scratch")]
+            assert script.main(argv, _load_model=lambda args: (model, tokenizer)) == 0
+            out = root / "p-own-pairs"
+            rows = load_rows(out / "interp.jsonl")
+            by = {}
+            for r in rows:
+                by.setdefault(r["analysis"], []).append(r)
+            assert len(by["probe_auroc"]) == 4
+            assert len(by["probe_auroc_stratified:source:gen-honest"]) == 4
+            assert len(by["probe_auroc_stratified:source:gen-liar"]) == 4
+            assert all(r["config"]["single_class"] for r in by["probe_auroc_stratified:source:gen-liar"])
+            assert len(by["probe_pair_accuracy"]) == 4
+            assert by["probe_pair_accuracy"][0]["config"]["n_pairs"] == 12
+            assert 0.0 <= by["probe_pair_accuracy"][0]["value"] <= 1.0
+            assert len(by["control_probe_auroc:generator"]) == 4
+            assert "auroc_vs_target" in by["control_probe_auroc:generator"][0]["config"]
+            index = load_rows(out / script.RESPONSES_NAME)
+            assert len(index) == 24 and {r["source_run_id"] for r in index} == {"gen-honest", "gen-liar"}
+            scores = load_rows(out / script.SCORES_NAME)
+            kinds = {(s["layer"], s["kind"]) for s in scores}
+            assert (0, "probe") in kinds and (3, "control:generator") in kinds
+            assert all(len(s["scores"]) == 24 for s in scores if s["kind"] == "probe")
+            before = {p.name: p.read_text() for p in out.iterdir()}
+            assert script.main(argv, _load_model=lambda args: (model, tokenizer)) == 0
+            assert {p.name: p.read_text() for p in out.iterdir()} == before
+
     def test_legacy_invocation_writes_old_config_exactly():
         script = _load_script()
         model, tokenizer = _tiny_model(), StubTokenizer()
@@ -259,7 +309,7 @@ if HAVE_STACK:
                  "--probe-scratch-dir", str(tmp / "scratch")],
                 _load_model=lambda args: (model, tokenizer),
             ) == 0
-            rows = load_rows(out / "interp.jsonl")
+            rows = [r for r in load_rows(out / "interp.jsonl") if r["analysis"] == "probe_auroc"]
             assert [r["run_id"] for r in rows] == ["legacy"] * 4
             config = rows[0]["config"]
             assert set(config) - {"ci"} == set(script.LEGACY_CONFIG_KEYS)

@@ -125,6 +125,16 @@ NEW_CONFIG_KEYS = (
     "n_test_skipped_empty_body", "test_rows_label", "fit_source",
 )
 FIT_META_NAME = "fit_meta.json"
+# Per-output sidecars (2026-09-02, stratified design): every response's
+# per-layer score is persisted so any later stratification is a CPU
+# re-analysis of stored numbers, never a re-run.
+SCORES_NAME = "scores.jsonl"          # one line per (layer, kind): {"layer","kind","scores"}
+RESPONSES_NAME = "responses.jsonl"    # one line per response: provenance, label, stratum keys
+# Row analysis names (one row per analysis x layer, as the resume guard
+# requires, so the stratum / control name is PART of the analysis name):
+STRATA_ANALYSIS = "probe_auroc_stratified"   # "<this>:offer" / ":no_offer" / ":source:<run_id>"
+PAIR_ANALYSIS = "probe_pair_accuracy"        # matched-scenario pairs: P(score_lied > score_honest)
+CONTROL_ANALYSIS = "control_probe_auroc"     # "<this>:scenario_type" / ":generator", AUROC vs the LIED label
 FIT_SOURCE_FIELDS = (
     "fit_run_id", "model_id", "adapter_path", "checkpoint_step", "train_seed",
     "feature_position", "n_train",
@@ -356,6 +366,138 @@ def load_fit(fit_dir, *, model_id, feature_position, n_layers, hidden_size,
     return pipelines, meta
 
 
+def response_scores(clf, test_responses):
+    """Per-response probe score: mean of the per-token decision scores."""
+    import numpy as np
+
+    return np.asarray(aggregate_response_scores(
+        [clf.decision_function(np.asarray(tokens)) for tokens in test_responses]
+    ))
+
+
+def auroc_with_ci(scores, labels, groups):
+    """(auroc, ci_low, ci_high) for a subset, or None when single-class."""
+    import numpy as np
+    from sklearn.metrics import roc_auc_score
+
+    from algoverse.interp import _group_bootstrap_auroc_ci
+
+    y = np.asarray(labels, dtype=bool)
+    if y.all() or (~y).all():
+        return None
+    scores = np.asarray(scores)
+    auroc = float(roc_auc_score(y, scores))
+    ci_low, ci_high = _group_bootstrap_auroc_ci(y, scores, list(groups))
+    return auroc, ci_low, ci_high
+
+
+def strata_of(examples):
+    """{stratum: [indices]} — offer / no_offer, and source:<run_id> when the
+    test set pools responses from more than one run. Strata with fewer
+    than two responses are dropped (nothing to separate)."""
+    strata = {"offer": [], "no_offer": []}
+    sources = sorted({str(example.get("source_run_id")) for example in examples})
+    if len(sources) > 1:
+        for source in sources:
+            strata["source:%s" % source] = []
+    for index, example in enumerate(examples):
+        strata["offer" if example.get("has_offer") else "no_offer"].append(index)
+        if len(sources) > 1:
+            strata["source:%s" % example.get("source_run_id")].append(index)
+    return {name: idx for name, idx in strata.items() if len(idx) >= 2}
+
+
+def paired_accuracy(scores, labels, groups, n_boot=2000, seed=0, min_pairs=10):
+    """Matched-scenario test: over scenarios holding exactly one lied and
+    one did-not-lie response, the fraction where the lied response scores
+    higher (ties count half), with a scenario-bootstrap CI. None when
+    fewer than min_pairs such scenarios exist."""
+    import numpy as np
+
+    by_group = {}
+    for score, label, group in zip(scores, labels, groups):
+        by_group.setdefault(group, {True: [], False: []})[bool(label)].append(float(score))
+    pairs = [(v[True][0], v[False][0]) for v in by_group.values()
+             if len(v[True]) == 1 and len(v[False]) == 1]
+    if len(pairs) < min_pairs:
+        return None
+    wins = np.array([1.0 if a > b else (0.5 if a == b else 0.0) for a, b in pairs])
+    rng = np.random.default_rng(seed)
+    boots = [wins[rng.integers(0, len(wins), len(wins))].mean() for _ in range(n_boot)]
+    return (float(wins.mean()), float(np.quantile(boots, 0.025)),
+            float(np.quantile(boots, 0.975)), len(pairs))
+
+
+def control_probe_scores(features, target, groups, n_splits=5):
+    """Out-of-fold decision scores of a confound probe.
+
+    Same recipe as the deception probe (scaler + LR), fit on per-response
+    MEAN features of the TEST set to predict `target` (has_offer, or which
+    run wrote the response), scenario-grouped K-fold so a scenario never
+    scores itself. None when the target is single-class or there are too
+    few groups. The AUROC of these scores against the LIED label is the
+    floor a deception reading has to beat.
+    """
+    import numpy as np
+    from sklearn.model_selection import GroupKFold
+
+    y = np.asarray(target, dtype=bool)
+    if y.all() or (~y).all():
+        return None
+    groups = np.asarray([str(group) for group in groups])
+    k = min(n_splits, len(set(groups.tolist())))
+    if k < 2:
+        return None
+    X = np.asarray(features)
+    oof = np.zeros(len(y), dtype=float)
+    for train_idx, test_idx in GroupKFold(n_splits=k).split(X, y, groups):
+        if y[train_idx].all() or (~y[train_idx]).all():
+            continue
+        clf = fit_transfer_probe(X[train_idx], y[train_idx])
+        oof[test_idx] = clf.decision_function(X[test_idx])
+    return oof
+
+
+def scores_done(out_dir, layer, kind="probe"):
+    """True when scores.jsonl already holds `kind` for `layer`."""
+    path = Path(out_dir) / SCORES_NAME
+    if not path.is_file():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if int(record.get("layer", -1)) == int(layer) and record.get("kind") == kind:
+            return True
+    return False
+
+
+def write_scores(out_dir, layer, kind, scores):
+    if scores_done(out_dir, layer, kind):
+        return
+    with open(Path(out_dir) / SCORES_NAME, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"layer": int(layer), "kind": kind,
+                             "scores": [float(s) for s in scores]}) + "\n")
+
+
+def write_responses_index(out_dir, examples):
+    path = Path(out_dir) / RESPONSES_NAME
+    if path.is_file():
+        return
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for index, example in enumerate(examples):
+            fh.write(json.dumps({
+                "index": index,
+                "scenario_id": example.get("scenario_id"),
+                "group": example.get("group"),
+                "label": bool(example["label"]),
+                "has_offer": bool(example.get("has_offer")),
+                "source_run_id": example.get("source_run_id"),
+                "response_start": int(example.get("response_start", 0)),
+            }) + "\n")
+
+
 def _refuse_under_results(parser, path, flag):
     if path is None:
         return
@@ -547,6 +689,7 @@ def main(argv=None, _load_model=None):
             layer for layer in range(n_layers)
             if not _interp_done(output["out_path"], output["run_meta"],
                                 "probe_auroc", layer, output["config"])
+            or not scores_done(output["out_path"].parent, layer)
         ]
         print(
             "[%s/%s] %s: %d of %d layers pending"
@@ -643,6 +786,9 @@ def main(argv=None, _load_model=None):
         print("loaded fixed direction %s for %d layers" % (fit_meta["fit_run_id"], len(fixed_fits)))
 
     # Phase B: one test capture per test set, scored by every pending fit.
+    # Per layer and output: the main probe_auroc row (as before), the
+    # per-response scores sidecar, stratified rows, the matched-pair row,
+    # and the two confound probes (computed once per layer per test set).
     for bundle in test_sets:
         targets = [
             output for output in outputs
@@ -650,8 +796,17 @@ def main(argv=None, _load_model=None):
         ]
         if not targets:
             continue
+        for output in targets:
+            write_responses_index(output["out_path"].parent, bundle["examples"])
         layers_needed = sorted({layer for output in targets for layer in output["pending"]})
         test_starts, test_span = capture_spans(bundle["examples"], args.feature_position)
+        strata = strata_of(bundle["examples"])
+        has_offer = [bool(example.get("has_offer")) for example in bundle["examples"]]
+        sources = sorted({str(example.get("source_run_id")) for example in bundle["examples"]})
+        generator_target = (
+            [str(example.get("source_run_id")) == sources[0] for example in bundle["examples"]]
+            if len(sources) == 2 else None
+        )
         with tempfile.TemporaryDirectory(
             prefix="algoverse-transfer-test-", dir=args.probe_scratch_dir
         ) as tmp:
@@ -664,48 +819,126 @@ def main(argv=None, _load_model=None):
             for layer, feats in enumerate(iter_disk_backed_residual_layers(test_meta)):
                 if layer not in layers_needed:
                     continue
+                responses = None if feats is None else [np.asarray(t) for t in feats]
+                controls = {}
+                if responses is not None:
+                    means = np.stack([tokens.mean(axis=0) for tokens in responses])
+                    oof = control_probe_scores(means, has_offer, bundle["groups"])
+                    if oof is not None:
+                        controls["scenario_type"] = (oof, has_offer)
+                    if generator_target is not None:
+                        oof = control_probe_scores(means, generator_target, bundle["groups"])
+                        if oof is not None:
+                            controls["generator"] = (oof, generator_target)
                 for output in targets:
                     if layer not in output["pending"]:
                         continue
-                    if _interp_done(output["out_path"], output["run_meta"],
-                                    "probe_auroc", layer, output["config"]):
-                        continue
+                    out_dir = output["out_path"].parent
                     fits_for = own_fits if output["fit"] == FIT_OWN else fixed_fits
                     clf = fits_for.get(layer)
-                    if feats is None or clf is None:
-                        excluded = dict(output["config"])
-                        excluded["excluded_bypassed_layer"] = True
-                        write_interp_row(
-                            output["out_path"], output["run_meta"],
-                            "probe_auroc", layer, None, None, None, excluded,
-                            extra={"accuracy": None},
-                        )
+                    if responses is None or clf is None:
+                        if not _interp_done(output["out_path"], output["run_meta"],
+                                            "probe_auroc", layer, output["config"]):
+                            excluded = dict(output["config"])
+                            excluded["excluded_bypassed_layer"] = True
+                            write_interp_row(
+                                output["out_path"], output["run_meta"],
+                                "probe_auroc", layer, None, None, None, excluded,
+                                extra={"accuracy": None},
+                            )
+                        write_scores(out_dir, layer, "probe", [])
                         print("[%s/%s] layer %d: structural null (bypassed)"
                               % (output["fit"], output["label"] or "test", layer))
                         continue
-                    auroc, ci_low, ci_high, accuracy = score_transfer_probe(
-                        clf, [np.asarray(t) for t in feats],
-                        bundle["labels"], bundle["groups"],
-                    )
-                    layer_config = output["config"]
-                    if ci_low is None or ci_high is None:
-                        layer_config = dict(output["config"])
-                        layer_config["ci"] = (
-                            "null: group bootstrap degenerate (too few "
-                            "resamplable held-out scenario groups)"
+                    scores = response_scores(clf, responses)
+                    y = np.asarray(bundle["labels"], dtype=bool)
+                    if not _interp_done(output["out_path"], output["run_meta"],
+                                        "probe_auroc", layer, output["config"]):
+                        auroc, ci_low, ci_high = auroc_with_ci(scores, y, bundle["groups"])
+                        accuracy = float(((scores > 0) == y).mean())
+                        layer_config = output["config"]
+                        if ci_low is None or ci_high is None:
+                            layer_config = dict(output["config"])
+                            layer_config["ci"] = (
+                                "null: group bootstrap degenerate (too few "
+                                "resamplable held-out scenario groups)"
+                            )
+                        write_interp_row(
+                            output["out_path"], output["run_meta"], "probe_auroc",
+                            layer, auroc, ci_low, ci_high, layer_config,
+                            extra={"accuracy": accuracy},
                         )
-                    write_interp_row(
-                        output["out_path"], output["run_meta"], "probe_auroc",
-                        layer, auroc, ci_low, ci_high, layer_config,
-                        extra={"accuracy": accuracy},
-                    )
-                    print(
-                        "[%s/%s] layer %2d: transfer AUROC %.3f  CI [%s, %s]  acc %.3f"
-                        % (output["fit"], output["label"] or "test", layer, auroc,
-                           "n/a" if ci_low is None else "%.3f" % ci_low,
-                           "n/a" if ci_high is None else "%.3f" % ci_high,
-                           accuracy)
-                    )
+                        print(
+                            "[%s/%s] layer %2d: transfer AUROC %.3f  CI [%s, %s]  acc %.3f"
+                            % (output["fit"], output["label"] or "test", layer, auroc,
+                               "n/a" if ci_low is None else "%.3f" % ci_low,
+                               "n/a" if ci_high is None else "%.3f" % ci_high,
+                               accuracy)
+                        )
+                    write_scores(out_dir, layer, "probe", scores)
+                    # stratified rows: the scenario held fixed within each stratum
+                    for name, idx in strata.items():
+                        stratum_config = dict(output["config"])
+                        stratum_config.update({
+                            "stratum": name, "n_stratum": len(idx),
+                            "n_stratum_lied": int(y[idx].sum()),
+                        })
+                        analysis = "%s:%s" % (STRATA_ANALYSIS, name)
+                        if _interp_done(output["out_path"], output["run_meta"],
+                                        analysis, layer, stratum_config):
+                            continue
+                        result = auroc_with_ci(scores[idx], y[idx],
+                                               [bundle["groups"][i] for i in idx])
+                        if result is None:
+                            stratum_config["single_class"] = True
+                            write_interp_row(output["out_path"], output["run_meta"],
+                                             analysis, layer, None, None, None,
+                                             stratum_config)
+                            continue
+                        write_interp_row(output["out_path"], output["run_meta"],
+                                         analysis, layer, *result, stratum_config)
+                        print("    stratum %-40s AUROC %.3f (n=%d, lied=%d)"
+                              % (name, result[0], len(idx), int(y[idx].sum())))
+                    # matched-scenario pairs (pooled sets)
+                    pair = paired_accuracy(scores, y, bundle["groups"])
+                    if pair is not None:
+                        pair_config = dict(output["config"])
+                        pair_config["n_pairs"] = pair[3]
+                        if not _interp_done(output["out_path"], output["run_meta"],
+                                            PAIR_ANALYSIS, layer, pair_config):
+                            write_interp_row(output["out_path"], output["run_meta"],
+                                             PAIR_ANALYSIS, layer, pair[0], pair[1],
+                                             pair[2], pair_config)
+                            print("    paired accuracy %.3f CI [%.3f, %.3f] over %d scenario pairs"
+                                  % pair)
+                    # confound probes: their AUROC against the LIED label
+                    for control_name, (oof, target) in controls.items():
+                        control_config = dict(output["config"])
+                        control_config.update({
+                            "control": control_name,
+                            "control_features": "per_response_mean",
+                            "control_cv": "scenario_grouped_5fold_oof",
+                        })
+                        write_scores(out_dir, layer, "control:%s" % control_name, oof)
+                        analysis = "%s:%s" % (CONTROL_ANALYSIS, control_name)
+                        if _interp_done(output["out_path"], output["run_meta"],
+                                        analysis, layer, control_config):
+                            continue
+                        vs_lied = auroc_with_ci(oof, y, bundle["groups"])
+                        vs_target = auroc_with_ci(oof, target, bundle["groups"])
+                        # recorded inside config (extra config keys are
+                        # resume-safe; extra top-level fields are not)
+                        written_config = dict(control_config)
+                        written_config["auroc_vs_target"] = (
+                            None if vs_target is None else vs_target[0])
+                        write_interp_row(
+                            output["out_path"], output["run_meta"], analysis,
+                            layer, *(vs_lied or (None, None, None)), written_config,
+                        )
+                        if vs_lied is not None:
+                            print("    control %-14s AUROC vs lied %.3f (vs its own target %.3f)"
+                                  % (control_name, vs_lied[0],
+                                     -1 if vs_target is None else vs_target[0]))
     return 0
 
 

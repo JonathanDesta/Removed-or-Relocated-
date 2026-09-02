@@ -121,6 +121,11 @@ def labeled_incentive_rows(rows):
             "response_text": response_text,
             "label": bool(row["deceptive"]),
             "group": row.get("scenario_id"),
+            # Provenance for stratified scoring (additive, 2026-09-02):
+            # which run wrote the response, and whether the scenario had
+            # a real outside offer (None = a no-offer scenario).
+            "source_run_id": row.get("run_id"),
+            "true_value": row.get("true_value"),
         })
     return labeled
 
@@ -166,7 +171,11 @@ def probe_examples_from_rows(rows, tokenizer, exclude_final_line=False,
     receives n_labeled, n_examples, n_no_marker, n_skipped_empty_body
     (zeros in default mode), so a run can record what it dropped.
 
-    Returns [{"text", "response_start", "label", "group"}].
+    Returns [{"text", "response_start", "label", "group", "scenario_id",
+    "source_run_id", "has_offer"}] — the last three carry provenance for
+    stratified scoring (pooled test sets may hold one response per
+    scenario from EACH of two runs; group stays scenario_id so a
+    scenario-level bootstrap resamples such pairs together).
     """
     from algoverse.eval import render_condition_texts
     from algoverse.tasks import INCENTIVE, make_scenario_grid
@@ -231,6 +240,9 @@ def probe_examples_from_rows(rows, tokenizer, exclude_final_line=False,
             "response_start": len(prompt_ids),
             "label": item["label"],
             "group": item["group"],
+            "scenario_id": item["scenario_id"],
+            "source_run_id": item.get("source_run_id"),
+            "has_offer": grid[item["scenario_id"]].get("true_outside_offer") is not None,
         })
     counters["n_examples"] = len(examples)
     if stats is not None:
