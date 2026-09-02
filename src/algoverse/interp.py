@@ -190,7 +190,16 @@ def attention_all_layers(model, tokenizer, text):
     return _attention_all_layers_unchecked(model, tokenizer, text)
 
 
-def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
+def _validate_span_len(span_len):
+    if span_len is None:
+        return None
+    if isinstance(span_len, bool) or not isinstance(span_len, int) or span_len < 1:
+        raise ValueError("span_len must be None or an int >= 1, got %r" % (span_len,))
+    return span_len
+
+
+def response_token_resid_by_layer(model, tokenizer, texts, response_starts,
+                                  span_len=None):
     """Per-layer response-token residual features for probing, lesion-safe.
 
     This is the capture path for the RATIFIED 2026-08-15 response-token
@@ -203,7 +212,9 @@ def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
     response appended (module rendering contract); response_starts[i] is
     the token index where the response begins under this module's
     add_special_tokens=False tokenization of texts[i]. Features cover
-    tokens [response_starts[i], end).
+    tokens [response_starts[i], end), or at most span_len of them when
+    span_len is given: span_len=1 with response_starts shifted by -1 reads
+    the LAST PROMPT token (the final-prompt-position probe variant).
 
     Reads go through models.residual_stream_by_layer (pre-hook capture),
     so they are correct with or without a bypass installed — never through
@@ -230,6 +241,7 @@ def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
         )
     if not texts:
         raise ValueError("no texts supplied")
+    span_len = _validate_span_len(span_len)
     excluded = set(bypassed_layers(model))
     per_layer = None
     for text, start in zip(texts, starts):
@@ -242,6 +254,10 @@ def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
                 "response start %r is outside a text of %d tokens"
                 % (start, n_tokens)
             )
+        length = (
+            n_tokens - int(start) if span_len is None
+            else min(span_len, n_tokens - int(start))
+        )
         captured = residual_stream_by_layer(
             model, inputs["input_ids"], inputs.get("attention_mask")
         )
@@ -255,25 +271,30 @@ def response_token_resid_by_layer(model, tokenizer, texts, response_starts):
             if per_layer[layer] is None:
                 continue
             per_layer[layer].append(
-                captured[layer + 1][0, int(start):, :].float().cpu().numpy()
+                captured[layer + 1][0, int(start):int(start) + length, :]
+                .float().cpu().numpy()
             )
     return per_layer
 
 
 def response_token_resid_by_layer_to_disk(model, tokenizer, texts,
                                           response_starts, out_dir,
-                                          layers=None):
+                                          layers=None, span_len=None):
     """Capture response-token residuals once and spool float32 by layer.
 
     Returns metadata consumed by ``iter_disk_backed_residual_layers``. The
     caller owns ``out_dir`` and its cleanup. Only requested, non-bypassed
     layers are materialized, but each text still needs just one model forward.
+    span_len caps each text's span (see response_token_resid_by_layer);
+    span_len=1 with shifted starts is the final-prompt-position reader and
+    shrinks the spool from GBs to MBs.
     """
     import shutil
     from pathlib import Path
 
     texts = list(texts)
     starts = [int(start) for start in response_starts]
+    span_len = _validate_span_len(span_len)
     if len(starts) != len(texts):
         raise ValueError(
             "response_starts length %d does not match texts length %d"
@@ -303,7 +324,10 @@ def response_token_resid_by_layer_to_disk(model, tokenizer, texts,
                 "response start %r is outside a text of %d tokens"
                 % (start, n_tokens)
             )
-        lengths.append(n_tokens - start)
+        lengths.append(
+            n_tokens - start if span_len is None
+            else min(span_len, n_tokens - start)
+        )
     offsets = [0]
     for length in lengths:
         offsets.append(offsets[-1] + length)
@@ -341,7 +365,7 @@ def response_token_resid_by_layer_to_disk(model, tokenizer, texts,
             begin, end = offsets[index], offsets[index + 1]
             for layer in active:
                 value = (
-                    captured[layer + 1][0, start:, :]
+                    captured[layer + 1][0, start:start + (end - begin), :]
                     .float().cpu().numpy()
                 )
                 if value.shape != (end - begin, hidden_size):
@@ -366,6 +390,7 @@ def response_token_resid_by_layer_to_disk(model, tokenizer, texts,
         "paths": paths,
         "excluded": sorted(excluded),
         "required_bytes": required_bytes,
+        "span_len": span_len,
     }
 
 

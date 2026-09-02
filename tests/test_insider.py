@@ -16,7 +16,8 @@ revision (critique-1 F2) both conditions derive from default.json, and the
 condition pair is pinned by the CONTROL_DELETIONS tests instead. Passing
 here certifies "the vendored files match what was recorded" and "the
 control is exactly default.json minus the recorded clauses"; it certifies
-nothing about ratification, which is still pending for every P-IT item.
+nothing beyond that; every P-IT item was ratified 2026-09-02 at its coded
+value (RESEARCH_SPEC.md).
 """
 
 import hashlib
@@ -159,7 +160,7 @@ def test_scenario_grid_is_deterministic_and_collision_free():
     first = make_insider_scenarios()
     second = make_insider_scenarios()
     assert json.dumps(first) == json.dumps(second)
-    assert len(first) == 200  # PROPOSED P-IT2 pool: 25 pairs x 8 amounts
+    assert len(first) == 200  # P-IT2 pool (ratified 2026-09-02): 25 pairs x 8 amounts
     ids = [s["scenario_id"] for s in first]
     assert len(set(ids)) == len(ids)
     for scenario in first:
@@ -406,7 +407,7 @@ def test_mixed_basis_disclosure_never_regex_concealed():
 def test_nonpublic_paraphrases_bypass_the_shortcut():
     # One case per NONPUBLIC_BASIS_TERMS entry, each embedded in a sentence
     # that also names a public source (so the public branch would fire).
-    # The vocabulary is a PROPOSAL (P-IT4, revised), not a ratified list:
+    # The vocabulary is the ratified P-IT4 list (revised 2026-08-20):
     # this pins that every term the project claims to cover actually
     # blocks, not that the coverage is complete.
     assert insider.NONPUBLIC_BASIS_TERMS, "empty list would pass vacuously"
@@ -998,7 +999,7 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# F5a: the grader validation harness (PROPOSED P-IT11)
+# F5a: the grader validation harness (P-IT11, ratified 2026-09-02; run pending)
 # ---------------------------------------------------------------------------
 
 
@@ -1093,4 +1094,4 @@ def test_score_computes_accuracy_recall_and_the_criterion():
     assert summary["meets_criterion"] is False     # ...and still fails
     assert summary["per_stratum_accuracy"]["llm"] == 0.0
     report = script.format_report(summary)
-    assert "BELOW CRITERION" in report and "NOT ratified" in report
+    assert "BELOW CRITERION" in report and "RATIFIED 2026-09-02" in report

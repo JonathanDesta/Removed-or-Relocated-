@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-CORROBORATION_TEST_COUNT = 8
+CORROBORATION_TEST_COUNT = 10
 
 try:
     import numpy as np
@@ -428,6 +428,74 @@ if HAVE_STACK:
             assert example["response_start"] < n_full
             # The rendered prompt includes the generation prompt.
             assert "assistant" in prompt
+
+    def test_span_len_one_matches_residual_reference_and_disk_parity():
+        """span_len=1 at start-1 is exactly the last prompt token's residual,
+        in memory and on disk (the final-prompt-position reader)."""
+        model = _tiny_model()
+        tokenizer = StubTokenizer()
+        texts = ["one two three four five", "six seven eight nine"]
+        starts = [2, 1]
+        shifted = [start - 1 for start in starts]
+        features = response_token_resid_by_layer(
+            model, tokenizer, texts, shifted, span_len=1
+        )
+        for index, text in enumerate(texts):
+            inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+            reference = residual_stream_by_layer(
+                model, inputs["input_ids"], inputs["attention_mask"]
+            )
+            for layer in range(4):
+                assert features[layer][index].shape == (1, 32)
+                expected = reference[layer + 1][0, starts[index] - 1:starts[index], :]
+                assert np.allclose(features[layer][index],
+                                   expected.detach().float().numpy())
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = response_token_resid_by_layer_to_disk(
+                model, tokenizer, texts, shifted, tmp, span_len=1
+            )
+            assert metadata["span_len"] == 1
+            assert metadata["offsets"] == [0, 1, 2]        # one token per text
+            for layer, layer_features in enumerate(
+                iter_disk_backed_residual_layers(metadata)
+            ):
+                for actual, reference in zip(layer_features, features[layer]):
+                    assert np.allclose(actual, reference)
+        try:
+            response_token_resid_by_layer(model, tokenizer, texts, starts, span_len=0)
+        except ValueError as exc:
+            assert "span_len" in str(exc)
+        else:
+            raise AssertionError("span_len=0 accepted")
+
+    def test_probe_examples_exclude_final_line_rows():
+        from algoverse.tasks import get_scenarios
+
+        tokenizer = StubTokenizer()
+        scenarios = get_scenarios("selection", n=3, seed=42)
+        rows = [
+            {"condition": "incentive", "valid": True, "deceptive": True,
+             "scenario_id": scenarios[0]["scenario_id"],
+             "response_text": "my offer is large\nMY BEST OUTSIDE OFFER: $120,000"},
+            {"condition": "incentive", "valid": True, "deceptive": False,
+             "scenario_id": scenarios[1]["scenario_id"],
+             "response_text": "MY BEST OUTSIDE OFFER: NONE"},
+            {"condition": "incentive", "valid": True, "deceptive": False,
+             "scenario_id": scenarios[2]["scenario_id"],
+             "response_text": "no marker in this reply"},
+        ]
+        stats = {}
+        examples = probe_examples_from_rows(
+            rows, tokenizer, exclude_final_line=True, stats=stats
+        )
+        assert len(examples) == 2
+        assert examples[0]["text"].endswith("my offer is large")
+        assert examples[1]["text"].endswith("no marker in this reply")
+        assert stats["n_skipped_empty_body"] == 1 and stats["n_no_marker"] == 1
+        for example in examples:
+            n_full = tokenizer(example["text"], return_tensors="pt",
+                               add_special_tokens=False)["input_ids"].shape[1]
+            assert example["response_start"] < n_full
 
 
 if __name__ == "__main__":

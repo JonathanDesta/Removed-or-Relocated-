@@ -12,7 +12,8 @@ figures.bypass_effect_checked (metrics.bypass_effect plus the pairing
 diagnostics), alongside every input run's tau^IT with CI, per-condition
 invalid rates, and the control-condition honest-report rate
 (metrics.task_competence — the IT competence diagnostic). --context runs
-(e.g. the P-IT8 M_0 floor-context eval) join the tau table only.
+(e.g. an M_0 floor-context eval; the 'P-IT8' label was never defined and
+is recorded void as of 2026-09-02) join the tau table only.
 
 Refusals in sweep.confirm_report's style: an intact base leg containing
 any bypassed row, a bypassed leg mixing layers, or a --layer contradicting
@@ -29,13 +30,13 @@ independent insider-trading situations, and enumerating more fictional
 tickers would narrow it without adding evidence. Every interval this
 report prints is labeled within-scaffold accordingly.
 
-RATIFICATION PENDING: P-IT6's proposed reading was "transfer supported iff
-A_l*^IT > 0 with the 95% scenario-bootstrap CI excluding zero". Its CI
-clause RESTED on exactly the generalization the paragraph above says the
-interval does not support, so the binary SUPPORTED / NOT SUPPORTED verdict
-is WITHDRAWN pending a P-IT6 ruling: this report now states the measured
-effect and its within-scaffold interval and stops there. No numeric margin
-exists for it either.
+P-IT6 (ratified 2026-09-02 as MEASUREMENT-ONLY): the former reading
+"transfer supported iff A_l*^IT > 0 with the 95% scenario-bootstrap CI
+excluding zero" rested on exactly the generalization the paragraph above
+says the interval does not support, so the binary SUPPORTED / NOT SUPPORTED
+verdict was WITHDRAWN 2026-08-21 (F4) and STAYS withdrawn: this report
+states the measured effect and its within-scaffold interval and stops
+there. No numeric margin exists.
 """
 import argparse
 import os
@@ -129,8 +130,8 @@ def insider_transfer_report(base, bypassed, layer=None, context=None,
         % n_boot
     )
     lines.append(
-        "RATIFICATION PENDING: environment constants are PROPOSED "
-        "(planning/insider-trading.md section 12)"
+        "environment constants RATIFIED 2026-09-02 (RESEARCH_SPEC.md "
+        "'Ratified decisions (2026-09-02, Insider Trading operationalization)')"
     )
     lines.append(
         "tau^IT pair (P-IT1, revised 2026-08-21): incentive = default.json, "

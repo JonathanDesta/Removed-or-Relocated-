@@ -15,11 +15,10 @@ undivided "insider" split), and the full 200-scenario pool is the default
 of scenarios: rows written, schema complete, resume, and the probe-bypass
 bookkeeping guard. Its deception numbers mean NOTHING; this is plumbing.
 
-RATIFICATION PENDING: the environment's constants are PROPOSED values
-(planning/insider-trading.md section 12), including this script's
-generation defaults (P-IT7: greedy, max_new_tokens=256, batch_size 4 —
-the project's recorded generation profile applied unchanged to IT). No
-evaluation run producing an IT number happens before ratification.
+RATIFIED 2026-09-02 (RESEARCH_SPEC.md "Ratified decisions (2026-09-02, Insider Trading operationalization)"): the environment's constants and this
+script's generation defaults (P-IT7: greedy, max_new_tokens=256,
+batch_size 4 — the project's recorded generation profile applied unchanged
+to IT) are ratified at their existing values.
 """
 import argparse
 import os
@@ -199,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
         "--max-new-tokens", type=int, default=256,
-        help="PROPOSED (P-IT7), NOT ratified: the project's recorded "
+        help="RATIFIED 2026-09-02 (P-IT7): the project's recorded "
              "generation profile applied unchanged to IT",
     )
     parser.add_argument(

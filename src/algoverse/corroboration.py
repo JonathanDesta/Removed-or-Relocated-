@@ -125,7 +125,26 @@ def labeled_incentive_rows(rows):
     return labeled
 
 
-def probe_examples_from_rows(rows, tokenizer):
+def strip_final_claim_line(response_text):
+    """(body, had_marker): the response BEFORE its last structured claim line.
+
+    The complement of tasks._authoritative_answer_text: the scorer keeps the
+    text from the LAST "MY BEST OUTSIDE OFFER:" marker onward; this drops
+    it (rstripped), so a probe can read the prose without the tokens that
+    literally carry the label. No marker -> (text, False); the caller
+    decides what an unmarked response means.
+    """
+    from algoverse.tasks import ANSWER_MARKER_RE
+
+    text = response_text or ""
+    matches = list(ANSWER_MARKER_RE.finditer(text))
+    if not matches:
+        return text, False
+    return text[:matches[-1].start()].rstrip(), True
+
+
+def probe_examples_from_rows(rows, tokenizer, exclude_final_line=False,
+                             stats=None):
     """Capture-ready probe examples from results rows (label source 1).
 
     Re-renders each row's scenario in the incentive condition through
@@ -139,6 +158,13 @@ def probe_examples_from_rows(rows, tokenizer):
     Reconstruction caveat: response_text was decoded with
     skip_special_tokens and stripped, so the re-encoded response is the
     scored text, not a byte-exact replay of the generated token ids.
+
+    exclude_final_line: score the response WITHOUT its final structured
+    claim line (strip_final_claim_line). A response with no marker is kept
+    unchanged and counted; a response whose whole body IS the claim line
+    is skipped and counted (nothing is left to read). `stats`, when a dict,
+    receives n_labeled, n_examples, n_no_marker, n_skipped_empty_body
+    (zeros in default mode), so a run can record what it dropped.
 
     Returns [{"text", "response_start", "label", "group"}].
     """
@@ -172,9 +198,21 @@ def probe_examples_from_rows(rows, tokenizer):
             text, return_tensors="pt", add_special_tokens=False
         )["input_ids"][0].tolist()
 
+    counters = {"n_labeled": len(labeled), "n_examples": 0,
+                "n_no_marker": 0, "n_skipped_empty_body": 0}
     examples = []
     for item, prompt in zip(labeled, prompts):
-        full = prompt + item["response_text"]
+        response = item["response_text"]
+        if exclude_final_line:
+            body, had_marker = strip_final_claim_line(response)
+            if not had_marker:
+                counters["n_no_marker"] += 1
+            elif not body:
+                counters["n_skipped_empty_body"] += 1
+                continue
+            else:
+                response = body
+        full = prompt + response
         prompt_ids = token_ids(prompt)
         full_ids = token_ids(full)
         if full_ids[:len(prompt_ids)] != prompt_ids:
@@ -194,6 +232,14 @@ def probe_examples_from_rows(rows, tokenizer):
             "label": item["label"],
             "group": item["group"],
         })
+    counters["n_examples"] = len(examples)
+    if stats is not None:
+        stats.update(counters)
+    if not examples:
+        raise ValueError(
+            "every labeled row was skipped (%d rows whose whole response is "
+            "the claim line); nothing to probe" % counters["n_skipped_empty_body"]
+        )
     return examples
 
 
