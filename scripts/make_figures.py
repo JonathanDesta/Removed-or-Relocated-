@@ -264,6 +264,11 @@ def main(argv=None):
         ),
     )
     _add_common(sub)
+    sub.add_argument("--analysis", default="probe_auroc",
+                     help="which interp rows to draw (default probe_auroc; "
+                          "e.g. probe_auroc_stratified:offer for the "
+                          "offer-scenario stratum written by the 2026-09-02 "
+                          "stratified design)")
     sub.add_argument("--interp", action="append", metavar="KEY=PATH",
                      help="ordered curve: checkpoint key and its interp.jsonl "
                           "(repeatable)")
@@ -442,9 +447,9 @@ def main(argv=None):
                     parser.error("bad --interp %r; expected KEY=PATH" % spec)
                 rows = plotting.load_records(path)
                 points = [r for r in rows
-                          if r.get("analysis") == "probe_auroc"]
+                          if r.get("analysis") == args.analysis]
                 if not points:
-                    parser.error("no probe_auroc rows in %s" % path)
+                    parser.error("no %s rows in %s" % (args.analysis, path))
                 curves.append((key, points))
         meta = plotting.render_probe_curves(
             curves, _out_base(parser, args, "probe_curves"),

@@ -159,6 +159,12 @@ def main(argv=None):
                         help="classifier disk cache (default: a temp dir)")
     parser.add_argument("--limit", type=int, default=None,
                         help="stop after N new calls (smoke)")
+    parser.add_argument("--emit-rows", default=None, metavar="PATH",
+                        help="also write a DERIVED rows file with the regraded "
+                             "verdicts applied (valid/deceptive/invalid_reason "
+                             "replaced; everything else verbatim), for "
+                             "emit_figure_records.py tau / make_figures.py; "
+                             "refuses to overwrite")
     parser.add_argument("--debug-first-failure", action="store_true",
                         help="re-issue the first failing call with errors "
                              "raised, print the exception, and stop")
@@ -253,8 +259,19 @@ def main(argv=None):
                   and r["regraded_value"] != r.get("original_claimed_value"))
     print("verdicts changed vs recorded: %d" % changed)
     print(summarize(rows, "AS RECORDED (ratified marker window):"))
-    print(summarize(apply_regrade(rows, regrades),
+    regraded_rows = apply_regrade(rows, regrades)
+    print(summarize(regraded_rows,
                     "REGRADED (window=%s; sensitivity, not a ruling):" % args.window))
+    if args.emit_rows:
+        target = Path(args.emit_rows)
+        if target.exists():
+            raise SystemExit("--emit-rows refuses to overwrite %s" % target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            for row in regraded_rows:
+                fh.write(json.dumps(dict(row, regrade_window=args.window)) + "\n")
+        print("wrote regraded rows -> %s (%d rows; derived, window=%s)"
+              % (target, len(regraded_rows), args.window))
     return 0
 
 
