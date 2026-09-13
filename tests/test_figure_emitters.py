@@ -452,8 +452,66 @@ def test_render_new_figures_smoke():
     print("PASS render new figures smoke")
 
 
+def test_transfer_emitter():
+    """transfer regroups EXISTING tau records by environment: model -> the
+    environment label, arms filtered and ordered, every number relayed
+    verbatim, provenance kept, and a missing arm refused by name."""
+    emit = _load_script("emit_figure_records.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        def rec(model, label, tau, path):
+            return {"model": model, "label": label, "tau": tau, "tau_ci_low": tau - 0.02,
+                    "tau_ci_high": tau + 0.02, "n_scenarios": 305, "rows_path": path}
+        nego = [rec("Llama-3.1-8B", "M_0", 0.1049, "/x/m0-rep/rows.jsonl"),
+                rec("Llama-3.1-8B", "M_D", 1.0, "/x/md-rep/rows.jsonl"),
+                rec("Llama-3.1-8B", "M_E-l08", 0.0, "/x/e1/rows.jsonl"),
+                rec("Qwen2.5-7B", "M_0", 0.0, "/x/q/rows.jsonl")]
+        insider = [rec("Llama-3.1-8B", "M_0", 0.0, "/x/m0-it/rows.jsonl"),
+                   rec("Llama-3.1-8B", "M_D", 0.0, "/x/md-it/rows.jsonl")]
+        (tmp / "nego.jsonl").write_text("".join(json.dumps(r) + "\n" for r in nego))
+        (tmp / "insider.jsonl").write_text("".join(json.dumps(r) + "\n" for r in insider))
+        out = tmp / "transfer.jsonl"
+        emit.main(["transfer", "--model", "Llama-3.1-8B", "--arms", "M_0", "M_D",
+                   "--tau", "Offer Negotiation=%s" % (tmp / "nego.jsonl"),
+                   "--tau", "Insider Trading=%s" % (tmp / "insider.jsonl"),
+                   "--out", str(out)])
+        records = [json.loads(l) for l in out.read_text().splitlines()]
+        assert [(r["model"], r["label"]) for r in records] == [
+            ("Offer Negotiation", "M_0"), ("Offer Negotiation", "M_D"),
+            ("Insider Trading", "M_0"), ("Insider Trading", "M_D")]
+        assert records[0]["tau"] == 0.1049 and records[0]["rows_path"] == "/x/m0-rep/rows.jsonl"
+        assert records[0]["tau_ci_low"] == 0.1049 - 0.02
+        assert all(r["source_model"] == "Llama-3.1-8B" for r in records)
+        assert records[2]["source_record"].endswith("insider.jsonl")
+        assert not any(r["label"] == "M_E-l08" for r in records)
+        for actual, source in zip(records, nego[:2] + insider):
+            assert {k: actual[k] for k in source if k != "model"} == {
+                k: v for k, v in source.items() if k != "model"}
+        assert [json.loads(l) for l in (tmp / "nego.jsonl").read_text().splitlines()] == nego
+        try:
+            emit.main(["transfer", "--model", "Llama-3.1-8B", "--arms", "M_0", "M_C",
+                       "--tau", "Offer Negotiation=%s" % (tmp / "nego.jsonl"),
+                       "--out", str(tmp / "bad.jsonl")])
+        except SystemExit as exc:
+            assert "M_C" in str(exc)
+        else:
+            raise AssertionError("a missing arm was silently dropped")
+        with (tmp / "nego.jsonl").open("a") as fh:
+            fh.write(json.dumps(nego[0]) + "\n")
+        try:
+            emit.main(["transfer", "--model", "Llama-3.1-8B",
+                       "--tau", "Offer Negotiation=%s" % (tmp / "nego.jsonl"),
+                       "--out", str(tmp / "duplicate.jsonl")])
+        except SystemExit as exc:
+            assert "2 records" in str(exc)
+        else:
+            raise AssertionError("ambiguous transfer input was accepted")
+    print("PASS transfer emitter")
+
+
 def main():
     test_tau_emitter()
+    test_transfer_emitter()
     test_layer_curve_emitter_ruling()
     test_recovery_records()
     test_relocation_emit_curves()

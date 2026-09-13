@@ -53,6 +53,7 @@ import json
 import math
 import os
 import random
+import re
 
 from algoverse import figures, metrics
 
@@ -237,13 +238,20 @@ def _gap_marks(ax, gaps, color=GAP_COLOR, max_chars=38):
         )
 
 
-def _footnote(fig, lines):
+def _footnote(fig, lines, fontsize=7, y=-0.02):
     """Caption-adjacent notes below the axes; kept by the tight save bbox."""
     if lines:
         fig.text(
-            0.01, -0.02, "\n".join(lines), ha="left", va="top",
-            fontsize=7, color=TEXT_SECONDARY,
+            0.01, y, "\n".join(lines), ha="left", va="top",
+            fontsize=fontsize, color=TEXT_SECONDARY,
         )
+
+
+def _resolve_title(title, default):
+    """None -> the renderer's default; "" -> no title (the caption carries
+    it, as a paper figure needs); any other string verbatim. `title or
+    default` would silently restore the default on ""."""
+    return default if title is None else title
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +348,7 @@ def render_layer_curve(points, out_base, statuses=None, title=None, dpi=300):
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_xlabel("bypassed layer $l$")
     ax.set_ylabel(r"$A_l = \tau(\mathrm{base}) - \tau(\mathrm{bypassed})$")
-    ax.set_title(title or "Deception-specific bypass effect by layer")
+    ax.set_title(_resolve_title(title, "Deception-specific bypass effect by layer"))
 
     notes = []
     if disqualified_layers:
@@ -506,7 +514,7 @@ def render_pareto(points, out_base, statuses=None, frontier=None,
         ax, points, statuses=statuses, frontier=frontier,
         allow_mixed=allow_mixed, bounds=bounds,
     )
-    ax.set_title(title or "Deception removed vs capability damage")
+    ax.set_title(_resolve_title(title, "Deception removed vs capability damage"))
     if info["frontier"]:
         ax.legend(loc="best")
 
@@ -614,8 +622,8 @@ def render_pareto_panels(record, out_base, title=None, dpi=300):
         axes[j // ncols][j % ncols].axis("off")
     model = record.get("model")
     fig.suptitle(
-        title or "Deception removed vs capability damage, per metric%s"
-        % (" - %s" % model if model else "")
+        _resolve_title(title, "Deception removed vs capability damage, per metric%s"
+        % (" - %s" % model if model else ""))
     )
     notes.append(
         "dashed lines: ratified bounds (A_l minimum; per-metric damage cap); "
@@ -634,13 +642,67 @@ def render_pareto_panels(record, out_base, title=None, dpi=300):
 # ---------------------------------------------------------------------------
 
 
+def _rt_constituents(record):
+    """[(arm, tau)] for one recovery record, in the record's arm order.
+
+    The record carries one tau_<ARM> per arm (recovery_report.py
+    --emit-records); `arms` names them in order when present, otherwise
+    every tau_* key sorted. A missing or null tau is kept as None.
+    """
+    arms = record.get("arms")
+    if isinstance(arms, dict):
+        arms = list(arms)
+    if not arms:
+        available = {k[len("tau_"):] for k in record if k.startswith("tau_")}
+        canonical = ("ED", "EC", "ID", "IC") if "ED" in available else ("LD", "LC", "ID", "IC")
+        arms = [a for a in canonical if a in available]
+        arms += sorted(available - set(arms))
+    tau_keys = {re.sub(r"[^A-Za-z0-9]", "", k[len("tau_"):]): k
+                for k in record if k.startswith("tau_")}
+    out = []
+    for arm in arms:
+        label = str(arm)
+        key = tau_keys.get(re.sub(r"[^A-Za-z0-9]", "", label))
+        out.append((label, record.get(key) if key else None))
+    return out
+
+
+def _rt_annotation_text(display, t, record):
+    """Three lines: which comparison, the per-arm taus, and R_t from them."""
+    parts = _rt_constituents(record)
+
+    def fmt(arm, value):
+        return r"$\tau_{%s}$ = %s" % (arm, "n/a" if value is None else "%.3f" % value)
+
+    if len(parts) == 4:
+        line2 = "%s, %s (edited); %s, %s (intact)" % (
+            fmt(*parts[0]), fmt(*parts[1]), fmt(*parts[2]), fmt(*parts[3]))
+    else:
+        line2 = ", ".join(fmt(arm, value) for arm, value in parts)
+    lines = ["%s, checkpoint %s: edited model vs intact model" % (display, t), line2]
+    if record.get("R_t") is not None and len(parts) == 4 and all(v is not None for _, v in parts):
+        (a, ta), (b, tb), (c, tc), (d, td) = parts
+        lines.append(r"$R_{%s}$ = (%.3f $-$ %.3f) / (%.3f $-$ %.3f) = %.2f"
+                     % (t, ta, tb, tc, td, record["R_t"]))
+    elif record.get("R_t") is not None:
+        lines.append(r"$R_{%s}$ = %.2f" % (t, record["R_t"]))
+    return "\n".join(lines)
+
+
 def render_rt(records, out_base, checkpoints=CHECKPOINT_STEPS, title=None,
-              dpi=300):
+              dpi=300, env_labels=None, annotate=(), notes=(), xlabel=None):
     """R_t vs fine-tuning checkpoint t, one line per environment.
 
     records   one dict per (environment, checkpoint): the metrics.recovery()
-              output (R_t, R_t_ci_low, R_t_ci_high, reason, tau_* extras
-              ignored) plus "env" (line label) and "checkpoint_step" (int).
+              output (R_t, R_t_ci_low, R_t_ci_high, reason, tau_* extras)
+              plus "env" (line label) and "checkpoint_step" (int).
+    env_labels  {env: display text} for the legend and direct labels.
+    annotate    iterable of (env, t): draw a boxed note at that point
+                spelling out the per-arm taus behind R_t (a ratio above 1
+                is then legible as its denominator, not as faster
+                relearning). An (env, t) with no record raises ValueError.
+    notes       extra footnote lines (e.g. the R_t definition).
+    xlabel      x-axis label override (e.g. "checkpoint index").
 
     Null R_t (recovery returned None with a reason, e.g.
     denominator_too_small) is an ANNOTATED GAP at that t: an x at the axis
@@ -649,6 +711,10 @@ def render_rt(records, out_base, checkpoints=CHECKPOINT_STEPS, title=None,
     """
     plt = _plt()
     fig, ax = plt.subplots()
+    env_labels = dict(env_labels or {})
+
+    def display(env):
+        return str(env_labels.get(env, env))
 
     envs = []
     for r in records:
@@ -682,14 +748,16 @@ def render_rt(records, out_base, checkpoints=CHECKPOINT_STEPS, title=None,
                 ts, ys, yerr=[lo, hi], color=color, marker=marker,
                 markeredgecolor="white", markeredgewidth=0.8,
                 capsize=2.5, elinewidth=1.0,
-                label=str(env) if run_idx == 0 else None,
+                label=display(env) if run_idx == 0 else None,
                 zorder=3,
             )
-        # Direct label at the last measurable point (relief for low-contrast hues).
-        if measurable:
+        # Direct label at the last measurable point (relief for low-contrast
+        # hues) only when no legend will be drawn: with several environments
+        # the labels collide wherever the lines end at the same value.
+        if measurable and len(envs) == 1:
             last = env_records[measurable[-1]]
             ax.annotate(
-                str(env), xy=(last["checkpoint_step"], last["R_t"]),
+                display(env), xy=(last["checkpoint_step"], last["R_t"]),
                 xytext=(6, 0), textcoords="offset points",
                 fontsize=8, color=TEXT, va="center",
             )
@@ -703,11 +771,29 @@ def render_rt(records, out_base, checkpoints=CHECKPOINT_STEPS, title=None,
 
     _gap_marks(ax, gap_marks)
 
+    annotations = []
+    for env, t_step in annotate:
+        matches = [r for r in records
+                   if r.get("env") == env and r.get("checkpoint_step") == t_step]
+        if len(matches) != 1:
+            raise ValueError("no recovery record for env %r at checkpoint %r"
+                             % (env, t_step))
+        record = matches[0]
+        text = _rt_annotation_text(display(env), t_step, record)
+        y = record["R_t"] if record.get("R_t") is not None else 0.0
+        ax.annotate(
+            text, xy=(t_step, y), xytext=(10, -4), textcoords="offset points",
+            ha="left", va="top", fontsize=8.5, color=TEXT,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.75", alpha=0.92),
+            zorder=6,
+        )
+        annotations.append((str(env), t_step, text))
+
     ax.axhline(1.0, color=TEXT_SECONDARY, linewidth=0.8, linestyle=(0, (4, 3)), zorder=2)
     ax.annotate(
         "full recovery (R=1)", xy=(0.0, 1.0), xycoords=("axes fraction", "data"),
         xytext=(4, 4), textcoords="offset points", ha="left",
-        fontsize=7.5, color=TEXT_SECONDARY,
+        fontsize=8.5, color=TEXT_SECONDARY,
     )
     ax.axhline(0.0, color=TEXT_SECONDARY, linewidth=0.8, linestyle=(0, (4, 3)), zorder=2)
 
@@ -717,22 +803,26 @@ def render_rt(records, out_base, checkpoints=CHECKPOINT_STEPS, title=None,
               if r.get("checkpoint_step") is not None)
     )
     ax.set_xticks(ticks)
-    ax.set_xlabel("fine-tuning checkpoint $t$ (steps)")
+    ax.set_xlabel("fine-tuning checkpoint $t$ (steps)" if xlabel is None else xlabel)
     ax.set_ylabel(r"$R_t$ (fraction of deception gap recovered)")
-    ax.set_title(title or "Recovery of the deception gap after re-fine-tuning")
+    resolved_title = _resolve_title(title, "Recovery of the deception gap after re-fine-tuning")
+    ax.set_title(resolved_title)
     if len(envs) > 1:
         ax.legend(loc="best")
 
-    notes = []
+    footnote = []
     if gaps:
-        notes.append("x at axis: R_t not computable there (reason shown), not zero")
-    _footnote(fig, notes)
+        footnote.append("x at axis: R_t not computable there (reason shown), not zero")
+    footnote.extend(str(n) for n in notes)
+    _footnote(fig, footnote, fontsize=8.5)
 
     return {
         "paths": _save(fig, out_base, dpi=dpi),
         "envs": [str(e) for e in envs],
         "checkpoints_shown": ticks,
         "gaps": gaps,
+        "annotations": annotations,
+        "title": resolved_title,
     }
 
 
@@ -848,7 +938,7 @@ def render_delta(curve_recovered, curve_lesioned, out_base, lesioned_layer=None,
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_xlabel("bypassed layer $l$")
     ax.set_ylabel(r"$\delta_l$  (%s $-$ %s $A_l$)" % (label_recovered, label_lesioned))
-    ax.set_title(title or "Relocation: change in per-layer bypass effect after recovery")
+    ax.set_title(_resolve_title(title, "Relocation: change in per-layer bypass effect after recovery"))
 
     notes = []
     if gaps:
@@ -869,7 +959,7 @@ def render_delta(curve_recovered, curve_lesioned, out_base, lesioned_layer=None,
 # ---------------------------------------------------------------------------
 
 
-def render_tau_bars(records, out_base, title=None, dpi=300):
+def render_tau_bars(records, out_base, title=None, dpi=300, notes=()):
     """Incentive-sensitivity gap tau per model and arm, with CIs.
 
     records   one dict per (model, arm): metrics.tau_with_ci-shaped — tau,
@@ -878,7 +968,8 @@ def render_tau_bars(records, out_base, title=None, dpi=300):
               "M_D", "M_C"; other labels allowed and ordered after these).
 
     A record with tau None is an annotated gap in its slot (x + reason),
-    never a zero-height bar.
+    never a zero-height bar. `notes` are extra footnote lines (e.g. which
+    run each bar comes from).
     """
     plt = _plt()
     fig, ax = plt.subplots()
@@ -952,7 +1043,8 @@ def render_tau_bars(records, out_base, title=None, dpi=300):
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels([str(m) for m in models])
     ax.set_ylabel(r"$\tau = D(\mathrm{incentive}) - D(\mathrm{control})$")
-    ax.set_title(title or "Incentive-sensitivity gap by model and arm")
+    resolved_title = _resolve_title(title, "Incentive-sensitivity gap by model and arm")
+    ax.set_title(resolved_title)
     # Headroom so the pinned top-center legend clears the tallest bar+CI+label.
     tops = [
         r["tau_ci_high"] if r.get("tau_ci_high") is not None else r["tau"]
@@ -963,16 +1055,19 @@ def render_tau_bars(records, out_base, title=None, dpi=300):
         ax.legend(loc="upper center", ncols=min(len(labels), 3))
     ax.grid(axis="x", visible=False)
 
-    notes = []
+    footnote = []
     if gaps:
-        notes.append("x at axis: tau not measured there (reason shown), not zero")
-    _footnote(fig, notes)
+        footnote.append("x at axis: tau not measured there (reason shown), not zero")
+    footnote.extend(str(n) for n in notes)
+    _footnote(fig, footnote, fontsize=8.5)
 
     return {
         "paths": _save(fig, out_base, dpi=dpi),
         "models": [str(m) for m in models],
         "labels": [str(l) for l in labels],
         "gaps": gaps,
+        "notes": [str(n) for n in notes],
+        "title": resolved_title,
     }
 
 
@@ -1143,31 +1238,55 @@ def synthetic_tau_bars(seed=0):
 # ---------------------------------------------------------------------------
 
 
-def render_edit_heatmap(data, out_base, title=None, dpi=300):
+def render_edit_heatmap(data, out_base, title=None, dpi=300, edit_windows=None):
     """Two aligned panels: clean-row D_incentive and truncation rate.
 
-    Voided cells (invalid rate above the ruling bound) are greyed and marked
-    'x' in the top panel - the rate a voided cell would have shown is never
-    drawn. Missing layers stay blank. Both lists come back in the metadata,
-    so nothing a cell hides goes unreported.
+    Cell states, each drawn distinctly and each reported in the metadata so
+    nothing a cell hides goes unreported:
+      measured   colour = clean-row D_incentive (viridis)
+      voided     incentive invalid rate above the ruling bound: GREY with a
+                 red ring; the rate a voided cell would have shown is never
+                 drawn (it is still in the cell dict)
+      zero_clean attempted but not one usable (valid, untruncated) incentive
+                 response: a small dot on top of whatever state it is in
+      missing    never attempted (no incentive rows): hatched, both panels
+    edit_windows {key: layers} draws a dashed outline over that row's edited
+    layers (min..max); an unknown key is refused by name. The truncation
+    panel keeps every attempted cell's rate: truncation is a measured
+    quantity even where deception is not.
     """
     import numpy as np
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch, Rectangle
 
     plt = _plt()
     keys = data["keys"]
     n_layers = data["n_layers"]
     cells = data["cells"]
 
+    spans = {}
+    for key, layers in dict(edit_windows or {}).items():
+        if key not in keys:
+            raise ValueError("edit window for unknown key %r (rows: %s)" % (key, keys))
+        layers = [int(l) for l in layers]
+        if not layers:
+            raise ValueError("edit window for %r is empty" % key)
+        spans[key] = [min(layers), max(layers)]
+
     D = np.full((len(keys), n_layers), np.nan)
     T = np.full((len(keys), n_layers), np.nan)
-    voided, missing, no_clean = [], [], []
+    voided, missing, no_clean, zero_clean = [], [], [], []
+    n_rows = 0
     for i, key in enumerate(keys):
         for layer in range(n_layers):
             cell = cells[key][layer]
             if cell["status"] == "missing":
                 missing.append((key, layer))
                 continue
+            n_rows = max(n_rows, int(cell.get("n") or 0))
             T[i, layer] = cell["trunc_rate"]
+            if not cell.get("n_clean"):
+                zero_clean.append((key, layer))
             if cell["status"] == "voided_validity":
                 voided.append((key, layer))
                 continue
@@ -1177,7 +1296,7 @@ def render_edit_heatmap(data, out_base, title=None, dpi=300):
             D[i, layer] = cell["clean_d_incentive"]
 
     fig, (ax_d, ax_t) = plt.subplots(
-        2, 1, figsize=(max(8.0, 0.38 * n_layers), 1.4 + 1.1 * len(keys)),
+        2, 1, figsize=(6.4, 4.2),
         sharex=True,
     )
     cmap_d = plt.get_cmap("viridis").copy()
@@ -1187,25 +1306,57 @@ def render_edit_heatmap(data, out_base, title=None, dpi=300):
 
     im_d = ax_d.imshow(D, aspect="auto", vmin=0.0, vmax=1.0, cmap=cmap_d)
     im_t = ax_t.imshow(T, aspect="auto", vmin=0.0, vmax=1.0, cmap=cmap_t)
+
+    def box(ax, key, layer, **kwargs):
+        ax.add_patch(Rectangle((layer - 0.5, keys.index(key) - 0.5), 1, 1, **kwargs))
+
+    for (key, layer) in missing:
+        for ax in (ax_d, ax_t):
+            box(ax, key, layer, facecolor="0.85", edgecolor="0.55",
+                hatch="////", linewidth=0, zorder=3)
     for (key, layer) in voided:
-        ax_d.plot(layer, keys.index(key), marker="x", color="crimson",
-                  markersize=7, markeredgewidth=1.6)
-    for ax, im, label in ((ax_d, im_d, "clean-row D_incentive under bypass"),
-                          (ax_t, im_t, "incentive truncation rate")):
+        box(ax_d, key, layer, fill=False, edgecolor="crimson", linewidth=1.4, zorder=4)
+    for (key, layer) in zero_clean:
+        ax_d.plot(layer, keys.index(key), marker="o", markersize=3.5,
+                  color=TEXT_SECONDARY, linestyle="none", zorder=5)
+    for key, (lo, hi) in spans.items():
+        ax_d.add_patch(Rectangle(
+            (lo - 0.5, keys.index(key) - 0.5), hi - lo + 1, 1, fill=False,
+            edgecolor="white", linewidth=1.3, linestyle=(0, (3, 2)), zorder=6,
+        ))
+
+    for ax, im, label in ((ax_d, im_d, "clean-row deception rate"),
+                          (ax_t, im_t, "truncation rate")):
         ax.set_yticks(range(len(keys)))
         ax.set_yticklabels(keys)
         fig.colorbar(im, ax=ax, fraction=0.03, pad=0.01).set_label(label)
     ax_t.set_xlabel("bypassed layer")
     ax_t.set_xticks(range(0, n_layers, 2))
-    ax_d.set_title(title or "Deception under single-layer bypass, per edited "
-                            "checkpoint")
+    resolved_title = _resolve_title(
+        title, "Deception under single-layer bypass, per edited checkpoint")
+    ax_d.set_title(resolved_title)
+
+    handles = [
+        Patch(facecolor="0.85", edgecolor="crimson", linewidth=1.4),
+        Line2D([], [], marker="o", color=TEXT_SECONDARY, linestyle="none", markersize=3.5),
+    ]
+    legend = [
+        "grey + red outline: unmeasurable (invalid rate > %.2f)" % data["invalid_max"],
+        "dot: attempted, zero usable responses",
+    ]
+    if missing:
+        handles.append(Patch(facecolor="0.85", edgecolor="0.55", hatch="////"))
+        legend.append("hatched: never attempted")
+    if spans:
+        handles.append(Patch(fill=False, edgecolor=TEXT, linewidth=1.3, linestyle=(0, (3, 2))))
+        legend.append("dashed outline: layers edited in that checkpoint")
+    fig.legend(handles, legend, loc="upper center", bbox_to_anchor=(0.5, -0.005),
+               ncol=1, fontsize=8.5, frameon=False)
     _footnote(fig, [
-        "x = voided (incentive invalid rate > %.2f under the truncated->"
-        "invalid ruling); grey = voided/missing/no clean rows"
-        % data["invalid_max"],
-        "voided: %d cells; missing: %d; measured-without-clean-rows: %d"
-        % (len(voided), len(missing), len(no_clean)),
-    ])
+        "unmeasurable: %d cells; attempted with zero usable responses: %d; "
+        "never attempted: %d" % (len(voided), len(zero_clean), len(missing)),
+        "Rates exclude truncated/invalid responses; %d incentive attempts per cell." % n_rows,
+    ], fontsize=8.5, y=-0.19 if missing else -0.15)
 
     paths = _save(fig, out_base, dpi=dpi)
     return {
@@ -1215,11 +1366,18 @@ def render_edit_heatmap(data, out_base, title=None, dpi=300):
         "voided": voided,
         "missing": missing,
         "no_clean_rows": no_clean,
+        "zero_clean": zero_clean,
+        "edit_windows": spans,
+        "legend": legend,
+        "title": resolved_title,
     }
 
 
 def synthetic_edit_heatmap(seed=0):
-    """Plausible fake heatmap data for the --synthetic dry run."""
+    """Plausible fake heatmap data for the --synthetic dry run: measured
+    cells, voided boundary layers (layer 0 with zero usable responses, the
+    last layer with two), and one never-attempted cell (l21, layer 5) so
+    every legend state is exercised."""
     import random
 
     rng = random.Random(seed)
@@ -1229,10 +1387,20 @@ def synthetic_edit_heatmap(seed=0):
     for key in keys:
         per_layer = {}
         for layer in range(n_layers):
-            if layer in (0, n_layers - 1):
+            if layer == 0:
+                per_layer[layer] = {"status": "voided_validity", "n": 100,
+                                    "n_clean": 0, "clean_d_incentive": None,
+                                    "trunc_rate": 1.0, "invalid_rate": 1.0}
+                continue
+            if layer == n_layers - 1:
                 per_layer[layer] = {"status": "voided_validity", "n": 100,
                                     "n_clean": 2, "clean_d_incentive": 0.0,
                                     "trunc_rate": 0.95, "invalid_rate": 0.98}
+                continue
+            if key == "l21" and layer == 5:
+                per_layer[layer] = {"status": "missing", "n": 0, "n_clean": 0,
+                                    "clean_d_incentive": None,
+                                    "trunc_rate": None, "invalid_rate": None}
                 continue
             hot = key == "l07" and layer == 2
             per_layer[layer] = {
@@ -1281,15 +1449,16 @@ def render_probe_curves(curves, out_base, title=None, dpi=300):
     ax.set_ylabel("transfer AUROC")
     ax.set_ylim(0.0, 1.05)
     ax.legend(ncol=min(len(curves), 6), fontsize=8)
-    ax.set_title(title or "Instructed-pairs probe transfer to strategic "
-                          "deception, per checkpoint")
+    resolved_title = _resolve_title(title, "Instructed-pairs probe transfer to strategic "
+                                           "deception, per checkpoint")
+    ax.set_title(resolved_title)
     if null_layers:
         _footnote(fig, ["null AUROC (degenerate bootstrap or structural): "
                         + "; ".join("%s: %s" % (k, v)
                                     for k, v in null_layers.items())])
     paths = _save(fig, out_base, dpi=dpi)
     return {"paths": paths, "keys": [k for k, _ in curves],
-            "null_layers": null_layers}
+            "null_layers": null_layers, "title": resolved_title}
 
 
 def synthetic_probe_curves(seed=0):
@@ -1395,8 +1564,8 @@ def render_recovery_taus(records, out_base, checkpoints=CHECKPOINT_STEPS,
         if env_idx == 0:
             ax.set_ylabel(r"$\tau$ = D(incentive) $-$ D(control)")
             ax.legend(loc="center right", title=None)
-    fig.suptitle(title or "Raw per-arm deception gaps across recovery "
-                          "checkpoints", fontsize=10.5)
+    fig.suptitle(_resolve_title(title, "Raw per-arm deception gaps across recovery "
+                                       "checkpoints"), fontsize=10.5)
 
     notes = ["point estimates only: the record carries no per-arm CI "
              "(only the R_t ratio is bootstrapped)"]
@@ -1506,8 +1675,8 @@ def render_decomposition(record, out_base, condition="incentive", title=None,
     ax.set_xlabel("bypassed layer $l$")
     ax.set_ylabel("fraction of %s-condition rows" % condition)
     ax.set_title(
-        title or "Output decomposition per bypassed layer (%s condition)"
-        % condition
+        _resolve_title(title, "Output decomposition per bypassed layer (%s condition)"
+        % condition)
     )
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=7.5)
     notes = [
@@ -1794,8 +1963,8 @@ def render_edit_gate_summary(records, out_base, title=None, dpi=300):
         ax.set_xticklabels(tick_labels, fontsize=7.5)
         ax.set_xlim(-0.6, len(records) - 0.4)
     fig.suptitle(
-        title or "Layer-edit gates: removal, drift, capability, and the "
-        "window's Stage-1 causal effect"
+        _resolve_title(title, "Layer-edit gates: removal, drift, capability, and the "
+        "window's Stage-1 causal effect")
     )
     notes = [
         "x at axis: quantity unavailable (reason shown), not zero; panel (f) "

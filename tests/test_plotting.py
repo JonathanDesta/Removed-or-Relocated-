@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-PLOTTING_TEST_COUNT = 14
+PLOTTING_TEST_COUNT = 17
 
 try:
     import matplotlib
@@ -129,6 +129,58 @@ if HAVE_STACK:
         for t in plotting.CHECKPOINT_STEPS:
             assert t in meta["checkpoints_shown"]
         assert set(meta["envs"]) == {"negotiation", "insider_trading"}
+
+    def test_empty_title_is_kept_not_defaulted():
+        """A paper figure carries its title in the caption: "" must give NO
+        title, while None still gives the renderer's default."""
+        with tempfile.TemporaryDirectory() as tmp:
+            curves = plotting.synthetic_probe_curves()
+            assert plotting.render_probe_curves(curves, os.path.join(tmp, "a"), title="")["title"] == ""
+            assert plotting.render_probe_curves(curves, os.path.join(tmp, "b"))["title"].startswith("Instructed-pairs")
+            records = plotting.synthetic_rt()
+            assert plotting.render_rt(records, os.path.join(tmp, "c"), title="")["title"] == ""
+            assert plotting.render_rt(records, os.path.join(tmp, "d"))["title"].startswith("Recovery")
+            bars = plotting.synthetic_tau_bars()
+            assert plotting.render_tau_bars(bars, os.path.join(tmp, "e"), title="")["title"] == ""
+
+    def test_rt_env_labels_and_constituent_annotation():
+        """The annotation spells out the per-arm taus behind R_t at a point,
+        labelled with the environment's display name; an unknown (env, t)
+        is refused rather than silently skipped."""
+        records = plotting.synthetic_rt()
+        assert [a for a, _ in plotting._rt_constituents(records[0])] == ["LD", "LC", "ID", "IC"]
+        target = next(r for r in records if r["env"] == "negotiation" and r["R_t"] is not None)
+        t_step = target["checkpoint_step"]
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_rt(
+                records, os.path.join(tmp, "rt_ann"),
+                env_labels={"negotiation": "target layer 7"},
+                annotate=[("negotiation", t_step)], notes=["R_t definition"],
+                xlabel="checkpoint index",
+            )
+            _nonempty(meta["paths"])
+            assert len(meta["annotations"]) == 1
+            env, step, text = meta["annotations"][0]
+            assert env == "negotiation" and step == t_step
+            assert "target layer 7" in text and "edited model vs intact model" in text
+            taus = [v for k, v in target.items() if k.startswith("tau_") and v is not None]
+            assert taus and all(("%.3f" % v) in text for v in taus)
+            try:
+                plotting.render_rt(records, os.path.join(tmp, "rt_bad"), annotate=[("nope", 8)])
+            except ValueError as exc:
+                assert "nope" in str(exc)
+            else:
+                raise AssertionError("annotation for a missing record was accepted")
+
+    def test_tau_bars_notes_reach_footnote_meta():
+        records = plotting.synthetic_tau_bars()
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_tau_bars(
+                records, os.path.join(tmp, "tau_notes"),
+                notes=["M_0 = m0-baseline-llama8b-rep"],
+            )
+            _nonempty(meta["paths"])
+        assert meta["notes"] == ["M_0 = m0-baseline-llama8b-rep"]
 
     def test_rt_all_null_environment_still_renders():
         """Every point null (e.g. the intact gap never exceeded eps): the

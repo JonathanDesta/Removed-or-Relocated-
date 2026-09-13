@@ -16,6 +16,7 @@ Dry-run example:
     python scripts/make_figures.py layer-curve --synthetic --out-dir /tmp/figs
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -181,6 +182,13 @@ def main(argv=None):
     )
     _add_common(sub)
     _input_arg(sub, "recovery records JSON/JSONL")
+    sub.add_argument("--env-label", action="append", default=[], metavar="ENV=LABEL",
+                     help="display label for an environment key (repeatable)")
+    sub.add_argument("--annotate", action="append", default=[], metavar="ENV:T",
+                     help="box the per-arm taus behind R_t at that point (repeatable)")
+    sub.add_argument("--note", action="append", default=[], metavar="TEXT",
+                     help="extra footnote line (repeatable)")
+    sub.add_argument("--xlabel", default=None, help="x-axis label override")
 
     sub = subs.add_parser(
         "recovery-taus",
@@ -234,6 +242,8 @@ def main(argv=None):
     )
     _add_common(sub)
     _input_arg(sub, "tau records JSON/JSONL")
+    sub.add_argument("--note", action="append", default=[], metavar="TEXT",
+                     help="extra footnote line, e.g. which run each bar is from (repeatable)")
 
     sub = subs.add_parser(
         "edit-heatmap",
@@ -252,6 +262,12 @@ def main(argv=None):
                      help="ordered heatmap row: checkpoint key and its sweep "
                           "out-root (repeatable)")
     sub.add_argument("--n-layers", type=int, default=28)
+    sub.add_argument("--edit-manifest", action="append", default=[],
+                     metavar="KEY=TRAIN_MANIFEST_JSON",
+                     help="dashed outline over KEY's edited layers, read from "
+                          "that edit run's train_manifest.json "
+                          "config.train_layers (repeatable; KEY must be a "
+                          "--sweep key, or a synthetic key under --synthetic)")
 
     sub = subs.add_parser(
         "probe-curves",
@@ -350,9 +366,25 @@ def main(argv=None):
         records = _load_input(parser, args, "recovery records")
         if records is None:
             records = plotting.synthetic_rt()
+        env_labels = {}
+        for spec in args.env_label:
+            key, sep, label = spec.partition("=")
+            if not sep or not key:
+                parser.error("bad --env-label %r; expected ENV=LABEL" % spec)
+            env_labels[key] = label
+        annotate = []
+        for spec in args.annotate:
+            env, sep, step = spec.rpartition(":")
+            if not sep or not env:
+                parser.error("bad --annotate %r; expected ENV:T" % spec)
+            try:
+                annotate.append((env, int(step)))
+            except ValueError:
+                parser.error("--annotate checkpoint must be an integer: %r" % spec)
         meta = plotting.render_rt(
             records, _out_base(parser, args, "rt"),
-            title=args.title, dpi=args.dpi,
+            title=args.title, dpi=args.dpi, env_labels=env_labels,
+            annotate=annotate, notes=args.note, xlabel=args.xlabel,
         )
 
     elif args.command == "recovery-taus":
@@ -396,7 +428,7 @@ def main(argv=None):
             records = plotting.synthetic_tau_bars()
         meta = plotting.render_tau_bars(
             records, _out_base(parser, args, "tau_bars"),
-            title=args.title, dpi=args.dpi,
+            title=args.title, dpi=args.dpi, notes=args.note,
         )
 
     elif args.command == "edit-heatmap":
@@ -426,9 +458,22 @@ def main(argv=None):
                     parser.error("no <tag>-lNN/rows.jsonl layer dirs under %s" % root)
                 columns.append((key, layer_rows))
             data = figures.edit_heatmap_cells(columns, n_layers=args.n_layers)
+        edit_windows = {}
+        for spec in args.edit_manifest:
+            key, sep, path = spec.partition("=")
+            if not sep or not key or not path:
+                parser.error("bad --edit-manifest %r; expected KEY=TRAIN_MANIFEST_JSON" % spec)
+            if key not in data["keys"]:
+                parser.error("--edit-manifest key %r is not a heatmap row (%s)"
+                             % (key, data["keys"]))
+            manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+            layers = (manifest.get("config") or {}).get("train_layers")
+            if not layers:
+                parser.error("%s records no config.train_layers" % path)
+            edit_windows[key] = [int(l) for l in layers]
         meta = plotting.render_edit_heatmap(
             data, _out_base(parser, args, "edit_heatmap"),
-            title=args.title, dpi=args.dpi,
+            title=args.title, dpi=args.dpi, edit_windows=edit_windows,
         )
 
     elif args.command == "probe-curves":

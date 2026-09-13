@@ -71,20 +71,44 @@ def main():
     c = cell(data, "k", 0)
     assert c["clean_d_incentive"] is None and c["n_clean"] == 0, c
 
-    # render smoke: files written, voided/missing surfaced in the metadata.
+    # render smoke: files written; every cell state surfaced in the metadata
+    # (6: a voided cell must be grey+ring, never a rate; zero-usable and
+    # never-attempted are distinct states; edit windows are drawn only for
+    # known rows; "" keeps the title empty for a captioned paper figure).
     from algoverse.plotting import render_edit_heatmap, synthetic_edit_heatmap
     with tempfile.TemporaryDirectory() as tmp:
         meta = render_edit_heatmap(synthetic_edit_heatmap(),
                                    str(Path(tmp) / "edit_heatmap"))
         assert all(Path(p).is_file() for p in meta["paths"]), meta["paths"]
         assert len(meta["voided"]) == 8, meta["voided"]      # 2 boundary x 4 keys
-        assert meta["missing"] == []
+        assert meta["missing"] == [("l21", 5)], meta["missing"]
+        assert ("l07", 0) in meta["zero_clean"] and ("l07", 27) not in meta["zero_clean"]
+        assert any("never attempted" in line for line in meta["legend"])
+        assert not any("dashed" in line for line in meta["legend"])
+        assert meta["edit_windows"] == {}
+        assert meta["title"].startswith("Deception under")
+
+        meta = render_edit_heatmap(synthetic_edit_heatmap(), str(Path(tmp) / "win"),
+                                   edit_windows={"l07": [8, 6, 7]}, title="")
+        assert meta["edit_windows"] == {"l07": [6, 8]}, meta["edit_windows"]
+        assert any("dashed" in line for line in meta["legend"])
+        assert meta["title"] == ""
+        try:
+            render_edit_heatmap(synthetic_edit_heatmap(), str(Path(tmp) / "bad"),
+                                edit_windows={"nope": [1]})
+        except ValueError as exc:
+            assert "nope" in str(exc)
+        else:
+            raise AssertionError("edit window for an unknown row was accepted")
 
         columns = [("k", {0: [row(deceptive=True)], 1: [row(trunc=True)] * 10})]
         data = edit_heatmap_cells(columns, n_layers=3)
         meta = render_edit_heatmap(data, str(Path(tmp) / "tiny"))
         assert ("k", 1) in meta["voided"]
+        assert ("k", 1) in meta["zero_clean"]          # 10 truncated, 0 usable
+        assert ("k", 0) not in meta["zero_clean"]
         assert ("k", 2) in meta["missing"]
+        assert not any("dashed" in line for line in meta["legend"])
 
     print("PASS test_edit_heatmap")
 
