@@ -135,12 +135,14 @@ Start with the end-to-end proof, which needs no GPU and no model download:
 python scripts/smoke_test.py
 ```
 
-Canonical invocations for the real pipeline are in
-[INTERFACES.md § Canonical commands](INTERFACES.md). Experiments themselves run
-on Google Colab; results are written as append-only JSONL to the shared
-`maheep-yksa` Drive, which is why `results/` is not in this repository. See
-[Notebook Setup.ipynb](Notebook%20Setup.ipynb) for how the repo, Colab, and
-Drive fit together.
+The whole paper — data, the Stage 1–3 training and evaluation, the probe and
+insider-trading appendices, and Figures 1–5 — runs top to bottom from
+[Removed_or_Recoverable.ipynb](Removed_or_Recoverable.ipynb) on a single GPU
+box (Kaggle or any Jupyter host). Every cell shells out to a script in
+`scripts/`, every script resumes, and the notebook skips finished steps, so a
+reproduction can span many sessions. Results are written as append-only JSONL
+under the notebook's `PROJECT` directory (outside the repo by default), which
+is why `results/` is not in this repository.
 
 ## License
 

@@ -100,14 +100,19 @@ class RevisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "records a failure"):
                 workflow.run("figure1")
 
-    def test_notebook_contains_only_thin_script_calls(self):
-        notebook = revision.read_json(REPO / "Camera-Ready Figures Runbook (Mac).ipynb")
-        code = "\n".join("".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code")
-        compile(code, "notebook", "exec")
-        for forbidden in ("unlink(", "run_finetune", "run_baseline", "run_probe_transfer", "run_sweep"):
-            self.assertNotIn(forbidden, code)
-        for stage in revision.STAGES:
-            self.assertIn('run("' + stage + '")', code.replace("'", '"'))
+    def test_notebook_code_cells_compile(self):
+        # The one runbook is plain Python (no shell or magic lines), so every code
+        # cell must compile on its own; it is fingerprinted with the code.
+        notebook = revision.read_json(REPO / revision.NOTEBOOK)
+        code_cells = [c for c in notebook["cells"] if c["cell_type"] == "code"]
+        self.assertTrue(code_cells)
+        for index, cell in enumerate(code_cells):
+            source = "".join(cell["source"])
+            for line in source.splitlines():
+                self.assertFalse(line.lstrip().startswith(("!", "%")),
+                                 "code cell %d uses a shell/magic line: %r" % (index, line))
+            compile(source, "notebook code cell %d" % index, "exec")
+        self.assertIn(str(Path(revision.NOTEBOOK)), revision.code_identity()["sha256"])
 
     def test_reused_output_is_refused_without_modifying_it(self):
         with tempfile.TemporaryDirectory() as tmp:
