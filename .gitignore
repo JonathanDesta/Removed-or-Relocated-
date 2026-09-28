@@ -37,6 +37,7 @@ figures/
 # LLM instructions
 AGENTS.md
 CLAUDE.md
+.claude
 roles/
 Prompts.txt
 Algoverse AI Research_ Compute & API Access Policy-2.pdf
