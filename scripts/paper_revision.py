@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
+NOTEBOOK = "Removed_or_Recoverable.ipynb"   # the repo's one runbook, fingerprinted with the code
 sys.path.insert(0, str(REPO / "src"))
 from algoverse import figures
 from artifact_index import _sha256, rebase
@@ -56,7 +57,7 @@ def code_identity(repo=REPO):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
                               capture_output=True, text=True).stdout
     paths = [*repo.glob("scripts/*.py"), *repo.glob("src/algoverse/*.py"),
-             *repo.glob("tests/test_*.py"), repo / "Camera-Ready Figures Runbook (Mac).ipynb"]
+             *repo.glob("tests/test_*.py"), repo / NOTEBOOK]
     return {"commit": git("rev-parse", "HEAD").strip(),
             "working_tree_status": git("status", "--short"),
             "sha256": {str(p.relative_to(repo)): _sha256(p) for p in sorted(paths) if p.is_file()}}
