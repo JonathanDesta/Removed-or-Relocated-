@@ -762,7 +762,8 @@ def test_competence_resume_guards_identity_and_metric_config_without_torch():
 
 
 def test_wilson_interval_saturation_symmetry_and_edges():
-    """The exact-count interval at saturation (layer-edit deltas item 10)."""
+    """The exact-count interval at saturation, its symmetry and the edges
+    (the Wilson intervals of the Appendix D boundary counts)."""
     low, high = wilson_interval(0, 305)
     assert low == 0.0
     assert abs(high - 0.012438) < 1e-5, high

@@ -161,16 +161,16 @@ def audit_matched_arms(manifest_inputs, arms=DEFAULT_RECOVERY_ARMS) -> dict:
         )
 
     manifests = {arm: _manifest(manifest_inputs[arm]) for arm in arms}
-    lesioned = [
+    bypassed_arms = [
         arm for arm in arms if manifests[arm].get("bypassed_layer") is not None
     ]
-    if lesioned:
+    if bypassed_arms:
         raise ValueError(
             "matched_arms_audit_failed: arm(s) %s were trained with a layer "
             "bypassed (bypassed_layer in train_manifest.json); the "
             "continuation arms train the intact model, so these are not "
             "matched arms of this design"
-            % ", ".join(repr(arm) for arm in lesioned)
+            % ", ".join(repr(arm) for arm in bypassed_arms)
         )
     identities = {
         arm: matched_training_identity(manifests[arm], cross_family=False)
