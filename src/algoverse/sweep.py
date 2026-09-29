@@ -104,10 +104,8 @@ CANDIDATE_BENCHMARK_KEYS = ("i2_mmlu", "i2_gsm8k")
 
 
 def _rows(rows_or_path):
-    """A row list, loading from disk when given a path instead of rows."""
-    if isinstance(rows_or_path, (str, os.PathLike)):
-        return metrics.load_rows(rows_or_path)
-    return list(rows_or_path)
+    """Normalized rows from a path or a list (metrics.rows_from)."""
+    return metrics.rows_from(rows_or_path)
 
 
 def _int_layer(value, context):
@@ -567,6 +565,7 @@ def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
     lines.append(
         "neutral-JSD bound: %.2f nats (pre-registered)" % neutral_jsd_max
     )
+    lines.append("truncation rule: %s" % metrics.truncation_rule_label())
     lines.append(
         "bounds: invalid<=%.2f/condition (i15), negotiation-competence "
         "drop<=%.2f (i2), benchmark drop<=%.2f (i2), ppl rise<=%.1f (i3), "

@@ -1,6 +1,6 @@
 """Compute the Stage-3 edit-relocation delta curve and its rule-derived verdict.
 
-    python scripts/relocation_report.py --truncated-invalid \\
+    python scripts/relocation_report.py \\
         --recovered-base $PROJECT/results/<E,D t281 base run>/rows.jsonl \\
         --recovered-layer 0=$PROJECT/results/<E,D t281 sweep>/<tag>-l00/rows.jsonl ... \\
         --edited-base $PROJECT/results/<M_E base run>/rows.jsonl \\
@@ -23,11 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.relocation import (
-    apply_truncated_invalid_ruling,
-    edit_relocation_report,
-    evaluate_edit_relocation,
-)
+from algoverse.relocation import edit_relocation_report, evaluate_edit_relocation
 
 
 def _pairs(values, label):
@@ -117,12 +113,6 @@ def main(argv=None):
     parser.add_argument("--final", action="store_true",
                         help="stamp the manual classifications (--dispersion, --origin)")
     parser.add_argument("--dispersion", choices=["dispersed", "concentrated"])
-    parser.add_argument(
-        "--truncated-invalid", action="store_true",
-        help="apply the pre-registered truncated->invalid scoring rule: every "
-             "rows input is copied to a temp dir with hit_max_tokens rows "
-             "reclassified invalid (sources untouched) before analysis",
-    )
     parser.add_argument("--origin", action="append", default=None,
                         metavar="N=reconstructed|strengthened")
     parser.add_argument("--emit-curves", default=None, metavar="BASENAME",
@@ -130,36 +120,6 @@ def main(argv=None):
                              "<BASENAME>-edited.json (layer-curve-shaped, "
                              "full precision) for make_figures.py delta")
     args = parser.parse_args(argv)
-
-    if args.truncated_invalid:
-        import tempfile
-
-        ruling_dir = Path(tempfile.mkdtemp(prefix="ruling-rows-"))
-        totals = [0, 0]
-
-        def _ruled(path, tag):
-            dst = ruling_dir / tag / Path(path).name
-            n, changed = apply_truncated_invalid_ruling(path, dst)
-            totals[0] += n
-            totals[1] += changed
-            return str(dst)
-
-        args.recovered_base = _ruled(args.recovered_base, "rb")
-        args.edited_base = _ruled(args.edited_base, "eb")
-        args.recovered_layer = [
-            "%s=%s" % (spec.partition("=")[0],
-                       _ruled(spec.partition("=")[2], "rl%s" % spec.partition("=")[0]))
-            for spec in args.recovered_layer
-        ]
-        args.edited_layer = [
-            "%s=%s" % (spec.partition("=")[0],
-                       _ruled(spec.partition("=")[2], "el%s" % spec.partition("=")[0]))
-            for spec in args.edited_layer
-        ]
-        print("RULING APPLIED: truncated->invalid on %d inputs "
-              "(%d of %d rows reclassified)"
-              % (2 + len(args.recovered_layer) + len(args.edited_layer),
-                 totals[1], totals[0]))
 
     result = evaluate_edit_relocation(
         args.recovered_base,

@@ -89,17 +89,22 @@ def test_main_glob_and_results_refusal():
             raise AssertionError("an empty glob was accepted")
 
 
-def test_legacy_truncation_empty_condition_and_input_immutability():
+def test_truncation_rule_applied_at_load_and_source_untouched():
     m = _load()
-    rows = [{"run_id": "legacy", "scenario_id": "x", "condition": "incentive",
+    rows = [{"run_id": "r", "scenario_id": "x", "condition": "incentive",
              "valid": True, "deceptive": True, "hit_max_tokens": True}]
-    original = json.dumps(rows, sort_keys=True)
-    counts = m.count_conditions(rows)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "rows.jsonl"
+        path.write_text(json.dumps(rows[0]) + "\n")
+        before = path.read_bytes()
+        counts = m.count_conditions(m.load_rows_strict(path))
+        assert path.read_bytes() == before
     assert counts["incentive"]["n_valid"] == 0
     assert counts["incentive"]["n_deceptive"] == 0
+    assert counts["incentive"]["n_trunc"] == 1
     assert counts["control"]["n"] == 0 and counts["control"]["low"] is None
-    assert "n/a" in m.format_report([("legacy", counts)], m.group_signatures([("legacy", counts)]))
-    assert json.dumps(rows, sort_keys=True) == original
+    report = m.format_report([("r", counts)], m.group_signatures([("r", counts)]))
+    assert "n/a" in report and "hit_max_tokens=>invalid" in report
 
 
 def test_gate_sources_and_duplicate_inputs():

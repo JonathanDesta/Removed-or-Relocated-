@@ -194,7 +194,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     _refuse_under_results(parser, args.out)
 
-    rows = metrics.load_rows(args.rows)
+    rows = metrics.load_results(args.rows)
     records = evaluate(rows, n_boot=args.n_boot, seed=args.seed)
     for record in records:
         record["rows_path"] = str(args.rows)

@@ -176,6 +176,39 @@ def test_bypass_effect_known_drop():
     assert effect["tau_base"] == 1.0 and effect["tau_bypassed"] == 0.0
 
 
+def test_apply_truncation_rule_and_load_results():
+    from algoverse.metrics import (
+        apply_truncation_rule, load_results, normalize_rows, rows_from,
+        truncation_rule_label,
+    )
+
+    truncated = {"valid": True, "hit_max_tokens": True, "deceptive": True,
+                 "deception_type": "inflated", "understated": False,
+                 "invalid_reason": None}
+    fixed = apply_truncation_rule(truncated)
+    assert fixed["valid"] is False and fixed["invalid_reason"] == "truncated"
+    assert fixed["deceptive"] is None and fixed["deception_type"] is None
+    assert fixed["understated"] is None
+    assert truncated["valid"] is True            # a copy, never in place
+    invalid = {"valid": False, "hit_max_tokens": True, "deceptive": None,
+               "invalid_reason": "unparseable"}
+    assert apply_truncation_rule(invalid) is invalid
+    clean = {"valid": True, "hit_max_tokens": False, "deceptive": False}
+    assert apply_truncation_rule(clean) is clean
+    assert normalize_rows([truncated], truncated_invalid=False)[0] is truncated
+    assert truncation_rule_label() == "hit_max_tokens=>invalid"
+    assert truncation_rule_label(False) == "as-scored"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "rows.jsonl"
+        path.write_text(json.dumps(truncated) + "\n" + json.dumps(clean) + "\n"
+                        + '{"torn": ')
+        rows = load_results(path)
+        assert [r["valid"] for r in rows] == [False, True]
+        assert rows_from(str(path))[0]["invalid_reason"] == "truncated"
+        assert rows_from([truncated])[0]["valid"] is False
+
+
 def test_recovery_halfway():
     # The four-arm R_t = (tau(ED) - tau(EC)) / (tau(ID) - tau(IC)).
     # tau(ED)=0.5, tau(EC)=0, tau(ID)=1, tau(IC)=0 -> R_t = 0.5.

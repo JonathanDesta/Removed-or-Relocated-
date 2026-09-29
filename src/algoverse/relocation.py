@@ -26,12 +26,11 @@ _RUN_SIDES = ("recovered_base", "recovered_bypassed",
 
 
 def _invalid_rates(rows):
-    """Per-condition invalid rate of one run: (truncated OR invalid) / rows.
+    """Per-condition invalid rate of one run: invalid rows / all rows.
 
-    Mirrors figures.edit_heatmap_cells: hit_max_tokens counts as invalid
-    even on as-scored rows (truncated generations are invalid under the
-    pre-registered scoring rule), the denominator is every row of that
-    condition, and a condition with no rows is None -- never 0.
+    Rows arrive through sweep.load_sweep_inputs, so the truncation rule has
+    already been applied (metrics.rows_from). The denominator is every row
+    of that condition, and a condition with no rows is None -- never 0.
     """
     rates = {}
     for condition in ("incentive", "control"):
@@ -39,9 +38,7 @@ def _invalid_rates(rows):
         if not pool:
             rates[condition] = None
             continue
-        bad = sum(
-            1 for r in pool if r.get("hit_max_tokens") or not r.get("valid")
-        )
+        bad = sum(1 for r in pool if not r.get("valid"))
         rates[condition] = bad / len(pool)
     return rates
 
@@ -363,6 +360,7 @@ def edit_relocation_report(result, final=False, dispersion=None, origins=None):
         "STAGE-3 EDIT RELOCATION REPORT  (paired bootstrap n=%d)"
         % result["n_boot"],
         "edited layers: %s" % result["edit_layers"],
+        "truncation rule: %s" % metrics.truncation_rule_label(),
         "",
         "| layer | A_l recovered | A_l just-edited | delta_l [95% CI] "
         "| coverage shared/rb/rp/eb/ep | status |",
@@ -418,31 +416,3 @@ def edit_relocation_report(result, final=False, dispersion=None, origins=None):
     report = "\n".join(lines)
     print(report)
     return report
-
-
-def apply_truncated_invalid_ruling(src_path, dst_path):
-    """Copy a rows.jsonl applying the pre-registered truncated->invalid rule.
-
-    Rows with hit_max_tokens are reclassified valid=False,
-    invalid_reason="truncated", deceptive=None (invalid rows carry a null
-    label per the scoring contract). All other rows pass through unchanged.
-    The source file is never modified - results stay append-only; the rule
-    lives in a labeled copy. Returns (n_rows, n_reclassified).
-    """
-    src, dst = Path(src_path), Path(dst_path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    n_rows = n_reclassified = 0
-    out_lines = []
-    for line in src.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        n_rows += 1
-        if row.get("hit_max_tokens") and row.get("valid"):
-            row["valid"] = False
-            row["invalid_reason"] = "truncated"
-            row["deceptive"] = None
-            n_reclassified += 1
-        out_lines.append(json.dumps(row))
-    dst.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    return n_rows, n_reclassified

@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import figures, plotting
+from algoverse import figures, metrics, plotting
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -320,7 +320,7 @@ def main(argv=None):
                 for child in sorted(Path(root).iterdir()):
                     match = re.search(r"-l(\d+)$", child.name)
                     if match and (child / "rows.jsonl").is_file():
-                        layer_rows[int(match.group(1))] = plotting.load_records(
+                        layer_rows[int(match.group(1))] = metrics.load_results(
                             str(child / "rows.jsonl")
                         )
                 if not layer_rows:

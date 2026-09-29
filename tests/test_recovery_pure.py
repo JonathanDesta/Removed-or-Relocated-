@@ -288,6 +288,7 @@ def test_default_report_rendering_is_byte_for_byte_stable():
     )
     expected = (
         "STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=50)\n"
+        "truncation rule: hit_max_tokens=>invalid\n"
         "pre-registered subset: t in [8, 70, 281]; requested: [8]\n"
         "MATCHED-ARMS AUDIT: PASS -- all four arms share one training "
         "identity (train_seed=42, total_steps=281, effective_batch=16)\n\n"

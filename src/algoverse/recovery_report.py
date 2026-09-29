@@ -50,14 +50,8 @@ DEFAULT_RECOVERY_ARMS = ("E,D", "E,C", "I,D", "I,C")
 
 
 def _rows(rows_or_path):
-    """A row list, loading from disk when given a path instead of rows.
-
-    Same convention as sweep._rows, so the CLI can hand paths through and
-    tests can hand lists, with identical behavior.
-    """
-    if isinstance(rows_or_path, (str, os.PathLike)):
-        return metrics.load_rows(rows_or_path)
-    return list(rows_or_path)
+    """Normalized rows from a path or a list (metrics.rows_from)."""
+    return metrics.rows_from(rows_or_path)
 
 
 def _manifest(manifest_or_path):
@@ -314,6 +308,7 @@ def recovery_report(rows_inputs, manifest_inputs,
 
     lines = []
     lines.append("STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=%d)" % n_boot)
+    lines.append("truncation rule: %s" % metrics.truncation_rule_label())
     lines.append(
         "pre-registered subset: t in %s; requested: %s"
         % (list(RT_SUBSET), result["requested_t"])

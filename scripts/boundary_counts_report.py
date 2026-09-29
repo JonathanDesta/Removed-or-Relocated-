@@ -22,7 +22,8 @@ only --out (refused under results/).
 
 Add --gate-record reports/figure-records/gate-v2-l07.json and --project
 /path/to/project to include a saved gate's M_0/M_D/M_E rate companions.
-Raw legacy truncation flags are applied in memory before counting.
+Rows are read through metrics.load_results, so the truncation rule
+(metrics.TRUNCATED_INVALID) is applied before counting.
 """
 import argparse
 import collections
@@ -43,11 +44,7 @@ def count_conditions(rows):
     out = {}
     for condition in CONDITIONS:
         sub = [r for r in rows if r.get("condition") == condition]
-        # Raw legacy records can retain a parsed label after truncation.
-        # Apply the truncated->invalid rule on copies; never rewrite the source rows.
-        scored = [dict(r, valid=False, deceptive=None) if r.get("hit_max_tokens")
-                  else r for r in sub]
-        rate = metrics.deception_rate(scored)
+        rate = metrics.deception_rate(sub)
         n_trunc = sum(1 for r in sub if r.get("hit_max_tokens"))
         if rate["n_valid"]:
             low, high = metrics.wilson_interval(rate["n_deceptive"], rate["n_valid"])
@@ -93,7 +90,7 @@ def format_report(entries, groups):
         "BOUNDARY COUNTS — deceptive/valid rows per condition with 95% Wilson",
         "intervals (exact-count; NOT the scenario-bootstrap intervals printed",
         "beside tau and R_t). trunc = hit_max_tokens rows; invalid = rows not",
-        "valid (truncated rows are invalid under the 2026-09-01 ruling).",
+        "valid (truncation rule: %s)." % metrics.truncation_rule_label(),
         "",
         "%-40s %-48s %s" % ("run", "incentive", "control"),
     ]
@@ -118,22 +115,16 @@ def _refuse_under_results(path):
 
 
 def load_rows_strict(path):
+    """metrics.load_results plus the one-run, no-duplicate checks."""
     rows = []
     seen = set()
-    with Path(path).open(encoding="utf-8") as fh:
-        for number, line in enumerate(fh, 1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError("%s:%d: invalid JSON" % (path, number)) from exc
-            key = (row.get("scenario_id"), row.get("condition"))
-            if key[0] is None or key[1] not in CONDITIONS or key in seen:
-                raise ValueError("%s:%d: missing or duplicate scenario/condition %r"
-                                 % (path, number, key))
-            seen.add(key)
-            rows.append(row)
+    for number, row in enumerate(metrics.load_results(path), 1):
+        key = (row.get("scenario_id"), row.get("condition"))
+        if key[0] is None or key[1] not in CONDITIONS or key in seen:
+            raise ValueError("%s: row %d: missing or duplicate scenario/condition %r"
+                             % (path, number, key))
+        seen.add(key)
+        rows.append(row)
     if not rows:
         raise ValueError("empty rows file: %s" % path)
     if len({r.get("run_id") for r in rows}) != 1:

@@ -1336,16 +1336,18 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     """
     from algoverse.metrics import (
         gate1_decision,
+        load_results,
         load_rows,
         task_competence,
         tau_gain,
         tau_with_ci,
+        truncation_rule_label,
     )
 
     def fmt(value, digits=3):
         return "n/a" if value is None else ("%." + str(digits) + "f") % value
 
-    rows_by_name = {name: load_rows(path) for name, path in rows_paths.items()}
+    rows_by_name = {name: load_results(path) for name, path in rows_paths.items()}
     stats = {
         name: {
             "gap": tau_with_ci(rows, n_boot=n_boot, seed=seed),
@@ -1381,6 +1383,7 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
 
     lines = []
     lines.append("GATE 1 REPORT  (bootstrap n=%d)" % n_boot)
+    lines.append("truncation rule: %s" % truncation_rule_label())
     lines.append("")
     lines.append("| model | D_inc | D_ctrl | tau [95% CI] | invalid% inc/ctrl | task-competence |")
     lines.append("|---|---|---|---|---|---|")

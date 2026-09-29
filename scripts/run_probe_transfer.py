@@ -101,7 +101,7 @@ from algoverse.corroboration import (
     probe_examples_from_rows,
     write_interp_row,
 )
-from algoverse.metrics import load_rows
+from algoverse.metrics import load_results
 
 # CLI value -> config["feature_position"] value (the recorded name).
 FEATURE_POSITIONS = {
@@ -626,7 +626,7 @@ def main(argv=None, _load_model=None):
     for label, path in parsed:
         stats = {}
         examples = probe_examples_from_rows(
-            load_rows(Path(path)), tokenizer,
+            load_results(Path(path)), tokenizer,
             exclude_final_line=exclude_final_line, stats=stats,
         )
         test_labels = [example["label"] for example in examples]

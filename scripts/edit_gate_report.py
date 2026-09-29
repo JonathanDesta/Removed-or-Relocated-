@@ -34,12 +34,6 @@ PPL_RISE_MAX = 2.0
 EDIT_JSD_MAX = 0.25
 
 
-def _rows(rows_or_path):
-    if isinstance(rows_or_path, (str, os.PathLike)):
-        return metrics.load_rows(rows_or_path)
-    return list(rows_or_path)
-
-
 def _pairs(values, label):
     result = {}
     for value in values or []:
@@ -302,9 +296,9 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
             % (unknown_rows, unknown_comp)
         )
 
-    rows = {name: _rows(rows_inputs[name]) for name in required_rows}
+    rows = {name: metrics.rows_from(rows_inputs[name]) for name in required_rows}
     competence_rows = {
-        name: _rows(competence_inputs[name]) for name in required_competence
+        name: metrics.rows_from(competence_inputs[name]) for name in required_competence
     }
     stats = {
         name: {
@@ -403,6 +397,7 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
         ),
         "M_D<->M_E neutral JSD: %s nats"
         % fmt(None if edit_jsd is None else edit_jsd.get("value")),
+        "truncation rule: %s" % metrics.truncation_rule_label(),
         "DECISION: %s" % decision["verdict"],
     ]
     for label, ok in decision["checks"]:
@@ -413,6 +408,7 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
     if emit_record:
         record = {
             "record": "edit_gate",
+            "truncation_rule": metrics.truncation_rule_label(),
             "n_boot": n_boot,
             "seed": seed,
             "thresholds": {

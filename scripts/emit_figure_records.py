@@ -12,7 +12,7 @@ for scripts/make_figures.py to render. Nothing here computes a new quantity.
     python scripts/emit_figure_records.py layer-curve \
         --base results/md-qwen7b-s42-step281/rows.jsonl \
         --layer "0=results/sweep-.../...-l00/rows.jsonl" ... \
-        --truncated-invalid --out reports/figure-records/stage1-curve.json
+        --out reports/figure-records/stage1-curve.json
 
     python scripts/emit_figure_records.py transfer --model Llama-3.1-8B \
         --tau "Offer Negotiation=reports/figure-records/tau-llama.jsonl" \
@@ -27,12 +27,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse import figures, metrics
-from algoverse.relocation import apply_truncated_invalid_ruling
 
-
-def _load_rows(path):
-    with open(path) as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+# Results rows go through the truncation rule; figure records are read raw.
+_load_results = metrics.load_results
+_load_records = metrics.load_rows
 
 
 def _parse_tau_spec(spec):
@@ -59,11 +57,12 @@ def emit_tau(args):
     for spec in args.rows:
         model, label, path = _parse_tau_spec(spec)
         record = metrics.tau_with_ci(
-            _load_rows(path), n_boot=args.n_boot, seed=args.seed
+            _load_results(path), n_boot=args.n_boot, seed=args.seed
         )
         record["model"] = model
         record["label"] = label
         record["rows_path"] = path
+        record["truncation_rule"] = metrics.truncation_rule_label()
         records.append(record)
         print(
             "tau %-24s %-8s tau=%s ci=[%s, %s] n=%d"
@@ -93,7 +92,7 @@ def emit_transfer(args):
         env_label, sep, path = spec.partition("=")
         if not sep or not env_label or not path:
             raise SystemExit("--tau expects ENV_LABEL=TAU_JSONL, got %r" % spec)
-        source = _load_rows(path)
+        source = _load_records(path)
         for arm in args.arms:
             matches = [r for r in source
                        if r.get("model") == args.model and r.get("label") == arm]
@@ -129,26 +128,9 @@ def emit_layer_curve(args):
             raise SystemExit("--layer %d given twice" % layer)
         paths[layer] = path
 
-    if args.truncated_invalid:
-        import tempfile
-
-        ruling_dir = Path(tempfile.mkdtemp(prefix="ruling-rows-"))
-        totals = [0, 0]
-        for key in list(paths):
-            dst = ruling_dir / str(key) / Path(paths[key]).name
-            n, changed = apply_truncated_invalid_ruling(paths[key], dst)
-            totals[0] += n
-            totals[1] += changed
-            paths[key] = str(dst)
-        print(
-            "RULING APPLIED: truncated->invalid on %d inputs "
-            "(%d of %d rows reclassified)"
-            % (len(paths), totals[1], totals[0])
-        )
-
     rows = []
     for key in paths:
-        rows.extend(_load_rows(paths[key]))
+        rows.extend(_load_results(paths[key]))
     if args.strip_adapter_prefix:
         stripped = 0
         for row in rows:
@@ -209,12 +191,6 @@ def main(argv=None):
     p_curve.add_argument("--base", required=True)
     p_curve.add_argument("--layer", action="append", required=True,
                          metavar="N=PATH")
-    p_curve.add_argument(
-        "--truncated-invalid", action="store_true",
-        help="apply the pre-registered truncated->invalid scoring ruling: "
-             "every rows input is copied to a temp dir with hit_max_tokens "
-             "rows reclassified invalid (sources untouched) before analysis",
-    )
     p_curve.add_argument(
         "--strip-adapter-prefix", action="store_true",
         help="normalize each row's adapter_path to its project-relative "

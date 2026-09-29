@@ -3,7 +3,7 @@
 The ways these can silently lie, each caught:
   1. the tau emitter recomputing (or mangling) tau instead of relaying
      metrics.tau_with_ci verbatim, or touching its source file;
-  2. the layer-curve emitter ignoring --truncated-invalid (a truncated
+  2. the layer-curve emitter ignoring the truncation rule (a truncated
      deceptive row surviving into A_l);
   3. recovery records rounding taus (%.3f) or dropping a null R_t's reason;
   4. relocation --emit-curves swapping the recovered/edited sides;
@@ -104,16 +104,20 @@ def test_layer_curve_emitter_ruling():
                        "--out", str(out), "--n-boot", "50"] + extra)
             return json.loads(out.read_text())
 
-        as_scored = run([])
-        ruled = run(["--truncated-invalid"])
-        assert len(as_scored) == 1 and len(ruled) == 1
-        # 2: A_l = tau_base - tau_bypassed. As-scored counts the truncated
-        # deceptive rows (tau_byp = 0.5, A_l = -0.5); the ruling invalidates
-        # them, leaving only clean honest rows (A_l = 0.0) -- identical
-        # inputs, different only in the flag.
-        assert as_scored[0]["A_l"] == -0.5, as_scored[0]["A_l"]
+        ruled = run([])
+        assert len(ruled) == 1
+        # 2: A_l = tau_base - tau_bypassed. The truncation rule invalidates
+        # the truncated deceptive rows, leaving only clean honest rows
+        # (A_l = 0.0). The same rows read as scored would count them
+        # (tau_byp = 0.5, A_l = -0.5): the rule is the only difference.
         assert ruled[0]["A_l"] == 0.0, ruled[0]["A_l"]
         assert ruled[0]["bypassed_layer"] == 5
+        from algoverse import figures, metrics
+        as_scored = figures.layer_curve(
+            metrics.normalize_rows(base + sweep, truncated_invalid=False),
+            n_boot=50, seed=0,
+        )
+        assert as_scored[0]["A_l"] == -0.5, as_scored[0]["A_l"]
 
         # Cross-machine adapter prefixes split the comparison group into
         # baseline-less halves; --strip-adapter-prefix reunites them.
@@ -126,7 +130,7 @@ def test_layer_curve_emitter_ruling():
         split = run(["--n-boot", "50"])          # extra arg only varies the name
         assert split[0]["A_l"] is None and split[0]["reason"] == "no_baseline_run"
         joined = run(["--strip-adapter-prefix"])
-        assert joined[0]["A_l"] == -0.5, joined[0]
+        assert joined[0]["A_l"] == 0.0, joined[0]
     print("PASS layer-curve emitter ruling")
 
 

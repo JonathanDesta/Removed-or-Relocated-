@@ -53,7 +53,7 @@ from algoverse.insider import (  # noqa: E402
     _authoritative_report_text,
     llm_classify_report,
 )
-from algoverse.metrics import load_rows, tau_with_ci  # noqa: E402
+from algoverse.metrics import load_results, load_rows, normalize_rows, tau_with_ci  # noqa: E402
 
 WINDOWS = ("marker", "whole_report", "whole_response")
 REPORT_OPENERS = re.compile(r"Executed trade update|Target stock:", re.IGNORECASE)
@@ -108,7 +108,9 @@ def apply_regrade(rows, regrades):
     """Rows with deceptive/valid replaced by the regraded verdicts.
 
     A row with no regrade record, or whose regrade failed, becomes
-    invalid (deceptive None) so it can never be counted as honest.
+    invalid (deceptive None) so it can never be counted as honest. The
+    truncation rule is re-applied afterwards, so a truncated report stays
+    invalid whatever the regrade said.
     """
     by_key = {}
     for r in regrades:                      # last record per key wins
@@ -126,7 +128,7 @@ def apply_regrade(rows, regrades):
             new["deceptive"] = rec["regraded_value"] == CONCEALED
             new["invalid_reason"] = None
         out.append(new)
-    return out
+    return normalize_rows(out)
 
 
 def summarize(rows, title):
@@ -173,7 +175,7 @@ def main(argv=None):
     if args.llm_provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is required for the classifier")
 
-    rows = load_rows(Path(args.rows))
+    rows = load_results(Path(args.rows))
     if not rows:
         raise SystemExit("no rows in %s" % args.rows)
     run_id = rows[0].get("run_id")
