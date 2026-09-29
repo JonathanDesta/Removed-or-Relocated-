@@ -15,9 +15,9 @@ no ML or plotting stack, and rendering never needs a display.
 
 The render functions (scripts/make_figures.py is the CLI around them):
 
-  render_layer_curve   A_l vs bypassed layer, CI band, disqualified layers
-                       shaded, unmeasurable layers marked at the axis with
-                       their reason.
+  render_layer_curve   A_l vs bypassed layer, CI band, voided and
+                       bound-breaching layers shaded, unmeasurable layers
+                       marked at the axis with their reason.
   render_rt            R_t vs checkpoint t (the pre-registered subset
                        {8, 70, 281}), one line per environment; null R_t
                        (metrics.recovery returning None with a reason) is an
@@ -33,7 +33,7 @@ The render functions (scripts/make_figures.py is the CLI around them):
 
 Every render function writes <out_base>.png (300 dpi) and <out_base>.pdf and
 returns a metadata dict that includes "paths" plus everything a test (or a
-reader of the caption) needs to confirm nothing was dropped: the disqualified
+reader of the caption) needs to confirm nothing was dropped: the shaded
 layers, the unmeasurable/flagged layers with reasons, the annotated gaps.
 
 Color: the categorical slots below are a color-blind-safe ordering validated
@@ -44,7 +44,7 @@ series also differ by marker shape.
 
 Synthetic data: each figure has a synthetic_* generator producing plausible
 fake inputs of exactly the shapes the render functions (and the real
-pipeline) use — including an unmeasurable layer, a disqualified layer, and a
+pipeline) use — including an unmeasurable layer, a voided layer, and a
 null R_t — so the whole rendering path is dry-runnable with no real results.
 """
 
@@ -194,8 +194,9 @@ def _contiguous_runs(indices):
     return runs
 
 
-def _is_disqualified(status):
-    return bool(status) and str(status).startswith("DISQUALIFIED")
+def _is_shaded(status):
+    """Sweep statuses drawn shaded and hollow: voided or breaching a bound."""
+    return bool(status) and str(status).startswith(("VOIDED", "BREACHES"))
 
 
 def _gap_marks(ax, gaps, color=GAP_COLOR, max_chars=38):
@@ -251,9 +252,11 @@ def render_layer_curve(points, out_base, statuses=None, title=None, dpi=300):
               A_l_ci_low, A_l_ci_high, reason, paired, competence,
               invalid_rate_incentive/control (extra keys ignored).
     statuses  optional {layer: status string} from sweep.evaluate_sweep
-              entries ("VIABLE" / "DISQUALIFIED: ..." / "UNMEASURABLE: ..." /
-              "NO ROWS"); disqualified layers get a shaded band and hollow
-              markers. Without statuses the curve is plain.
+              entries ("CLEARS BOUNDS" / "BREACHES: ..." / "VOIDED: ..." /
+              "BELOW EFFECT FLOOR" / "UNMEASURABLE: ..." / "NO ROWS");
+              voided and breaching layers get a shaded band and hollow
+              markers (the metadata lists them under "disqualified").
+              Without statuses the curve is plain.
 
     Unmeasurable layers (A_l None) are marked at the axis floor with their
     reason — never dropped. Partial-overlap points (paired False but A_l
@@ -303,7 +306,7 @@ def render_layer_curve(points, out_base, statuses=None, title=None, dpi=300):
     half = 0.45
     for i, p in enumerate(points):
         status = status_of(p)
-        disq = _is_disqualified(status)
+        disq = _is_shaded(status)
         if disq:
             disqualified_layers.append(p.get("bypassed_layer"))
             ax.axvspan(xs[i] - half, xs[i] + half, color=SHADE, zorder=0)
@@ -338,7 +341,7 @@ def render_layer_curve(points, out_base, statuses=None, title=None, dpi=300):
     notes = []
     if disqualified_layers:
         notes.append(
-            "shaded/hollow: disqualified layers %s"
+            "shaded/hollow: voided or bound-breaching layers %s"
             % ", ".join(str(l) for l in disqualified_layers)
         )
     if gaps:
@@ -822,7 +825,7 @@ def _synthetic_point(layer, a_l, ci_half=0.06, reason=None, paired=True,
 
 def synthetic_layer_curve(n_layers=28, seed=0):
     """(points, statuses): a plausible sweep with one unmeasurable layer, one
-    disqualified layer, and one partial-overlap layer."""
+    voided layer, and one partial-overlap layer."""
     rng = random.Random(seed)
     points, statuses = [], {}
     for layer in range(n_layers):
@@ -838,20 +841,20 @@ def synthetic_layer_curve(n_layers=28, seed=0):
             p["competence_drop"] = None
             statuses[layer] = "UNMEASURABLE: tau_not_computable"
         elif layer == 4:
-            # High invalid rate in the incentive condition: disqualified.
+            # High invalid rate in the incentive condition: voided.
             p = _synthetic_point(
                 layer, a_l, competence=0.88, invalid_inc=0.35, invalid_ctl=0.06,
             )
-            statuses[layer] = "DISQUALIFIED: i15_inc"
+            statuses[layer] = "VOIDED: invalid_inc=0.35"
         elif layer == 24:
             # A sweep job relaunched with a different --n: partial overlap.
             p = _synthetic_point(layer, a_l, reason="partial_overlap", paired=False)
-            statuses[layer] = "VIABLE" if a_l >= 0.15 else "UNMEASURABLE: partial_overlap"
+            statuses[layer] = "CLEARS BOUNDS" if a_l >= 0.15 else "UNMEASURABLE: partial_overlap"
         else:
             drop = max(0.0, rng.gauss(0.01, 0.01)) + (0.04 if 10 <= layer <= 14 else 0.0)
             p = _synthetic_point(layer, a_l, competence=round(0.92 - drop, 4))
             viable = a_l >= 0.15 and p["A_l_ci_low"] is not None and p["A_l_ci_low"] > 0
-            statuses[layer] = "VIABLE" if viable else "not_viable"
+            statuses[layer] = "CLEARS BOUNDS" if viable else "BELOW EFFECT FLOOR"
         points.append(p)
     return points, statuses
 
