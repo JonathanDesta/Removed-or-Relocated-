@@ -152,8 +152,10 @@ def test_recovery_records():
         "per_t": {8: entry_null, 281: entry_ok},
         "arms": ("E,D", "E,C", "I,D", "I,C"),
         "n_boot": 2000,
+        "eps": 0.10,
     }
     records = rec.build_recovery_records(result, "l07")
+    assert all(r["eps"] == 0.10 and r["n_boot_dropped"] is None for r in records)
     assert [r["checkpoint_step"] for r in records] == [8, 281]
     # 3: full precision, no %.3f
     assert records[1]["tau_ED"] == 0.987654321

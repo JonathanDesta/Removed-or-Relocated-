@@ -164,7 +164,11 @@ def _snap_off_eval_values(value, low, high):
         return value
     up = value + 1000
     snapped = up if up <= high and up not in EVAL_VALUE_SET else value - 1000
-    assert low <= snapped <= high and snapped not in EVAL_VALUE_SET
+    if not (low <= snapped <= high) or snapped in EVAL_VALUE_SET:
+        raise RuntimeError(
+            "no clean training value within one step of %d in [%d, %d]"
+            % (value, low, high)
+        )
     return snapped
 
 

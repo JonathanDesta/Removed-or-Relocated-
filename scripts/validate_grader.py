@@ -50,11 +50,25 @@ from algoverse import insider, metrics
 # nearly always while the easy tier carries the average.
 VALIDATION_N = 150
 STRATA = ("regex", "llm", "no_marker")
-# Equal allocation, not proportional: the LLM tier is the one with no
-# accuracy evidence, and proportional allocation would starve it whenever
-# the regex tier dominates a run.
-STRATUM_TARGET = {"regex": 50, "llm": 50, "no_marker": 50}
 VALIDATION_SEED = 20260821
+
+
+def stratum_targets(n=VALIDATION_N):
+    """Equal allocation of n across the strata; n must divide evenly.
+
+    Equal, not proportional: the LLM tier is the one with no accuracy
+    evidence, and proportional allocation would starve it whenever the
+    regex tier dominates a run.
+    """
+    if n <= 0 or n % len(STRATA):
+        raise ValueError(
+            "n must be a positive multiple of %d (equal allocation across "
+            "%s), got %d" % (len(STRATA), ", ".join(STRATA), n)
+        )
+    return {name: n // len(STRATA) for name in STRATA}
+
+
+STRATUM_TARGET = stratum_targets()
 
 # The criterion, pre-committed BEFORE any label is
 # written, so it cannot be fitted to the result. Overall accuracy is not
@@ -80,11 +94,13 @@ def draw_sample(rows, n=VALIDATION_N, seed=VALIDATION_SEED):
     """The pre-registered stratified draw, deterministic given the rows.
 
     Rows are sorted by (scenario_id, condition) before sampling so the draw
-    depends on the run's content and not on file order. A stratum with
-    fewer rows than its target contributes all of them, and the shortfall
-    is reported rather than silently backfilled from another stratum: which
-    tier is under-sampled is exactly what a reader needs to know.
+    depends on the run's content and not on file order. n is split equally
+    across the strata (stratum_targets). A stratum with fewer rows than its
+    target contributes all of them, and the shortfall is reported rather
+    than silently backfilled from another stratum: which tier is
+    under-sampled is exactly what a reader needs to know.
     """
+    targets = stratum_targets(n)
     by_stratum = {name: [] for name in STRATA}
     for row in sorted(
         rows, key=lambda r: (r.get("scenario_id") or "", r.get("condition") or "")
@@ -96,7 +112,7 @@ def draw_sample(rows, n=VALIDATION_N, seed=VALIDATION_SEED):
     shortfalls = {}
     for name in STRATA:
         available = by_stratum[name]
-        target = STRATUM_TARGET[name]
+        target = targets[name]
         if len(available) <= target:
             picked = list(available)
             if len(available) < target:
@@ -258,6 +274,10 @@ if __name__ == "__main__":
         rows = metrics.load_rows(args.rows)
         if not rows:
             raise SystemExit("no rows in %s" % args.rows)
+        try:
+            targets = stratum_targets(args.n)
+        except ValueError as exc:
+            parser.error("--%s" % exc)
         drawn, shortfalls = draw_sample(rows, n=args.n, seed=args.seed)
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,7 +288,7 @@ if __name__ == "__main__":
         for name, missing in sorted(shortfalls.items()):
             print(
                 "SHORTFALL: stratum %r is %d short of its target %d"
-                % (name, missing, STRATUM_TARGET[name])
+                % (name, missing, targets[name])
             )
         print(
             "\nNext: label every record's \"label\" field as one of %s, "

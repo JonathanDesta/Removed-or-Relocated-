@@ -246,6 +246,12 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
                                      really started from that edit, and
                                      that edit_layers is the window the
                                      edit actually trained.
+
+    result["incomplete"] names, per side, the layers swept on the other
+    side only. The verdict is still computed over the layers both sweeps
+    measured (a one-sided layer takes no part in k, the change ranking or
+    the candidates), and the report marks it [INCOMPLETE] so a missing
+    sweep column can never read as a settled ruling.
     """
     rec_base, rec_layers = sweep.load_sweep_inputs(
         recovered_base, recovered_layers
@@ -262,6 +268,16 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
         n_boot=n_boot, seed=seed, invalid_max=invalid_max,
     )
     edit_set = set(normalized_edit_layers)
+    incomplete = {
+        "recovered": [
+            point["layer"] for point in result["points"]
+            if point.get("reason") == "missing_recovered_layer_run"
+        ],
+        "edited": [
+            point["layer"] for point in result["points"]
+            if point.get("reason") == "missing_edited_layer_run"
+        ],
+    }
 
     def partition(values):
         return {
@@ -286,6 +302,7 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
         "edit_layers": list(normalized_edit_layers),
         "edit_partition": partitions,
         "edit_relocation": verdict,
+        "incomplete": incomplete,
         "n_boot": n_boot,
         "invalid_max": invalid_max,
     })
@@ -378,6 +395,13 @@ def edit_relocation_report(result, final=False, dispersion=None, origins=None):
         )
     gaps = [point for point in result["points"] if point.get("reason")]
     partitions = result["edit_partition"]
+    incomplete = result.get("incomplete") or {}
+    incomplete_lines = [
+        "INCOMPLETE: no %s-side run for layer(s) %s"
+        % (side, ", ".join(str(layer) for layer in layers))
+        for side, layers in sorted(incomplete.items())
+        if layers
+    ]
     lines.extend([
         "",
         "gaps: %s" % (
@@ -387,6 +411,7 @@ def edit_relocation_report(result, final=False, dispersion=None, origins=None):
             )
         ),
         _voided_line(result),
+        *incomplete_lines,
         "k (deterministic representative of max recovered A_l): %s"
         % result["k"],
         "max-recovered layer(s): %s (inside=%s outside=%s)"
@@ -401,7 +426,8 @@ def edit_relocation_report(result, final=False, dispersion=None, origins=None):
         % (result["candidate_layers"],
            partitions["candidate_layers"]["inside"],
            partitions["candidate_layers"]["outside"]),
-        "edit relocation (precommitted rule): %s" % verdict,
+        "edit relocation (precommitted rule): %s%s"
+        % (verdict, " [INCOMPLETE]" if incomplete_lines else ""),
     ])
     if final:
         lines.extend(["", "dispersion: %s" % dispersion])

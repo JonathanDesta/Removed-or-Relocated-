@@ -1111,7 +1111,11 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
 
     Re-running the same call resumes: the run picks up at the next step
     index, restoring adapter weights, optimizer, scheduler, grad scaler and
-    RNG state, and refuses if the run's identity moved. resume=False is a
+    RNG state, and refuses if the run's identity moved. resume.pt stores a
+    hash of the guarded manifest fields as this version defines them, so a
+    run left unfinished under an earlier version whose guarded set differed
+    refuses to resume here (every paper run finished; none needs this).
+    resume=False is a
     FRESH-RUN assertion, not an overwrite: it raises if out_dir already
     holds a run, because retraining in place would append a second run's
     rows to train_log.jsonl and read_train_log's keep-last rule would merge

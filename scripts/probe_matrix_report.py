@@ -29,17 +29,20 @@ already contain. Stdlib only.
 """
 import argparse
 import collections
-import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from algoverse.metrics import load_rows
 
 PAT = re.compile(r"(?P<prefix>.*?)(?P<pos>fp|rx|rt|cl)-(?P<ckpt>m0|md8|md|me-l\d+)-(?P<fam>qwen7b|llama8b)-(?P<fit>own|fixed)-(?P<set>[A-Za-z0-9_]+)$")
 
 
 def load(path):
-    with open(path, encoding="utf-8") as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+    """The records of one interp.jsonl (a torn final line is skipped)."""
+    return load_rows(path)
 
 
 def summarize_curve(rows):

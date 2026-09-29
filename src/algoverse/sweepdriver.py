@@ -79,7 +79,7 @@ COMPARED = "intact-vs-probe-bypassed"
 # The sweep_manifest.json identity fields, guarded on every rerun. Mirrors
 # train.py's _guard_train_manifest: named refusal, never silent adaptation.
 SWEEP_MANIFEST_FIELDS = (
-    "model_id", "adapter_path", "checkpoint_step", "train_seed",
+    "model_id", "adapter_path", "checkpoint_step", "train_seed", "arm",
     "quant_label", "layers", "n", "scenario_seed", "dev", "run_tag",
 )
 
@@ -179,7 +179,7 @@ def _recover_intact_values(out_root, run_tag, layers):
 
 def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
                              run_tag, model_id, adapter_path=None,
-                             checkpoint_step=None, train_seed=None,
+                             checkpoint_step=None, train_seed=None, arm=None,
                              batch_size=4, seed=42):
     """Run only MMLU/GSM8K for already-swept candidate layers."""
     from algoverse.eval import run_lm_eval_benchmarks
@@ -197,6 +197,7 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
         "adapter_path": None if adapter_path is None else str(adapter_path),
         "checkpoint_step": checkpoint_step,
         "train_seed": train_seed,
+        "arm": arm,
         "run_tag": run_tag,
     }
     mismatches = [
@@ -247,7 +248,7 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
             "adapter_path": expected["adapter_path"],
             "bypassed_layer": layer,
             "checkpoint_step": checkpoint_step,
-            "arm": None,
+            "arm": arm,
             "train_seed": train_seed,
             "bypass_impl": BYPASS_IMPL,
         }
@@ -259,7 +260,10 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
             )
         finally:
             handle.remove()
-        assert bypass_state(model) is None
+        if bypass_state(model) is not None:
+            raise RuntimeError(
+                "probe still installed after benchmarking layer %d" % layer
+            )
     return {"written": written}
 
 
@@ -271,7 +275,8 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     llm_model="gpt-5-mini",
                     dev=False, jsd_only=False,
                     n_tokens=20000, wikitext_ids=None, chunk=None,
-                    max_length=1024, stride=512, max_new_tokens=256):
+                    max_length=1024, stride=512, max_new_tokens=256,
+                    arm=None, llm_cache_dir=None):
     """Sweep the requested layers of an already-loaded model.
 
     model/tokenizer   loaded ONCE by the caller (canonical profile, adapter
@@ -292,6 +297,11 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
     max_length/stride the pinned window scheme; parameters so tiny-model
                       tests can shrink them, defaults pre-registered.
     max_new_tokens    generation budget per response, canonical 256.
+    arm               the swept checkpoint's continuation arm (Stage 3's
+                      E,D-t281 sweep), stamped into the manifest, the
+                      competence rows and the negotiation rows; None for
+                      Stage 1 and the just-edited M_E.
+    llm_cache_dir     the grader's disk cache (run_negotiation_eval).
     Remaining arguments mirror scripts/run_baseline.py and are passed to
     run_negotiation_eval unchanged.
 
@@ -336,6 +346,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "adapter_path": None if adapter_path is None else str(adapter_path),
         "checkpoint_step": checkpoint_step,
         "train_seed": train_seed,
+        "arm": arm,
         "quant_label": quant_label,
         "layers": list(layers),
         "n": n,
@@ -378,7 +389,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "adapter_path": current_manifest["adapter_path"],
         "bypassed_layer": None,
         "checkpoint_step": checkpoint_step,
-        "arm": None,
+        "arm": arm,
         "train_seed": train_seed,
         "bypass_impl": None,
     }
@@ -423,7 +434,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
             "adapter_path": current_manifest["adapter_path"],
             "bypassed_layer": layer,
             "checkpoint_step": checkpoint_step,
-            "arm": None,
+            "arm": arm,
             "train_seed": train_seed,
             "bypass_impl": BYPASS_IMPL,
         }
@@ -499,19 +510,21 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     run_id=run_id, out_path=rows_path,
                     model_id=model_id, adapter_path=adapter_path,
                     bypassed_layer=layer,
-                    checkpoint_step=checkpoint_step, arm=None,
+                    checkpoint_step=checkpoint_step, arm=arm,
                     batch_size=batch_size, max_new_tokens=max_new_tokens,
                     seed=seed, train_seed=train_seed,
                     quant_label=quant_label,
                     use_llm_fallback=use_llm_fallback,
                     llm_provider=llm_provider, llm_model=llm_model,
+                    llm_cache_dir=llm_cache_dir,
                     scenario_seed=scenario_seed, n=n,
                 )
             finally:
                 handle.remove()
-        assert bypass_state(model) is None, (
-            "probe still installed after sweeping layer %d" % layer
-        )
+        if bypass_state(model) is not None:
+            raise RuntimeError(
+                "probe still installed after sweeping layer %d" % layer
+            )
 
     if not base_done:
         recovered = _recover_intact_values(out_root, run_tag, layers)

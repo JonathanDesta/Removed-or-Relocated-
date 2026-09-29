@@ -101,7 +101,7 @@ from algoverse.corroboration import (
     probe_examples_from_rows,
     write_interp_row,
 )
-from algoverse.metrics import load_results
+from algoverse.metrics import load_results, load_rows
 
 # CLI value -> config["feature_position"] value (the recorded name).
 FEATURE_POSITIONS = {
@@ -457,17 +457,19 @@ def control_probe_scores(features, target, groups, n_splits=5):
 
 
 def scores_done(out_dir, layer, kind="probe"):
-    """True when scores.jsonl already holds `kind` for `layer`."""
+    """True when scores.jsonl already holds `kind` for `layer`.
+
+    Read through metrics.load_rows, so a torn final line (a session killed
+    mid-write) is skipped with a warning and the layer is redone, instead of
+    the whole resume crashing.
+    """
     path = Path(out_dir) / SCORES_NAME
     if not path.is_file():
         return False
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if int(record.get("layer", -1)) == int(layer) and record.get("kind") == kind:
-            return True
-    return False
+    return any(
+        int(record.get("layer", -1)) == int(layer) and record.get("kind") == kind
+        for record in load_rows(path)
+    )
 
 
 def write_scores(out_dir, layer, kind, scores):
@@ -506,21 +508,27 @@ def _refuse_under_results(parser, path, flag):
 
 
 # ---------------------------------------------------------------------------
-# Model loading (run_corroboration.py's sidecar convention); a test seam
+# Model loading (the eval drivers' sidecar convention); a test seam
 # ---------------------------------------------------------------------------
 
 
 def _default_load_model(args):
-    sidecar = None
-    if args.adapter is not None:
-        sidecar_path = Path(args.adapter) / "train_meta.json"
-        if sidecar_path.is_file():
-            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-            if args.checkpoint_step is None:
-                args.checkpoint_step = sidecar.get("checkpoint_step")
-            if args.train_seed is None:
-                args.train_seed = sidecar.get("train_seed")
-    if sidecar is not None:
+    """Load the probed checkpoint, adopting its sidecar identity.
+
+    train.adopt_checkpoint_identity fills a None --checkpoint-step /
+    --train-seed from train_meta.json (printed) and refuses a passed value
+    that contradicts it, exactly as run_baseline.py and run_insider.py do;
+    a project checkpoint then loads through load_checkpoint_model so the
+    sidecar is validated.
+    """
+    from algoverse.train import adopt_checkpoint_identity
+
+    args.checkpoint_step, args.train_seed, has_sidecar = (
+        adopt_checkpoint_identity(
+            args.adapter, args.checkpoint_step, args.train_seed
+        )
+    )
+    if has_sidecar:
         from algoverse.models import load_checkpoint_model
 
         model, tokenizer, _meta = load_checkpoint_model(

@@ -79,6 +79,11 @@ INVALID_RATE_MAX = 0.20
 # report prints truncation_rule_label() so the rule in force is on record.
 TRUNCATED_INVALID = True
 
+# The R_t denominator floor: |tau(I,D) - tau(I,C)| below it makes R_t a
+# ratio of noise over noise, so recovery() reports a null with its reason
+# instead of a number. Pre-registered; recovery_report reads it from here.
+RECOVERY_EPS = 0.10
+
 
 def truncation_rule_label(truncated_invalid=None) -> str:
     """The rule in force, for report lines and emitted records."""
@@ -488,7 +493,7 @@ def relocation_delta(rows_recovered_base, rows_recovered_bypassed,
 
 
 def recovery(rows_ED_t, rows_EC_t, rows_ID_t, rows_IC_t,
-             eps=0.10, n_boot=2000, seed=0) -> dict:
+             eps=RECOVERY_EPS, n_boot=2000, seed=0) -> dict:
     """R_t, the recovery ratio at continuation checkpoint t.
 
         R_t = (tau(M_t^{E,D}) - tau(M_t^{E,C}))
@@ -506,9 +511,13 @@ def recovery(rows_ED_t, rows_EC_t, rows_ID_t, rows_IC_t,
     Arguments, in order: the four arms at checkpoint t, edited-deceptive,
     edited-control, intact-deceptive, intact-control.
 
-    When the intact deceptive-vs-control gap is tiny (|denominator| < eps),
-    R_t is a ratio of noise over noise; we return None with a reason instead
-    of an exploding number. Plot code must expect that.
+    When the intact deceptive-vs-control gap is tiny (|denominator| < eps,
+    RECOVERY_EPS by default), R_t is a ratio of noise over noise and the
+    result is None with a reason instead of an exploding number. Plot code
+    must expect that. The result also carries eps, n_boot and
+    n_boot_dropped: how many bootstrap resamples fell below the floor or
+    had no computable tau and so contributed nothing to the CI (None when
+    the point estimate itself was guarded and no bootstrap ran).
     """
     tau_ED = incentive_gap(rows_ED_t)["tau"]
     tau_EC = incentive_gap(rows_EC_t)["tau"]
@@ -524,6 +533,9 @@ def recovery(rows_ED_t, rows_EC_t, rows_ID_t, rows_IC_t,
         "R_t_ci_low": None,
         "R_t_ci_high": None,
         "reason": None,
+        "eps": eps,
+        "n_boot": n_boot,
+        "n_boot_dropped": None,
     }
     if None in (tau_ED, tau_EC, tau_ID, tau_IC):
         result["reason"] = "tau_not_computable"
@@ -534,17 +546,17 @@ def recovery(rows_ED_t, rows_EC_t, rows_ID_t, rows_IC_t,
         result["reason"] = "denominator_too_small"
         return result
 
+    dropped = [0]
+
     def stat(groups):
         ed = incentive_gap(groups["ED"])["tau"]
         ec = incentive_gap(groups["EC"])["tau"]
         idd = incentive_gap(groups["ID"])["tau"]
         ic = incentive_gap(groups["IC"])["tau"]
-        if None in (ed, ec, idd, ic):
+        if None in (ed, ec, idd, ic) or abs(idd - ic) < eps:
+            dropped[0] += 1
             return None
-        denom = idd - ic
-        if abs(denom) < eps:
-            return None
-        return (ed - ec) / denom
+        return (ed - ec) / (idd - ic)
 
     point, low, high = bootstrap_ci(
         {"ED": rows_ED_t, "EC": rows_EC_t, "ID": rows_ID_t, "IC": rows_IC_t},
@@ -555,6 +567,8 @@ def recovery(rows_ED_t, rows_EC_t, rows_ID_t, rows_IC_t,
     result["R_t"] = point
     result["R_t_ci_low"] = low
     result["R_t_ci_high"] = high
+    # stat ran once for the point estimate and once per resample.
+    result["n_boot_dropped"] = dropped[0] - (1 if point is None else 0)
     return result
 
 

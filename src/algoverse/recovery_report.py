@@ -11,7 +11,14 @@ Two steps, in this order:
   2. The R_t report: metrics.recovery per pre-registered checkpoint t,
      rendered as a table with CIs, per-arm tau values, and every
      null-with-reason result surfaced verbatim -- a guarded denominator
-     is a finding, never a dropped row.
+     is a finding, never a dropped row. evaluate_recovery builds the
+     structured result once; render_recovery_report renders it, so the
+     CLI's emitted records come from the same bootstrap as the printed
+     table.
+
+Every rows file is checked against its (t, arm) key: rows that carry an
+arm or checkpoint_step stamp contradicting the key refuse by name
+(recovery_input_mislabelled); rows without stamps are accepted and noted.
 
 Everything here is stdlib plus stdlib-importable algoverse modules
 (metrics, train), so the report runs on a laptop against row files copied
@@ -153,9 +160,20 @@ def audit_matched_arms(manifest_inputs, arms=DEFAULT_RECOVERY_ARMS) -> dict:
                ", ".join(repr(arm) for arm in arms))
         )
 
+    manifests = {arm: _manifest(manifest_inputs[arm]) for arm in arms}
+    lesioned = [
+        arm for arm in arms if manifests[arm].get("bypassed_layer") is not None
+    ]
+    if lesioned:
+        raise ValueError(
+            "matched_arms_audit_failed: arm(s) %s were trained with a layer "
+            "bypassed (bypassed_layer in train_manifest.json); the "
+            "continuation arms train the intact model, so these are not "
+            "matched arms of this design"
+            % ", ".join(repr(arm) for arm in lesioned)
+        )
     identities = {
-        arm: matched_training_identity(_manifest(manifest_inputs[arm]),
-                                       cross_family=False)
+        arm: matched_training_identity(manifests[arm], cross_family=False)
         for arm in arms
     }
     restricted = [
@@ -214,22 +232,48 @@ def _check_t_subset(t_subset, allow_extra_t):
     return requested, extra
 
 
+def _check_row_stamps(rows, t, arm):
+    """Refuse rows whose own stamps contradict their (t, arm) key.
+
+    Returns True when the rows carry no arm or checkpoint_step stamp at
+    all (accepted; the report notes that they were matched by their key
+    only).
+    """
+    arms_seen = {row.get("arm") for row in rows}
+    steps_seen = {row.get("checkpoint_step") for row in rows}
+    wrong_arm = sorted(a for a in arms_seen if a is not None and a != arm)
+    wrong_step = sorted(s for s in steps_seen if s is not None and s != t)
+    if wrong_arm or wrong_step:
+        raise ValueError(
+            "recovery_input_mislabelled: rows given as (t=%d, arm=%r) "
+            "record arm %s and checkpoint_step %s; the --rows key and "
+            "the rows disagree"
+            % (t, arm, sorted(a for a in arms_seen if a is not None),
+               sorted(s for s in steps_seen if s is not None))
+        )
+    return None in arms_seen or None in steps_seen
+
+
 def evaluate_recovery(rows_inputs, manifest_inputs,
                       t_subset=RT_SUBSET, allow_extra_t=False,
                       n_boot=2000, seed=0,
-                      arms=DEFAULT_RECOVERY_ARMS) -> dict:
+                      arms=DEFAULT_RECOVERY_ARMS,
+                      eps=metrics.RECOVERY_EPS) -> dict:
     """R_t per checkpoint, behind the subset guard and the matched-arms audit.
 
     rows_inputs maps (t, arm) -> rows.jsonl path or row list, for every t
     in t_subset and every selected arm; manifest_inputs maps arm -> the
     arm's train_manifest.json (see audit_matched_arms). Ordering is
     load-bearing: the subset guard runs first, then input completeness,
-    then the audit -- all BEFORE any R_t is computed, so no number ever
-    exists for an unmatched configuration or an unplanned checkpoint.
+    then the audit, then the row-stamp check -- all BEFORE any R_t is
+    computed, so no number ever exists for an unmatched configuration, an
+    unplanned checkpoint or a mislabelled rows file.
 
     Returns {"audit": shared identity, "per_t": {t: metrics.recovery dict},
-    "requested_t": [...], "extra_t": [...]} with per_t holding exactly what
-    metrics.recovery returns (tau per arm, R_t, CI bounds, reason).
+    "requested_t": [...], "extra_t": [...], "n_boot", "arms", "eps",
+    "unstamped_inputs": [(t, arm), ...]} with per_t holding exactly what
+    metrics.recovery returns (tau per arm, R_t, CI bounds, reason, eps,
+    n_boot, n_boot_dropped).
     """
     arms = _validate_arms(arms)
     requested, extra = _check_t_subset(t_subset, allow_extra_t)
@@ -258,13 +302,23 @@ def evaluate_recovery(rows_inputs, manifest_inputs,
 
     audit = audit_matched_arms(manifest_inputs, arms=arms)
 
+    loaded = {}
+    unstamped = []
+    for t in sorted(requested):
+        for arm in arms:
+            rows = _rows(rows_inputs[(t, arm)])
+            if _check_row_stamps(rows, t, arm):
+                unstamped.append((t, arm))
+            loaded[(t, arm)] = rows
+
     per_t = {}
     for t in sorted(requested):
         per_t[t] = metrics.recovery(
-            _rows(rows_inputs[(t, arms[0])]),
-            _rows(rows_inputs[(t, arms[1])]),
-            _rows(rows_inputs[(t, arms[2])]),
-            _rows(rows_inputs[(t, arms[3])]),
+            loaded[(t, arms[0])],
+            loaded[(t, arms[1])],
+            loaded[(t, arms[2])],
+            loaded[(t, arms[3])],
+            eps=eps,
             n_boot=n_boot,
             seed=seed,
         )
@@ -281,6 +335,8 @@ def evaluate_recovery(rows_inputs, manifest_inputs,
         "extra_t": sorted(extra),
         "n_boot": n_boot,
         "arms": arms,
+        "eps": eps,
+        "unstamped_inputs": unstamped,
     }
 
 
@@ -288,30 +344,29 @@ def _fmt(value, spec="%.3f"):
     return "n/e" if value is None else spec % value
 
 
-def recovery_report(rows_inputs, manifest_inputs,
-                    t_subset=RT_SUBSET, allow_extra_t=False,
-                    n_boot=2000, seed=0,
-                    arms=DEFAULT_RECOVERY_ARMS) -> str:
-    """The Stage-3 R_t report, printed and returned as markdown.
+def render_recovery_report(result) -> str:
+    """Render an evaluate_recovery result: printed and returned as text.
 
     Audit verdict first, then the complete per-t table (every requested
     checkpoint, nothing silently dropped), then an explicit note for every
     null/guarded entry: a None R_t always appears with its verbatim reason,
-    and a computed R_t whose CI could not be bootstrapped says so. Same
+    a computed R_t whose CI could not be bootstrapped says so, and every
+    checkpoint that dropped bootstrap resamples reports how many. Same
     rendering discipline as sweep.sweep_report and eval.gate1_report.
     """
-    result = evaluate_recovery(
-        rows_inputs, manifest_inputs,
-        t_subset=t_subset, allow_extra_t=allow_extra_t,
-        n_boot=n_boot, seed=seed, arms=arms,
-    )
-
+    tau_labels = ["tau_%s" % arm.replace(",", "") for arm in result["arms"]]
     lines = []
-    lines.append("STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=%d)" % n_boot)
+    lines.append(
+        "STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=%d)" % result["n_boot"]
+    )
     lines.append("truncation rule: %s" % metrics.truncation_rule_label())
     lines.append(
         "pre-registered subset: t in %s; requested: %s"
         % (list(RT_SUBSET), result["requested_t"])
+    )
+    lines.append(
+        "denominator floor: |%s - %s| >= %.2f (below it R_t is a reported "
+        "null)" % (tau_labels[2], tau_labels[3], result["eps"])
     )
     for t in result["extra_t"]:
         lines.append(
@@ -328,7 +383,6 @@ def recovery_report(rows_inputs, manifest_inputs,
     )
 
     lines.append("")
-    tau_labels = ["tau_%s" % arm.replace(",", "") for arm in result["arms"]]
     lines.append(
         "    t | R_t    [ci_low, ci_high] | %s"
         % "  ".join(tau_labels)
@@ -361,6 +415,24 @@ def recovery_report(rows_inputs, manifest_inputs,
                     "bootstrap resamples); the point estimate stands "
                     "alone." % t
                 )
+        if entry.get("n_boot_dropped"):
+            notes.append(
+                "note: t=%d dropped %d of %d bootstrap resamples "
+                "(denominator below the floor or tau not computable)."
+                % (t, entry["n_boot_dropped"], entry["n_boot"])
+            )
+    unstamped = result.get("unstamped_inputs") or []
+    if unstamped and len(unstamped) == len(result["requested_t"]) * len(result["arms"]):
+        notes.append(
+            "note: no rows file carries an arm/checkpoint_step stamp; every "
+            "input was matched by its --rows key only."
+        )
+    elif unstamped:
+        notes.append(
+            "note: rows for %s carry no arm/checkpoint_step stamp; matched "
+            "by their --rows key only."
+            % ", ".join("(t=%d, arm=%r)" % key for key in unstamped)
+        )
     if notes:
         lines.append("")
         lines.extend(notes)
@@ -368,3 +440,16 @@ def recovery_report(rows_inputs, manifest_inputs,
     report = "\n".join(lines)
     print(report)
     return report
+
+
+def recovery_report(rows_inputs, manifest_inputs,
+                    t_subset=RT_SUBSET, allow_extra_t=False,
+                    n_boot=2000, seed=0,
+                    arms=DEFAULT_RECOVERY_ARMS,
+                    eps=metrics.RECOVERY_EPS) -> str:
+    """evaluate_recovery followed by render_recovery_report, in one call."""
+    return render_recovery_report(evaluate_recovery(
+        rows_inputs, manifest_inputs,
+        t_subset=t_subset, allow_extra_t=allow_extra_t,
+        n_boot=n_boot, seed=seed, arms=arms, eps=eps,
+    ))

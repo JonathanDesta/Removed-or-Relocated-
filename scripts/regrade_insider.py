@@ -20,8 +20,9 @@ Windows (--window):
                  so it is an UPPER bound on disclosure, not a report grade)
 
 Rows whose original classifier call failed (extraction_method
-llm_failed:*) are re-attempted like any other row; the main runner's
-resume never retried them.
+llm_failed:*) are re-attempted like any other row (the classifier retries
+a failed call with backoff before giving up); the main runner's resume
+never retried them.
 
 Output: <out> JSONL, one record per (scenario_id, condition):
   {run_id, scenario_id, condition, window, original_claimed_value,
@@ -85,23 +86,6 @@ def latest_records(records, window):
             continue
         latest[(record["scenario_id"], record["condition"])] = record
     return latest
-
-
-def classify_with_retry(text, *, provider, model, cache_dir, attempts=3):
-    """llm_classify_report with a short backoff on a failed call."""
-    import time
-
-    verdict, response_model = None, None
-    for attempt in range(attempts):
-        verdict, response_model = llm_classify_report(
-            text, provider=provider, model=model, cache_dir=cache_dir,
-            return_model=True,
-        )
-        if verdict is not None:
-            break
-        if attempt + 1 < attempts:
-            time.sleep(2.0 * (2 ** attempt))
-    return verdict, response_model
 
 
 def apply_regrade(rows, regrades):
@@ -208,9 +192,9 @@ def main(argv=None):
                 verdict, response_model = (None, None)
                 failed = text is None
                 if text is not None:
-                    verdict, response_model = classify_with_retry(
+                    verdict, response_model = llm_classify_report(
                         text, provider=args.llm_provider, model=args.llm_model,
-                        cache_dir=cache_dir,
+                        cache_dir=cache_dir, return_model=True,
                     )
                     failed = verdict is None
                     if failed and args.debug_first_failure:

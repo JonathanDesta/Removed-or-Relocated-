@@ -15,7 +15,9 @@ checkpoint needs all four arms' --rows.
 
 --t (repeatable) selects checkpoints; default is the pre-registered subset
 {8, 70, 281}. Anything outside it refuses unless --allow-extra-t, which is
-for evaluating the remaining saved checkpoints only.
+for evaluating the remaining saved checkpoints only. --eps is the R_t
+denominator floor (default the pre-registered 0.10). --emit-records writes
+the figure records from the same evaluation the report prints.
 """
 import argparse
 import sys
@@ -23,11 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse.metrics import RECOVERY_EPS
 from algoverse.recovery_report import (
     DEFAULT_RECOVERY_ARMS,
     RT_SUBSET,
     evaluate_recovery,
-    recovery_report,
+    render_recovery_report,
 )
 
 
@@ -35,8 +38,9 @@ def build_recovery_records(result, env_label):
     """Figure-input records from an evaluate_recovery result, full precision.
 
     One dict per requested checkpoint: env, checkpoint_step, R_t + CI +
-    reason, the ordered arms list, and one tau_<ARM> per arm (comma
-    stripped) -- consumable by make_figures.py rt.
+    reason, the denominator floor and the dropped-resample count, the
+    ordered arms list, and one tau_<ARM> per arm (comma stripped) --
+    consumable by make_figures.py rt.
     """
     records = []
     for t in result["requested_t"]:
@@ -48,6 +52,8 @@ def build_recovery_records(result, env_label):
             "R_t_ci_low": entry["R_t_ci_low"],
             "R_t_ci_high": entry["R_t_ci_high"],
             "reason": entry.get("reason"),
+            "eps": result["eps"],
+            "n_boot_dropped": entry.get("n_boot_dropped"),
             "arms": list(result["arms"]),
             "n_boot": result["n_boot"],
         }
@@ -94,7 +100,7 @@ def parse_rows_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
     return result
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", action="append", metavar="ARM:T=PATH",
                         help="one arm's rows.jsonl at checkpoint T; "
@@ -111,6 +117,9 @@ if __name__ == "__main__":
                              "subset (the remaining saved checkpoints)")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eps", type=float, default=RECOVERY_EPS,
+                        help="R_t denominator floor; default %(default)s "
+                             "(pre-registered)")
     parser.add_argument(
         "--arms", nargs=4, default=DEFAULT_RECOVERY_ARMS,
         metavar=("NUM_D", "NUM_C", "DEN_D", "DEN_C"),
@@ -124,7 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--env-label", default=None,
                         help="'env' value stamped on emitted records "
                              "(required with --emit-records)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.emit_records and not args.env_label:
         parser.error("--emit-records requires --env-label")
@@ -137,26 +146,24 @@ if __name__ == "__main__":
     rows_inputs = parse_rows_pairs(args.rows, args.arms)
     manifest_inputs = parse_manifest_pairs(args.manifest, args.arms)
     t_subset = tuple(args.t) if args.t else RT_SUBSET
-    recovery_report(
-        rows_inputs,
-        manifest_inputs,
-        t_subset=t_subset,
-        allow_extra_t=args.allow_extra_t,
-        n_boot=args.n_boot,
-        seed=args.seed,
-        arms=tuple(args.arms),
+    result = evaluate_recovery(
+        rows_inputs, manifest_inputs,
+        t_subset=t_subset, allow_extra_t=args.allow_extra_t,
+        n_boot=args.n_boot, seed=args.seed, arms=tuple(args.arms),
+        eps=args.eps,
     )
+    render_recovery_report(result)
 
     if args.emit_records:
         import json
 
-        result = evaluate_recovery(
-            rows_inputs, manifest_inputs,
-            t_subset=t_subset, allow_extra_t=args.allow_extra_t,
-            n_boot=args.n_boot, seed=args.seed, arms=tuple(args.arms),
-        )
         records = build_recovery_records(result, args.env_label)
         out = Path(args.emit_records)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("".join(json.dumps(r) + "\n" for r in records))
         print("emitted %d recovery records -> %s" % (len(records), out))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -218,7 +218,11 @@ def test_missing_layer_run_is_a_named_gap_on_the_missing_side():
     assert points[10]["reason"] == "missing_recovered_layer_run"
     assert points[10]["delta_l"] is None and points[10]["voided"] == []
     assert points[7]["reason"] is None
-    assert "layer 10=missing_recovered_layer_run" in edit_relocation_report(result)
+    assert result["incomplete"] == {"recovered": [10], "edited": []}
+    report = edit_relocation_report(result)
+    assert "layer 10=missing_recovered_layer_run" in report
+    assert "INCOMPLETE: no recovered-side run for layer(s) 10" in report
+    assert "edit relocation (precommitted rule): recovered-in-place [INCOMPLETE]" in report
     with tempfile.TemporaryDirectory() as tmp:
         reverse = edit_result(
             Path(tmp),
@@ -230,6 +234,10 @@ def test_missing_layer_run_is_a_named_gap_on_the_missing_side():
         )
     reverse_points = {point["layer"]: point for point in reverse["points"]}
     assert reverse_points[10]["reason"] == "missing_edited_layer_run"
+    assert reverse["incomplete"] == {"recovered": [], "edited": [10]}
+    assert "INCOMPLETE: no edited-side run for layer(s) 10" in (
+        edit_relocation_report(reverse)
+    )
     # A gap layer carries no A on either side, so it takes no part in k,
     # the change ranking, or the candidates: "no measurement" is not zero.
     assert reverse_points[10]["A_recovered"] is None
@@ -282,6 +290,8 @@ def test_edit_relocation_partitions_and_precommitted_verdicts():
         report = edit_relocation_report(inside)
         assert "edited layers: [6, 7, 8]" in report
         assert "A_l just-edited" in report
+        assert inside["incomplete"] == {"recovered": [], "edited": []}
+        assert "INCOMPLETE" not in report
 
         relocated = edit_result(
             Path(tmp) / "relocated",

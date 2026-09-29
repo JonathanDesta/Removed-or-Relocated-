@@ -109,7 +109,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
                        batch_size=4, environment=None):
     """Derive generation and provenance identity from the live model."""
     from algoverse.models import bypass_impl_string
-    from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
+    from algoverse.tasks import DEFAULT_EXTRACTION_MODELS, llm_endpoint_label
 
     parameter = next(model.parameters())
     four_bit = _four_bit(model)
@@ -122,9 +122,11 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
     if use_llm_fallback:
         resolved_provider = llm_provider
         resolved_model = llm_model or DEFAULT_EXTRACTION_MODELS.get(llm_provider)
+        resolved_endpoint = llm_endpoint_label(llm_provider)
     else:
         resolved_provider = None
         resolved_model = None
+        resolved_endpoint = None
 
     return {
         "do_sample": do_sample,
@@ -144,6 +146,7 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         "use_llm_fallback": bool(use_llm_fallback),
         "llm_provider": resolved_provider,
         "llm_model": resolved_model,
+        "llm_endpoint": resolved_endpoint,
         "torch_version": _package_version("torch"),
         "transformers_version": _package_version("transformers"),
         "peft_version": _package_version("peft"),
@@ -290,7 +293,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          batch_size=4, max_new_tokens=256, do_sample=False,
                          seed=42, train_seed=None, resume=True, quant_label=None,
                          use_llm_fallback=False, llm_provider="openai",
-                         llm_model=None, scenario_seed=None, n=None,
+                         llm_model=None, llm_cache_dir=None,
+                         scenario_seed=None, n=None,
                          render_fn=None, score_fn=None, environment=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
 
@@ -318,6 +322,11 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     negotiation caller) means the module's own fixed pair; missing values
     in rows and manifests written before this field existed normalize to
     None, so those runs resume unchanged.
+
+    llm_cache_dir is the grader's disk cache (tasks.DEFAULT_EXTRACTION_CACHE
+    when None), handed to score_fn as cache_dir. gen_config.llm_endpoint
+    records whether the openai provider used its default or a custom
+    endpoint: provenance only, not guarded on resume.
 
     Patch/checkpoint/arm fields are caller-supplied bookkeeping. Bypass
     bookkeeping is cross-checked against the hook actually installed on the
@@ -523,6 +532,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                 use_llm_fallback=use_llm_fallback,
                 llm_provider=llm_provider,
                 llm_model=llm_model,
+                cache_dir=llm_cache_dir,
             )
             row = {
                 "run_id": run_id,

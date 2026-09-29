@@ -14,6 +14,7 @@ and the grader-validation harness.
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -598,8 +599,21 @@ def _cache_key(instruction, text, provider, model):
     ).hexdigest()
 
 
+class _default_endpoint:
+    """Pin the default openai endpoint while a cache key is compared."""
+
+    def __enter__(self):
+        self.saved = os.environ.pop("OPENAI_BASE_URL", None)
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            os.environ["OPENAI_BASE_URL"] = self.saved
+        return False
+
+
 def test_llm_classify_report_reads_the_shared_cache():
-    with tempfile.TemporaryDirectory() as cache_dir:
+    with _default_endpoint(), tempfile.TemporaryDirectory() as cache_dir:
         key = _cache_key(
             insider.INSIDER_CLASSIFY_INSTRUCTION, "the report text",
             "openai", "test-model",
@@ -618,7 +632,7 @@ def test_llm_extract_offer_still_reads_old_format_cache_entries():
     # cache entries (interpreted values + response_model) readable.
     from algoverse.tasks import EXTRACTION_INSTRUCTION, llm_extract_offer
 
-    with tempfile.TemporaryDirectory() as cache_dir:
+    with _default_endpoint(), tempfile.TemporaryDirectory() as cache_dir:
         key = _cache_key(
             EXTRACTION_INSTRUCTION, "the reply", "openai", "test-model"
         )
@@ -896,6 +910,30 @@ def test_sample_reports_a_stratum_shortfall_instead_of_backfilling():
     # The shortfall is NOT silently made up out of the regex tier.
     assert sum(1 for r in drawn if r["stratum"] == "regex") == 50
     assert sum(1 for r in drawn if r["stratum"] == "llm") == 3
+
+
+def test_sample_honours_n_with_equal_allocation():
+    script = _load_validate_script()
+    rows = (
+        [_validation_row(i, "regex") for i in range(80)]
+        + [_validation_row(100 + i, "llm:openai:m") for i in range(80)]
+        + [_validation_row(200 + i, None) for i in range(80)]
+    )
+    drawn, shortfalls = script.draw_sample(rows, n=30)
+    assert not shortfalls and len(drawn) == 30
+    counts = {}
+    for record in drawn:
+        counts[record["stratum"]] = counts.get(record["stratum"], 0) + 1
+    assert counts == {"regex": 10, "llm": 10, "no_marker": 10}
+    assert script.stratum_targets(30) == counts
+    assert script.STRATUM_TARGET == script.stratum_targets(script.VALIDATION_N)
+    for bad in (31, 0):
+        try:
+            script.draw_sample(rows, n=bad)
+        except ValueError as exc:
+            assert "multiple of 3" in str(exc), str(exc)
+        else:
+            raise AssertionError("n=%d was accepted" % bad)
 
 
 def test_score_refuses_an_unlabeled_corpus():

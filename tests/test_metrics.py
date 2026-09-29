@@ -29,6 +29,7 @@ from algoverse.metrics import (
     gate1_decision,
     incentive_gap,
     load_rows,
+    RECOVERY_EPS,
     recovery,
     summarize_runs,
     task_competence,
@@ -251,6 +252,19 @@ def test_recovery_denominator_guard():
     result = recovery(ed, ec, idd, ic)
     assert result["R_t"] is None
     assert result["reason"] == "denominator_too_small"
+
+
+def test_recovery_reports_its_floor_and_dropped_resamples():
+    ed = make_run(8, deceptive_incentive=4)
+    ec = make_run(8, deceptive_incentive=0)
+    idd = make_run(8, deceptive_incentive=8)
+    ic = make_run(8, deceptive_incentive=0)
+    result = recovery(ed, ec, idd, ic, n_boot=100, seed=0)
+    assert result["eps"] == RECOVERY_EPS == 0.10
+    assert result["n_boot"] == 100 and result["n_boot_dropped"] == 0
+    guarded = recovery(ed, ec, idd, ic, eps=1.5, n_boot=100, seed=0)
+    assert guarded["reason"] == "denominator_too_small"
+    assert guarded["R_t"] is None and guarded["n_boot_dropped"] is None
 
 
 def test_tau_gain_known_value_and_ci_sign():

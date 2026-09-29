@@ -217,6 +217,10 @@ if __name__ == "__main__":
                         help="enable the LLM classifier fallback (needs an API key)")
     parser.add_argument("--llm-provider", default="openai")
     parser.add_argument("--llm-model", default="gpt-5-mini")
+    parser.add_argument("--llm-cache-dir", default=None, metavar="DIR",
+                        help="disk cache for grader calls; default "
+                             "<out-dir>/../../.cache/llm_extractions, one cache "
+                             "per project directory")
     parser.add_argument("--smoke", action="store_true",
                         help="DEV-model plumbing proof; ignores the run flags")
     args = parser.parse_args()
@@ -311,6 +315,11 @@ if __name__ == "__main__":
     )
 
     out_dir = Path(args.out_dir)
+    llm_cache_dir = args.llm_cache_dir or str(
+        out_dir.parent.parent / ".cache" / "llm_extractions"
+    )
+    if args.llm_fallback:
+        print("LLM CACHE DIR: %s" % llm_cache_dir)
     if has_sidecar:
         # A project checkpoint loads through load_checkpoint_model so its
         # sidecar is validated.
@@ -340,6 +349,7 @@ if __name__ == "__main__":
         seed=args.seed, train_seed=args.train_seed,
         quant_label=args.quant, use_llm_fallback=args.llm_fallback,
         llm_provider=args.llm_provider, llm_model=args.llm_model,
+        llm_cache_dir=llm_cache_dir,
         scenario_seed=args.scenario_seed, n=args.n,
         render_fn=render_insider_messages, score_fn=score_insider_response,
         environment=ENVIRONMENT_FINGERPRINT,

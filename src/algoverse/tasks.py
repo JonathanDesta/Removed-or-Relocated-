@@ -30,6 +30,7 @@ everything is unit-testable on a laptop in seconds:
 
 import hashlib
 import json
+import os
 import random
 import re
 
@@ -518,6 +519,12 @@ DEFAULT_EXTRACTION_MODELS = {
 
 DEFAULT_EXTRACTION_CACHE = ".cache/llm_extractions"
 
+# One grader call is attempted this many times before the row records
+# llm_failed:<provider>; the pause before each retry doubles from
+# LLM_RETRY_BACKOFF_SECONDS (2 s, then 4 s).
+LLM_RETRY_ATTEMPTS = 3
+LLM_RETRY_BACKOFF_SECONDS = 2.0
+
 EXTRACTION_INSTRUCTION = (
     "You extract one number from a job-negotiation reply. Respond "
     "with ONLY a JSON object, no other text: "
@@ -528,42 +535,140 @@ EXTRACTION_INSTRUCTION = (
 )
 
 
+def _retry_sleep(seconds):
+    """The pause between grader attempts (tests replace it)."""
+    import time
+
+    time.sleep(seconds)
+
+
+def _openai_base_url():
+    """The non-default OpenAI-compatible endpoint, or None (the default)."""
+    return os.environ.get("OPENAI_BASE_URL") or None
+
+
+def llm_endpoint_label(provider="openai"):
+    """"custom" when the openai provider points at a non-default endpoint
+    (OPENAI_BASE_URL set), else "default".
+
+    Provenance for gen_config: which endpoint served the grader is a fact
+    about a run, but the hostname itself is never recorded.
+    """
+    if provider == "openai" and _openai_base_url():
+        return "custom"
+    return "default"
+
+
+def llm_cache_key(provider, model, instruction, text):
+    """The disk-cache key of one grader call.
+
+    sha256 over provider, model, instruction and text, so a different
+    model or instruction never reuses a stale answer. For the openai
+    provider a non-default endpoint (OPENAI_BASE_URL) is part of the
+    provider term: two deployments answering under the same model name
+    must not share entries. With the variable unset the key is the one
+    earlier versions computed, so an existing cache stays valid.
+    """
+    endpoint = _openai_base_url() if provider == "openai" else None
+    provider_term = provider if endpoint is None else "%s@%s" % (provider, endpoint)
+    return hashlib.sha256(
+        ("%s|%s|%s|%s" % (provider_term, model, instruction, text)).encode("utf-8")
+    ).hexdigest()
+
+
+def _provider_call(provider, model, instruction, text):
+    """One request to the provider: (parsed JSON dict, served model).
+
+    Raises on any failure: no package, no key, API error, a reply that is
+    empty or not a JSON object, or a reply without a model identifier.
+    """
+    if provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
+        message = client.messages.create(
+            model=model,
+            max_tokens=100,
+            system=instruction,
+            messages=[{"role": "user", "content": text}],
+        )
+        reply = message.content[0].text.strip()
+        response_model = message.model
+    elif provider == "openai":
+        import openai
+
+        client = openai.OpenAI()  # reads OPENAI_API_KEY (+ OPENAI_BASE_URL)
+        # gpt-5-family models reject max_tokens (they take
+        # max_completion_tokens, which also covers hidden reasoning
+        # tokens) — minimal effort plus a roomy cap keeps the tiny JSON
+        # answer from being starved by thinking. max_completion_tokens
+        # is accepted by the 4o family too.
+        request_kwargs = {"max_completion_tokens": 2000}
+        if model.startswith("gpt-5"):
+            request_kwargs["reasoning_effort"] = "minimal"
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": text},
+            ],
+            **request_kwargs,
+        )
+        reply = completion.choices[0].message.content.strip()
+        response_model = completion.model
+    else:
+        raise ValueError("unknown LLM extraction provider %r" % provider)
+
+    # Tolerate a reply wrapped in markdown fences.
+    reply = reply.strip("`").strip()
+    if reply.startswith("json"):
+        reply = reply[4:].strip()
+    parsed = json.loads(reply)
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM reply is not a JSON object: %r" % reply)
+    if not response_model:
+        raise RuntimeError("LLM extraction response omitted its model identifier")
+    return parsed, response_model
+
+
 def _llm_json_request(instruction, text, provider="openai", model=None,
                       cache_dir=None, return_model=False, raise_errors=False):
-    """One JSON-answering LLM call with the shared disk cache.
+    """One JSON-answering LLM call with the shared disk cache and retry.
 
-    The provider plumbing behind llm_extract_offer, extracted so sibling
-    environments (insider.llm_classify_report) reuse the call and cache
-    discipline instead of cloning ~60 lines of it. Returns the reply's
-    parsed JSON object (a dict), or None on any failure (unknown provider,
-    no package, no key, API error, unparseable reply, reply without a
-    model identifier); with return_model=True returns
-    ``(parsed, response_model)``. ``raise_errors=True`` is reserved for
-    the runners' startup probes.
+    The provider plumbing behind llm_extract_offer and
+    insider.llm_classify_report. Returns the reply's parsed JSON object (a
+    dict), or None when the call could not be completed; with
+    return_model=True returns ``(parsed, response_model)``.
 
-    Requests are cached on disk, keyed by provider + model + the sha256 of
-    instruction + text, so re-scoring never re-pays for the same call,
-    stays deterministic, and changing either the model or the instruction
-    never silently reuses stale answers (different extractors can never
-    collide even in one cache dir). Entries store the JSON payload plus
-    the served response_model; entries without one are re-fetched.
-    cache_dir=None uses DEFAULT_EXTRACTION_CACHE; the cache is always on.
+    A call is attempted LLM_RETRY_ATTEMPTS times, pausing
+    LLM_RETRY_BACKOFF_SECONDS * 2**attempt between attempts, on any
+    failure (no package, no key, API error, empty or non-JSON reply, reply
+    without a model identifier). A final failure prints one warning line
+    and returns None, so the row records llm_failed:<provider> and stays
+    invalid; ``raise_errors=True`` (the runners' startup probes) re-raises
+    the last error instead. An unknown provider never retries.
+
+    Requests are cached on disk under llm_cache_key (provider, endpoint,
+    model, instruction and text), so re-scoring never re-pays for the same
+    call and changing the model or instruction never reuses a stale
+    answer. Entries store the JSON payload plus the served response_model;
+    entries without one are re-fetched. cache_dir=None uses
+    DEFAULT_EXTRACTION_CACHE; the cache is always on.
     """
     from pathlib import Path
 
     text = text or ""
     model = model or DEFAULT_EXTRACTION_MODELS.get(provider)
-    if model is None:
+    if provider not in DEFAULT_EXTRACTION_MODELS or model is None:
         if raise_errors:
             raise ValueError("unknown LLM extraction provider %r" % provider)
         return (None, None) if return_model else None
 
     if cache_dir is None:
         cache_dir = DEFAULT_EXTRACTION_CACHE
-    key = hashlib.sha256(
-        ("%s|%s|%s|%s" % (provider, model, instruction, text)).encode("utf-8")
-    ).hexdigest()
-    cache_path = Path(cache_dir) / ("%s.json" % key)
+    cache_path = Path(cache_dir) / (
+        "%s.json" % llm_cache_key(provider, model, instruction, text)
+    )
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text())
@@ -578,58 +683,26 @@ def _llm_json_request(instruction, text, provider="openai", model=None,
         except Exception:
             pass  # corrupt cache entry, just re-extract
 
-    try:
-        if provider == "anthropic":
-            import anthropic
-
-            client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-            message = client.messages.create(
-                model=model,
-                max_tokens=100,
-                system=instruction,
-                messages=[{"role": "user", "content": text}],
+    last_error = None
+    for attempt in range(LLM_RETRY_ATTEMPTS):
+        try:
+            parsed, response_model = _provider_call(
+                provider, model, instruction, text
             )
-            reply = message.content[0].text.strip()
-            response_model = message.model
-        elif provider == "openai":
-            import openai
-
-            client = openai.OpenAI()  # reads OPENAI_API_KEY (+ OPENAI_BASE_URL)
-            # gpt-5-family models reject max_tokens (they take
-            # max_completion_tokens, which also covers hidden reasoning
-            # tokens) — minimal effort plus a roomy cap keeps the tiny JSON
-            # answer from being starved by thinking. max_completion_tokens
-            # is accepted by the 4o family too.
-            request_kwargs = {"max_completion_tokens": 2000}
-            if model.startswith("gpt-5"):
-                request_kwargs["reasoning_effort"] = "minimal"
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": instruction},
-                    {"role": "user", "content": text},
-                ],
-                **request_kwargs,
-            )
-            reply = completion.choices[0].message.content.strip()
-            response_model = completion.model
-        else:
-            if raise_errors:
-                raise ValueError("unknown LLM extraction provider %r" % provider)
-            return (None, None) if return_model else None
-
-        # Tolerate a reply wrapped in markdown fences.
-        reply = reply.strip("`").strip()
-        if reply.startswith("json"):
-            reply = reply[4:].strip()
-        parsed = json.loads(reply)
-        if not isinstance(parsed, dict):
-            raise ValueError("LLM reply is not a JSON object: %r" % reply)
-        if not response_model:
-            raise RuntimeError("LLM extraction response omitted its model identifier")
-    except Exception:
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < LLM_RETRY_ATTEMPTS:
+                _retry_sleep(LLM_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+    else:
+        print(
+            "warning: LLM %s/%s call failed %d times (%s: %s); the row "
+            "records llm_failed"
+            % (provider, model, LLM_RETRY_ATTEMPTS,
+               type(last_error).__name__, last_error)
+        )
         if raise_errors:
-            raise
+            raise last_error
         return (None, None) if return_model else None
 
     try:
@@ -648,7 +721,7 @@ def llm_extract_offer(response_text, provider="openai", model=None,
 
     Returns a float, the string "NONE", or None if extraction failed for any
     reason (unknown provider, no package, no key, API error, unparseable
-    reply). With return_model=True, returns ``(value, response_model)`` so
+    reply; _llm_json_request retries before giving up). With return_model=True, returns ``(value, response_model)`` so
     scored rows can record the model identifier the API actually returned.
     Failures normally return None so the row stays unparseable and counts as
     invalid. ``raise_errors=True`` is reserved for the runner's startup probe,

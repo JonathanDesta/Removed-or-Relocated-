@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-SWEEPDRIVER_TEST_COUNT = 8
+SWEEPDRIVER_TEST_COUNT = 9
 
 try:
     import torch
@@ -233,6 +233,33 @@ if HAVE_STACK:
             # An identity-true rerun still passes the guard.
             summary = run_layer_sweep(
                 model, None, [1], out_root, "g", "tiny-qwen",
+                **_sweep_kwargs()
+            )
+            assert summary["skipped"] == [1]
+
+    def test_arm_is_stamped_into_manifest_and_rows_and_guarded():
+        model = _tiny_model()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp) / "sweep"
+            run_layer_sweep(
+                model, None, [1], out_root, "ed", "tiny-qwen", arm="E,D",
+                **_sweep_kwargs()
+            )
+            manifest = json.loads((out_root / "sweep_manifest.json").read_text())
+            assert manifest["arm"] == "E,D"
+            rows = load_rows(out_root / "ed-l01" / "competence.jsonl")
+            assert rows and all(row["arm"] == "E,D" for row in rows)
+            # Another arm is a moved identity, refused by name.
+            _expect_value_error(
+                lambda: run_layer_sweep(
+                    model, None, [1], out_root, "ed", "tiny-qwen", arm="I,D",
+                    **_sweep_kwargs()
+                ),
+                "arm",
+            )
+            # The identity-true rerun resumes.
+            summary = run_layer_sweep(
+                model, None, [1], out_root, "ed", "tiny-qwen", arm="E,D",
                 **_sweep_kwargs()
             )
             assert summary["skipped"] == [1]

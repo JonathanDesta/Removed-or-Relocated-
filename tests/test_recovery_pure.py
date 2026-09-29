@@ -248,6 +248,19 @@ def test_audit_names_leaked_edit_mask():
         raise AssertionError("four consistently masked continuation arms passed")
 
 
+def test_audit_refuses_a_lesion_era_manifest():
+    manifests = matched_manifests()
+    manifests["I,D"]["bypassed_layer"] = 7
+    try:
+        rr.audit_matched_arms(manifests)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("a manifest trained with a bypass passed the audit")
+    assert message.startswith("matched_arms_audit_failed")
+    assert "'I,D'" in message and "bypassed_layer" in message
+
+
 def test_recovery_arm_tuple_requires_four_unique_dc_dc_contract_arms():
     for arms in (
         ("E,D", "E,C", "I,D"),
@@ -290,10 +303,14 @@ def test_default_report_rendering_is_byte_for_byte_stable():
         "STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=50)\n"
         "truncation rule: hit_max_tokens=>invalid\n"
         "pre-registered subset: t in [8, 70, 281]; requested: [8]\n"
+        "denominator floor: |tau_ID - tau_IC| >= 0.10 (below it R_t is a "
+        "reported null)\n"
         "MATCHED-ARMS AUDIT: PASS -- all four arms share one training "
         "identity (train_seed=42, total_steps=281, effective_batch=16)\n\n"
         "    t | R_t    [ci_low, ci_high] | tau_ED  tau_EC  tau_ID  tau_IC\n"
-        "    8 | 1.000 [1.000, 1.000] | 1.000  0.000  1.000  0.000"
+        "    8 | 1.000 [1.000, 1.000] | 1.000  0.000  1.000  0.000\n\n"
+        "note: no rows file carries an arm/checkpoint_step stamp; every "
+        "input was matched by its --rows key only."
     )
     assert report.encode("utf-8") == expected.encode("utf-8")
 
@@ -384,6 +401,126 @@ def test_unrequested_input_refused_by_name():
         raise AssertionError("an unrequested (t, arm) input was dropped")
     assert message.startswith("recovery_input_unrequested")
     assert "17" in message
+
+
+def _stamped(rows, arm, t):
+    return [dict(row, arm=arm, checkpoint_step=t) for row in rows]
+
+
+def test_mislabelled_rows_are_refused_and_stamped_rows_pass():
+    inputs = rows_inputs_for((8,), FULL_ED, CTRL, INTACT_D, CTRL)
+    stamped = {
+        (t, arm): _stamped(rows, arm, t) for (t, arm), rows in inputs.items()
+    }
+    result = rr.evaluate_recovery(
+        stamped, matched_manifests(), t_subset=(8,), n_boot=50
+    )
+    assert result["unstamped_inputs"] == []
+    report = rr.render_recovery_report(result)
+    assert "arm/checkpoint_step stamp" not in report
+
+    # One arm's rows swapped for another arm's: refused by name.
+    wrong_arm = dict(stamped)
+    wrong_arm[(8, "E,D")] = _stamped(FULL_ED, "I,D", 8)
+    try:
+        rr.evaluate_recovery(wrong_arm, matched_manifests(), t_subset=(8,),
+                             n_boot=50)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("rows stamped with another arm were accepted")
+    assert message.startswith("recovery_input_mislabelled"), message
+    assert "(t=8, arm='E,D')" in message and "'I,D'" in message
+
+    # Rows from another checkpoint under this t: refused by name.
+    wrong_t = dict(stamped)
+    wrong_t[(8, "I,C")] = _stamped(CTRL, "I,C", 70)
+    try:
+        rr.evaluate_recovery(wrong_t, matched_manifests(), t_subset=(8,),
+                             n_boot=50)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("rows from checkpoint 70 were accepted as t=8")
+    assert "checkpoint_step [70]" in message, message
+
+    # A partly stamped mix is noted per input, not refused.
+    mixed = dict(stamped)
+    mixed[(8, "I,C")] = CTRL
+    result = rr.evaluate_recovery(
+        mixed, matched_manifests(), t_subset=(8,), n_boot=50
+    )
+    assert result["unstamped_inputs"] == [(8, "I,C")]
+    assert "rows for (t=8, arm='I,C') carry no arm/checkpoint_step stamp" in (
+        rr.render_recovery_report(result)
+    )
+
+
+def test_eps_and_dropped_resamples_are_reported():
+    half = make_arm_rows(12, d_inc=6)   # intact ceiling tau 0.5
+    inputs = rows_inputs_for((8,), FULL_ED, CTRL, half, CTRL)
+    result = rr.evaluate_recovery(
+        inputs, matched_manifests(), t_subset=(8,), n_boot=50, eps=0.4
+    )
+    entry = result["per_t"][8]
+    assert result["eps"] == 0.4 and entry["eps"] == 0.4
+    assert entry["R_t"] == 2.0
+    assert entry["n_boot"] == 50
+    assert 0 < entry["n_boot_dropped"] < 50, entry["n_boot_dropped"]
+    report = rr.render_recovery_report(result)
+    assert "denominator floor: |tau_ID - tau_IC| >= 0.40" in report
+    assert ("note: t=8 dropped %d of 50 bootstrap resamples"
+            % entry["n_boot_dropped"]) in report
+    # A floor above the ceiling makes R_t a reported null, no bootstrap.
+    guarded = rr.evaluate_recovery(
+        inputs, matched_manifests(), t_subset=(8,), n_boot=50, eps=0.6
+    )
+    assert guarded["per_t"][8]["reason"] == "denominator_too_small"
+    assert guarded["per_t"][8]["n_boot_dropped"] is None
+    # The default is the pre-registered floor.
+    default = rr.evaluate_recovery(
+        inputs, matched_manifests(), t_subset=(8,), n_boot=50
+    )
+    assert default["eps"] == 0.10
+    # A lower floor drops fewer resamples.
+    assert default["per_t"][8]["n_boot_dropped"] < entry["n_boot_dropped"]
+    records = recovery_cli.build_recovery_records(result, "negotiation")
+    assert records[0]["eps"] == 0.4
+    assert records[0]["n_boot_dropped"] == entry["n_boot_dropped"]
+
+
+def test_cli_evaluates_once_and_emits_records():
+    with tempfile.TemporaryDirectory() as tmp:
+        inputs = rows_inputs_for((8,), FULL_ED, CTRL, INTACT_D, CTRL)
+        argv = []
+        for (t, arm), rows in inputs.items():
+            path = Path(tmp) / ("%s-%d.jsonl" % (arm.replace(",", ""), t))
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows),
+                            encoding="utf-8")
+            argv += ["--rows", "%s:%d=%s" % (arm, t, path)]
+        for arm, path in write_manifests(matched_manifests(), tmp).items():
+            argv += ["--manifest", "%s=%s" % (arm, path)]
+        out = Path(tmp) / "rt.jsonl"
+        argv += ["--t", "8", "--n-boot", "50", "--eps", "0.2",
+                 "--emit-records", str(out), "--env-label", "negotiation"]
+        calls = []
+        original = recovery_cli.evaluate_recovery
+
+        def counting(*args, **kwargs):
+            calls.append(kwargs.get("eps"))
+            return original(*args, **kwargs)
+
+        recovery_cli.evaluate_recovery = counting
+        try:
+            assert recovery_cli.main(argv) == 0
+        finally:
+            recovery_cli.evaluate_recovery = original
+        assert calls == [0.2]
+        records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["R_t"] == 1.0 and records[0]["eps"] == 0.2
+    assert records[0]["n_boot_dropped"] == 0
+    assert records[0]["tau_ED"] == 1.0
 
 
 def test_paths_load_like_row_lists():

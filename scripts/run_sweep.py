@@ -29,8 +29,10 @@ Canonical invocations on a GPU session:
         --run-tag md-qwen7b-s42-step281 \
         --benchmarks-only --layers 12,17,23
 
-    # Stage 3 runs the same sweep over the recovered E,D-t281 checkpoint and
-    # over the just-edited M_E; relocation_report.py compares the two.
+    # Stage 3 runs the same sweep over the recovered E,D-t281 checkpoint
+    # (with --arm E,D, so its rows, competence rows and manifest carry the
+    # arm) and over the just-edited M_E; relocation_report.py compares the
+    # two.
 
 Re-running resumes: a finished layer is skipped before the model is
 touched, a partial layer continues row by row.
@@ -43,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse.eval import VALID_ARMS
 from algoverse.models import (
     DEV_MODEL,
     load_checkpoint_model,
@@ -126,10 +129,20 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--train-seed", type=int, default=None)
     parser.add_argument("--checkpoint-step", type=int, default=None)
+    parser.add_argument("--arm", default=None, choices=list(VALID_ARMS),
+                        help="continuation arm of the swept checkpoint "
+                             "(Stage 3's E,D-t281 sweep); stamped into the "
+                             "rows, the competence rows and the sweep "
+                             "manifest, and guarded on resume like every "
+                             "other identity field")
     parser.add_argument("--llm-fallback", action="store_true",
                         help="enable the LLM extraction fallback (needs an API key)")
     parser.add_argument("--llm-provider", default="openai")
     parser.add_argument("--llm-model", default="gpt-5-mini")
+    parser.add_argument("--llm-cache-dir", default=None, metavar="DIR",
+                        help="disk cache for grader calls; default "
+                             "<out-root>/../../.cache/llm_extractions, one cache "
+                             "per project directory")
     parser.add_argument(
         "--dev-calibration", action="store_true",
         help="DEV calibration mode: DEV model, quant none, JSD/ppl pass "
@@ -287,12 +300,17 @@ if __name__ == "__main__":
         summary = run_candidate_benchmarks(
             model, tokenizer, chunk, args.out_root, args.run_tag, args.model_id,
             adapter_path=args.adapter, checkpoint_step=args.checkpoint_step,
-            train_seed=args.train_seed, batch_size=args.batch_size,
-            seed=args.seed,
+            train_seed=args.train_seed, arm=args.arm,
+            batch_size=args.batch_size, seed=args.seed,
         )
         print("candidate benchmarks complete: %s" % summary["written"])
         raise SystemExit(0)
 
+    llm_cache_dir = args.llm_cache_dir or str(
+        Path(args.out_root).parent.parent / ".cache" / "llm_extractions"
+    )
+    if args.llm_fallback:
+        print("LLM CACHE DIR: %s" % llm_cache_dir)
     summary = run_layer_sweep(
         model, tokenizer, layers, args.out_root, args.run_tag, args.model_id,
         adapter_path=args.adapter, checkpoint_step=args.checkpoint_step,
@@ -300,6 +318,7 @@ if __name__ == "__main__":
         n=args.n, scenario_seed=args.scenario_seed, seed=args.seed,
         batch_size=args.batch_size, use_llm_fallback=args.llm_fallback,
         llm_provider=args.llm_provider, llm_model=args.llm_model,
+        llm_cache_dir=llm_cache_dir, arm=args.arm,
         dev=args.dev_calibration, chunk=chunk,
     )
 
