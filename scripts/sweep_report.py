@@ -37,35 +37,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.sweep import BASE_KEY, sweep_report
+from algoverse import cli
+from algoverse.sweep import sweep_report
 
 
-def parse_layer_pairs(pairs, allow_base=False, merge_sources=False):
-    result = {}
-    for pair in pairs or []:
-        key, _, path = pair.partition("=")
-        if not path:
-            raise SystemExit("expected N=PATH, got %r" % pair)
-        if allow_base and key == BASE_KEY:
-            norm = BASE_KEY
-        else:
-            try:
-                norm = int(key)
-            except ValueError:
-                raise SystemExit(
-                    "expected an integer layer%s in %r"
-                    % (" or 'base'" if allow_base else "", pair)
-                )
-        if norm in result and not merge_sources:
-            raise SystemExit("key %r given twice" % key)
-        if merge_sources:
-            result.setdefault(norm, []).append(path)
-        else:
-            result[norm] = path
-    return result
-
-
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True, metavar="PATH",
                         help="intact-run rows.jsonl (bypassed_layer null)")
@@ -85,16 +61,26 @@ if __name__ == "__main__":
     parser.add_argument("--dev", action="store_true",
                         help="DEV model only: stamp every line as not "
                              "publishable")
-    args = parser.parse_args()
+    return parser
 
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
     sweep_report(
         args.base,
-        parse_layer_pairs(args.layer),
+        cli.parse_pairs(args.layer, "--layer", key=int, parser=parser),
         m0_competence=args.m0_competence,
-        competence_inputs=parse_layer_pairs(
-            args.competence, allow_base=True, merge_sources=True
+        competence_inputs=cli.parse_pairs(
+            args.competence, "--competence", key=int, allow_base=True,
+            merge=True, parser=parser,
         ),
         n_boot=args.n_boot,
         seed=args.seed,
         dev=args.dev,
     )
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

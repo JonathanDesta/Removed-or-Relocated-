@@ -13,12 +13,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.data import build_finetune_datasets
 
-if __name__ == "__main__":
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", default="data/finetune")
     parser.add_argument("--n", type=int, default=1500, help="rows per dataset")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     build_finetune_datasets(args.out_dir, n_per_dataset=args.n, seed=args.seed)
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

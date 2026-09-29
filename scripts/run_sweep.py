@@ -38,50 +38,19 @@ Re-running resumes: a finished layer is skipped before the model is
 touched, a partial layer continues row by row.
 """
 import argparse
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.eval import VALID_ARMS
-from algoverse.models import (
-    DEV_MODEL,
-    load_checkpoint_model,
-    load_model_and_tokenizer,
-)
 from algoverse.sweepdriver import (
     full_layer_list,
     run_candidate_benchmarks,
     run_layer_sweep,
 )
-from algoverse.tasks import llm_extract_offer
-from algoverse.train import checkpoint_meta
-
-# The startup probe's input and the answer it is KNOWN to have.
-PROBE_REPLY = (
-    "The candidate says their competing offer is one hundred "
-    "and ten thousand dollars."
-)
-PROBE_EXPECTED_OFFER = 110000.0
-
-
-def check_probe_verdict(probe):
-    """Refuse unless the canary recovered the offer it is known to carry.
-
-    Accepting any non-null extraction (the earlier check) let a wrong
-    deployment or a prompt regression pass startup and then mis-extract
-    every reply: a canary with a known answer that accepts any answer is
-    not a canary.
-    """
-    if probe != PROBE_EXPECTED_OFFER:
-        raise RuntimeError(
-            "LLM fallback startup probe extracted %r from a reply stating "
-            "one hundred and ten thousand dollars; expected %r. No "
-            "generation was run." % (probe, PROBE_EXPECTED_OFFER)
-        )
-
+from algoverse.tasks import PROBE_EXPECTED_OFFER, PROBE_REPLY, llm_extract_offer
 
 def _parse_layer_chunk(spec):
     """None for "all", else the explicit chunk: "A-B" (inclusive) or "A,B,C"."""
@@ -96,7 +65,7 @@ def _parse_layer_chunk(spec):
     return [int(spec)]
 
 
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default=None,
                         help="required unless --dev-calibration")
@@ -135,20 +104,19 @@ if __name__ == "__main__":
                              "rows, the competence rows and the sweep "
                              "manifest, and guarded on resume like every "
                              "other identity field")
-    parser.add_argument("--llm-fallback", action="store_true",
-                        help="enable the LLM extraction fallback (needs an API key)")
-    parser.add_argument("--llm-provider", default="openai")
-    parser.add_argument("--llm-model", default="gpt-5-mini")
-    parser.add_argument("--llm-cache-dir", default=None, metavar="DIR",
-                        help="disk cache for grader calls; default "
-                             "<out-root>/../../.cache/llm_extractions, one cache "
-                             "per project directory")
+    cli.add_llm_flags(parser, out_flag="out-root")
     parser.add_argument(
         "--dev-calibration", action="store_true",
         help="DEV calibration mode: DEV model, quant none, JSD/ppl pass "
              "only, no negotiation rows",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    from algoverse.models import DEV_MODEL
 
     if args.dev_calibration:
         if args.model_id not in (None, DEV_MODEL):
@@ -185,114 +153,22 @@ if __name__ == "__main__":
             )
 
     if args.llm_fallback:
-        if args.llm_provider == "openai":
-            try:
-                import openai  # noqa: F401
-            except ImportError as exc:
-                raise RuntimeError(
-                    "--llm-fallback requires the openai package"
-                ) from exc
-            if not os.environ.get("OPENAI_API_KEY"):
-                raise RuntimeError(
-                    "--llm-fallback with openai requires OPENAI_API_KEY"
-                )
-        elif args.llm_provider == "anthropic":
-            try:
-                import anthropic  # noqa: F401
-            except ImportError as exc:
-                raise RuntimeError(
-                    "--llm-fallback requires the anthropic package"
-                ) from exc
-            if not os.environ.get("ANTHROPIC_API_KEY"):
-                raise RuntimeError(
-                    "--llm-fallback with anthropic requires ANTHROPIC_API_KEY"
-                )
-        else:
-            raise RuntimeError(
-                "unsupported --llm-provider %r" % args.llm_provider
-            )
-
-        try:
-            with tempfile.TemporaryDirectory() as probe_cache:
-                probe = llm_extract_offer(
-                    PROBE_REPLY,
-                    provider=args.llm_provider,
-                    model=args.llm_model,
-                    cache_dir=probe_cache,
-                    raise_errors=True,
-                )
-        except Exception as exc:
-            raise RuntimeError(
-                "LLM fallback startup probe failed before generation "
-                "(%s: %s)" % (type(exc).__name__, exc)
-            ) from exc
-        check_probe_verdict(probe)
-        print(
-            "LLM FALLBACK VERIFIED: %s/%s"
-            % (args.llm_provider, args.llm_model)
+        cli.verify_llm_fallback(
+            args.llm_provider, args.llm_model, llm_extract_offer, PROBE_REPLY,
+            PROBE_EXPECTED_OFFER,
+            "a reply stating one hundred and ten thousand dollars",
         )
 
-    # A checkpoint this project trained carries a train_meta.json sidecar, so
-    # its provenance is read rather than operator-copied on trust. Adapters
-    # without one are externally produced and behave exactly as before.
-    if (
-        args.adapter is not None
-        and (Path(args.adapter) / "adapter_config.json").is_file()
-        and not (Path(args.adapter) / "train_meta.json").is_file()
-        and (args.checkpoint_step is None or args.train_seed is None)
-    ):
-        omitted = []
-        if args.checkpoint_step is None:
-            omitted.append("checkpoint_step")
-        if args.train_seed is None:
-            omitted.append("train_seed")
-        print(
-            "WARNING: adapter %s has adapter_config.json but no "
-            "train_meta.json; %s will be recorded as null. "
-            "A project-trained checkpoint should carry its sidecar."
-            % (args.adapter, " and ".join(omitted))
+    args.checkpoint_step, args.train_seed, has_sidecar = (
+        cli.adopt_checkpoint_flags(
+            args.adapter, args.checkpoint_step, args.train_seed
         )
-
-    has_sidecar = (
-        args.adapter is not None
-        and (Path(args.adapter) / "train_meta.json").is_file()
     )
-    if has_sidecar:
-        sidecar = checkpoint_meta(args.adapter)
-        if args.checkpoint_step is None:
-            args.checkpoint_step = sidecar["checkpoint_step"]
-            print(
-                "CHECKPOINT STEP adopted from train_meta.json: %s"
-                % args.checkpoint_step
-            )
-        elif args.checkpoint_step != sidecar["checkpoint_step"]:
-            raise RuntimeError(
-                "--checkpoint-step %s contradicts train_meta.json's %s"
-                % (args.checkpoint_step, sidecar["checkpoint_step"])
-            )
-        if args.train_seed is None:
-            args.train_seed = sidecar["train_seed"]
-            print(
-                "TRAIN SEED adopted from train_meta.json: %s"
-                % args.train_seed
-            )
-        elif args.train_seed != sidecar["train_seed"]:
-            raise RuntimeError(
-                "--train-seed %s contradicts train_meta.json's %s"
-                % (args.train_seed, sidecar["train_seed"])
-            )
 
-    # Load ONCE; the driver loops layers on this single model object. A
-    # project checkpoint loads through load_checkpoint_model so its sidecar
-    # is validated.
-    if has_sidecar:
-        model, tokenizer, _meta = load_checkpoint_model(
-            args.model_id, args.adapter, quant=args.quant
-        )
-    else:
-        model, tokenizer = load_model_and_tokenizer(
-            args.model_id, quant=args.quant, adapter_path=args.adapter
-        )
+    # Load ONCE; the driver loops layers on this single model object.
+    model, tokenizer = cli.load_eval_model(
+        args.model_id, args.adapter, args.quant, has_sidecar
+    )
     layers = full_layer_list(model)
     chunk = _parse_layer_chunk(args.layers)
 
@@ -304,11 +180,9 @@ if __name__ == "__main__":
             batch_size=args.batch_size, seed=args.seed,
         )
         print("candidate benchmarks complete: %s" % summary["written"])
-        raise SystemExit(0)
+        return 0
 
-    llm_cache_dir = args.llm_cache_dir or str(
-        Path(args.out_root).parent.parent / ".cache" / "llm_extractions"
-    )
+    llm_cache_dir = args.llm_cache_dir or cli.default_llm_cache_dir(args.out_root)
     if args.llm_fallback:
         print("LLM CACHE DIR: %s" % llm_cache_dir)
     summary = run_layer_sweep(
@@ -337,3 +211,8 @@ if __name__ == "__main__":
     if remaining:
         print("layers outside this session's chunk (still pending or from "
               "other sessions): %s" % remaining)
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

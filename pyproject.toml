@@ -1,9 +1,11 @@
 # Makes the package installable: `pip install -e .` from the repo root,
-# after which `import algoverse` works everywhere without sys.path tricks.
-# Heavy dependencies (torch, transformers, lm-eval) are deliberately NOT
-# declared here: the scoring/analysis half of the package runs without
-# them, and each environment (GPU session, laptop) installs what it needs
-# from requirements.txt.
+# after which `import algoverse` works from anywhere. The scripts also put
+# src/ on sys.path themselves, so a plain checkout runs them without an
+# install (the notebook relies on that). Heavy dependencies (torch,
+# transformers, lm-eval) are deliberately NOT declared here: the
+# scoring/analysis half of the package runs without them, and each
+# environment (GPU session, laptop) installs what it needs from
+# requirements.txt.
 
 [build-system]
 requires = ["setuptools>=61"]

@@ -40,7 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import insider, metrics
+from algoverse import cli, insider, metrics
 
 # Sample size and stratification. 150 mirrors the
 # source paper's order of magnitude (they hand-checked 120) and keeps a
@@ -212,8 +212,7 @@ def score_labeled(records, provider="openai", model=None, cache_dir=None) -> dic
 
 def format_report(summary) -> str:
     """The summary as readable markdown."""
-    def fmt(value):
-        return "n/a" if value is None else "%.3f" % value
+    fmt = metrics.fmt
 
     lines = [
         "INSIDER GRADER VALIDATION (pre-committed criterion; this run is "
@@ -252,7 +251,7 @@ def format_report(summary) -> str:
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
 
@@ -268,12 +267,17 @@ if __name__ == "__main__":
     run.add_argument("--llm-model", default="gpt-5-mini")
     run.add_argument("--cache-dir", default=None)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.mode == "sample":
         rows = metrics.load_rows(args.rows)
         if not rows:
-            raise SystemExit("no rows in %s" % args.rows)
+            parser.error("no rows in %s" % args.rows)
         try:
             targets = stratum_targets(args.n)
         except ValueError as exc:
@@ -302,3 +306,8 @@ if __name__ == "__main__":
             cache_dir=args.cache_dir,
         )
         print(format_report(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

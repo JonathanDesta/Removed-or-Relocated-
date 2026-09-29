@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import figures, metrics
+from algoverse import cli, figures, metrics
 
 # Results rows go through the truncation rule; figure records are read raw.
 _load_results = metrics.load_results
@@ -37,19 +37,8 @@ def _parse_tau_spec(spec):
     key, separator, path = spec.partition("=")
     model, sep2, label = key.partition(":")
     if not separator or not sep2 or not path:
-        raise SystemExit("--rows expects MODEL:LABEL=PATH, got %r" % spec)
+        raise ValueError("--rows expects MODEL:LABEL=PATH, got %r" % spec)
     return model, label, path
-
-
-def _parse_layer_spec(spec):
-    key, separator, path = spec.partition("=")
-    if not separator or not path:
-        raise SystemExit("--layer expects N=PATH, got %r" % spec)
-    try:
-        layer = int(key)
-    except ValueError:
-        raise SystemExit("--layer layer must be an integer: %r" % key)
-    return layer, path
 
 
 def emit_tau(args):
@@ -122,11 +111,7 @@ def emit_transfer(args):
 
 def emit_layer_curve(args):
     paths = {"base": args.base}
-    for spec in args.layer:
-        layer, path = _parse_layer_spec(spec)
-        if layer in paths:
-            raise SystemExit("--layer %d given twice" % layer)
-        paths[layer] = path
+    paths.update(cli.parse_pairs(args.layer, "--layer", key=int))
 
     rows = []
     for key in paths:
@@ -163,7 +148,7 @@ def emit_layer_curve(args):
         print("  unmeasurable l%02d: %s" % (layer, reason))
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -203,14 +188,23 @@ def main(argv=None):
     p_curve.add_argument("--n-boot", type=int, default=2000)
     p_curve.add_argument("--seed", type=int, default=0)
 
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "tau":
-        emit_tau(args)
-    elif args.command == "transfer":
-        emit_transfer(args)
-    else:
-        emit_layer_curve(args)
+    try:
+        if args.command == "tau":
+            emit_tau(args)
+        elif args.command == "transfer":
+            emit_transfer(args)
+        else:
+            emit_layer_curve(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

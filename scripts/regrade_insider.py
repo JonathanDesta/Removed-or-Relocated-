@@ -40,7 +40,6 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
 import re
 import sys
 import tempfile
@@ -48,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli  # noqa: E402
 from algoverse.insider import (  # noqa: E402
     CONCEALED,
     INSIDER_CLASSIFY_INSTRUCTION,
@@ -131,7 +131,7 @@ def summarize(rows, title):
     return "\n".join(lines)
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -154,10 +154,14 @@ def main(argv=None):
     parser.add_argument("--debug-first-failure", action="store_true",
                         help="re-issue the first failing call with errors "
                              "raised, print the exception, and stop")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.llm_provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("OPENAI_API_KEY is required for the classifier")
+    cli.check_provider_setup(args.llm_provider)
 
     rows = load_results(Path(args.rows))
     if not rows:
@@ -262,4 +266,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run_main(main)

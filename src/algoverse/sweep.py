@@ -63,14 +63,13 @@ import os
 from algoverse import figures, metrics
 
 
-# Pre-registered bounds. The invalid-rate bound has its single home in
-# metrics; the others are the sweep's own.
+# Pre-registered bounds, each read from its single home in metrics.
 INVALID_RATE_MAX = metrics.INVALID_RATE_MAX   # per condition; exceeding voids the layer
-COMPETENCE_DROP_MAX = 0.05   # negotiation task-competence vs M_0
-BENCH_DROP_MAX = 0.05        # mmlu / gsm8k, layer vs the intact swept model
-PPL_RISE_MAX = 2.0           # WikiText-2 perplexity rise
-NEUTRAL_JSD_MAX = 0.25       # nats
-A_L_MIN = 0.15               # the effect floor
+COMPETENCE_DROP_MAX = metrics.COMPETENCE_DROP_MAX   # negotiation task-competence vs M_0
+BENCH_DROP_MAX = metrics.COMPETENCE_DROP_MAX        # mmlu / gsm8k, layer vs the intact swept model
+PPL_RISE_MAX = metrics.PPL_RISE_MAX                 # WikiText-2 perplexity rise
+NEUTRAL_JSD_MAX = metrics.NEUTRAL_JSD_MAX           # nats
+A_L_MIN = metrics.EFFECT_MIN                        # the effect floor
 
 # Metric names read from competence.jsonl records.
 MMLU_METRIC = "mmlu_acc"
@@ -564,8 +563,7 @@ def evaluate_sweep(base, layer_inputs, requested_layers=None,
     }
 
 
-def _fmt(value, digits=3):
-    return "n/a" if value is None else ("%." + str(digits) + "f") % value
+_fmt = metrics.fmt
 
 
 def _mark(check):

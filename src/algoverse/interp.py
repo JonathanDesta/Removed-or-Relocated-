@@ -25,6 +25,7 @@ import random
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
+from algoverse.metrics import min_resamples
 from algoverse.models import bypassed_layers, residual_stream_by_layer
 
 
@@ -275,7 +276,7 @@ def _group_bootstrap_auroc_ci(y, scores, groups, n_boot=2000, seed=0,
         if len(set(y[idx].tolist())) < 2:
             continue
         values.append(roc_auc_score(y[idx], scores[idx]))
-    if len(values) < max(20, n_boot // 10):
+    if len(values) < min_resamples(n_boot):
         return None, None
     return (
         float(np.quantile(values, alpha / 2)),

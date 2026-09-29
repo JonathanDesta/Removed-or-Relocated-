@@ -84,6 +84,28 @@ TRUNCATED_INVALID = True
 # instead of a number. Pre-registered; recovery_report reads it from here.
 RECOVERY_EPS = 0.10
 
+# The other pre-registered thresholds, each with its single home here and
+# read by the gate, the sweep, the edit gate and the figures.
+TAU_GAIN_MIN = 0.15          # Gate 1: tau(M_D) - tau(M_0) must exceed it
+EFFECT_MIN = 0.15            # the sweep's effect floor on A_l
+EDIT_EFFECT_MIN = 0.15       # the edit gate's floor on A_edit
+COMPETENCE_DROP_MAX = 0.05   # negotiation task-competence, mmlu, gsm8k drops
+PPL_RISE_MAX = 2.0           # WikiText-2 perplexity rise
+NEUTRAL_JSD_MAX = 0.25       # nats; the neutral-distribution divergence bound
+# The pre-registered R_t evaluation subset: early / mid / final of the
+# doubling checkpoint schedule [8, 17, 35, 70, 140, 281].
+RT_CHECKPOINTS = (8, 70, 281)
+
+
+def fmt(value, digits=3, none="n/a"):
+    """A number to `digits` places, or the `none` label for None."""
+    return none if value is None else ("%." + str(digits) + "f") % value
+
+
+def min_resamples(n_boot):
+    """How many computable bootstrap resamples a CI needs (else no CI)."""
+    return max(20, n_boot // 10)
+
 
 def truncation_rule_label(truncated_invalid=None) -> str:
     """The rule in force, for report lines and emitted records."""
@@ -354,7 +376,7 @@ def bootstrap_ci(row_groups, stat_fn, n_boot=2000, seed=0, alpha=0.05):
         if value is not None:
             stats.append(value)
 
-    if len(stats) < max(20, n_boot // 10):
+    if len(stats) < min_resamples(n_boot):
         # The statistic barely ever computed (e.g. everything invalid).
         # A CI from a handful of resamples would be noise dressed as rigor.
         return point, None, None
@@ -608,8 +630,9 @@ def tau_gain(rows_treatment, rows_baseline, n_boot=2000, seed=0) -> dict:
 
 
 def gate1_decision(md_gain, md_competence, m0_competence,
-                   bench=None, reference=None, tau_gain_min=0.15,
-                   competence_drop_max=0.05, ppl_rise_max=2.0,
+                   bench=None, reference=None, tau_gain_min=TAU_GAIN_MIN,
+                   competence_drop_max=COMPETENCE_DROP_MAX,
+                   ppl_rise_max=PPL_RISE_MAX,
                    publishability_errors=None, dev=False) -> dict:
     """Assemble the Gate-1 PASS/FAIL verdict from already-computed numbers.
 

@@ -53,10 +53,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.models import load_checkpoint_model, load_model_and_tokenizer
+from algoverse import cli
 from algoverse.train import DEFAULT_TRAIN_CONFIG, TrainConfig, train_lora
 
-if __name__ == "__main__":
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--quant", default="4bit", choices=["4bit", "none"])
@@ -77,7 +78,13 @@ if __name__ == "__main__":
              "sidecar is read AND validated). Omit for the Stage-1 fresh-LoRA "
              "run.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    from algoverse.models import load_checkpoint_model, load_model_and_tokenizer
 
     config = DEFAULT_TRAIN_CONFIG
     if args.config_json:
@@ -85,7 +92,7 @@ if __name__ == "__main__":
         fields = {field.name for field in dataclasses.fields(TrainConfig)}
         unknown = sorted(set(overrides) - fields)
         if unknown:
-            raise ValueError(
+            parser.error(
                 "--config-json has keys that are not TrainConfig fields: %s"
                 % ", ".join(unknown)
             )
@@ -153,3 +160,8 @@ if __name__ == "__main__":
             manifest["checkpoint_steps"],
         )
     )
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import metrics  # noqa: E402
+from algoverse import cli, metrics  # noqa: E402
 from algoverse.tasks import INCENTIVE  # noqa: E402
 
 FEATURES = ("stated_number", "char_length", "stated_over_offer")
@@ -177,22 +177,20 @@ def format_table(records):
     return "\n".join(lines)
 
 
-def _refuse_under_results(parser, path):
-    resolved = Path(path).resolve()
-    results_root = (Path.cwd() / "results").resolve()
-    if resolved == results_root or results_root in resolved.parents:
-        parser.error("--out must not be under results/ (results are JSONL model outputs only)")
-
-
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rows", required=True, help="probe test set rows.jsonl")
     parser.add_argument("--out", required=True, help="JSONL of AUROC records (never under results/)")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
-    _refuse_under_results(parser, args.out)
+    cli.refuse_under_results(args.out, "--out", parser)
 
     rows = metrics.load_results(args.rows)
     records = evaluate(rows, n_boot=args.n_boot, seed=args.seed)
@@ -205,7 +203,8 @@ def main(argv=None):
             fh.write(json.dumps(record) + "\n")
     print(format_table(records))
     print("wrote %d records to %s" % (len(records), out))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

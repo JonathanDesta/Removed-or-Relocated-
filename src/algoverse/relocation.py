@@ -309,8 +309,7 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
     return result
 
 
-def _fmt(value):
-    return "n/a" if value is None else "%.3f" % value
+_fmt = metrics.fmt
 
 
 def _voided_line(result):

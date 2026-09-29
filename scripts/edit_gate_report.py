@@ -23,27 +23,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import metrics
+from algoverse import cli, metrics
+from algoverse.eval import WIKITEXT_MAX_LENGTH, WIKITEXT_N_TOKENS, WIKITEXT_STRIDE
 
 
 EDIT_JSD_METRIC = "wikitext2_edit_jsd"
-EDIT_EFFECT_MIN = 0.15
-INVALID_RATE_MAX = metrics.INVALID_RATE_MAX   # single home: metrics.py
-COMPETENCE_DROP_MAX = 0.05
-PPL_RISE_MAX = 2.0
-EDIT_JSD_MAX = 0.25
-
-
-def _pairs(values, label):
-    result = {}
-    for value in values or []:
-        name, separator, path = value.partition("=")
-        if not separator or not path:
-            raise SystemExit("%s expects NAME=PATH, got %r" % (label, value))
-        if name in result:
-            raise SystemExit("%s %r given twice" % (label, name))
-        result[name] = path
-    return result
+# The pre-registered bounds, each read from its single home in metrics.
+EDIT_EFFECT_MIN = metrics.EDIT_EFFECT_MIN
+INVALID_RATE_MAX = metrics.INVALID_RATE_MAX
+COMPETENCE_DROP_MAX = metrics.COMPETENCE_DROP_MAX
+PPL_RISE_MAX = metrics.PPL_RISE_MAX
+EDIT_JSD_MAX = metrics.NEUTRAL_JSD_MAX
 
 
 def edit_effect(rows_md, rows_me, n_boot=2000, seed=0):
@@ -139,9 +129,9 @@ def _edit_jsd_input(competence_rows, rows_md, rows_me, bench, errors):
     config = entry.get("config") or {}
     required = {
         "compared": "M_D_vs_M_E",
-        "n_tokens": 20000,
-        "max_length": 1024,
-        "stride": 512,
+        "n_tokens": WIKITEXT_N_TOKENS,
+        "max_length": WIKITEXT_MAX_LENGTH,
+        "stride": WIKITEXT_STRIDE,
     }
     for field, expected in required.items():
         if config.get(field) != expected:
@@ -355,8 +345,7 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
         edit_jsd_max=edit_jsd_max,
     )
 
-    def fmt(value):
-        return "n/a" if value is None else "%.3f" % value
+    fmt = metrics.fmt
 
     def count_line(condition):
         def one(name):
@@ -445,8 +434,10 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
 
 
 def edit_distribution_pass(model, tokenizer, md_adapter_name="default",
-                           me_adapter_name="edited", n_tokens=20000,
-                           max_length=1024, stride=512, token_ids=None):
+                           me_adapter_name="edited",
+                           n_tokens=WIKITEXT_N_TOKENS,
+                           max_length=WIKITEXT_MAX_LENGTH,
+                           stride=WIKITEXT_STRIDE, token_ids=None):
     """Mean per-token M_D↔M_E JSD by switching adapters on one base."""
     import torch
 
@@ -510,8 +501,9 @@ def edit_distribution_pass(model, tokenizer, md_adapter_name="default",
 
 def append_edit_jsd(model, tokenizer, md_adapter_path, me_adapter_path,
                     out_path, run_meta, md_adapter_name="default",
-                    me_adapter_name="edited", n_tokens=20000,
-                    max_length=1024, stride=512, token_ids=None):
+                    me_adapter_name="edited", n_tokens=WIKITEXT_N_TOKENS,
+                    max_length=WIKITEXT_MAX_LENGTH, stride=WIKITEXT_STRIDE,
+                    token_ids=None):
     """Append/resume one provenance-bound wikitext2_edit_jsd row."""
     from algoverse.eval import (
         WIKITEXT_DATASET_ID,
@@ -630,7 +622,7 @@ def _run_jsd(args):
     )
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -641,9 +633,9 @@ def main(argv=None):
     jsd.add_argument("--me-adapter", required=True)
     jsd.add_argument("--run-id", required=True)
     jsd.add_argument("--out", required=True)
-    jsd.add_argument("--n-tokens", type=int, default=20000)
-    jsd.add_argument("--max-length", type=int, default=1024)
-    jsd.add_argument("--stride", type=int, default=512)
+    jsd.add_argument("--n-tokens", type=int, default=WIKITEXT_N_TOKENS)
+    jsd.add_argument("--max-length", type=int, default=WIKITEXT_MAX_LENGTH)
+    jsd.add_argument("--stride", type=int, default=WIKITEXT_STRIDE)
 
     report = subparsers.add_parser("report", help="print the pure M_E gate")
     report.add_argument("--rows", action="append", required=True,
@@ -662,12 +654,18 @@ def main(argv=None):
                         help="also write every report quantity (and the "
                              "exact per-condition counts) as one JSON "
                              "figure record at full precision")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "jsd":
-        return _run_jsd(args)
-    return edit_gate_report(
-        _pairs(args.rows, "--rows"),
-        _pairs(args.competence, "--competence"),
+        _run_jsd(args)
+        return 0
+    edit_gate_report(
+        cli.parse_pairs(args.rows, "--rows", parser=parser),
+        cli.parse_pairs(args.competence, "--competence", parser=parser),
         n_boot=args.n_boot,
         seed=args.seed,
         edit_effect_min=args.edit_effect_min,
@@ -677,7 +675,8 @@ def main(argv=None):
         edit_jsd_max=args.edit_jsd_max,
         emit_record=args.emit_record,
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

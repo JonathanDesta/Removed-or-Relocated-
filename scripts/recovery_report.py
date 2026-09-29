@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.metrics import RECOVERY_EPS
 from algoverse.recovery_report import (
     DEFAULT_RECOVERY_ARMS,
@@ -69,12 +70,12 @@ def parse_manifest_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
     for pair in pairs or []:
         arm, _, path = pair.partition("=")
         if not path or arm not in arms:
-            raise SystemExit(
-                "expected ARM=PATH with ARM one of %s, got %r"
+            raise ValueError(
+                "--manifest expects ARM=PATH with ARM one of %s, got %r"
                 % (", ".join(repr(a) for a in arms), pair)
             )
         if arm in result:
-            raise SystemExit("--manifest %r given twice" % arm)
+            raise ValueError("--manifest %r given twice" % arm)
         result[arm] = path
     return result
 
@@ -86,21 +87,21 @@ def parse_rows_pairs(pairs, arms=DEFAULT_RECOVERY_ARMS):
         key, _, path = pair.partition("=")
         arm, sep, t_text = key.rpartition(":")
         if not path or not sep or arm not in arms:
-            raise SystemExit(
-                "expected ARM:T=PATH with ARM one of %s, got %r"
+            raise ValueError(
+                "--rows expects ARM:T=PATH with ARM one of %s, got %r"
                 % (", ".join(repr(a) for a in arms), pair)
             )
         try:
             t = int(t_text)
         except ValueError:
-            raise SystemExit("expected an integer checkpoint in %r" % pair)
+            raise ValueError("--rows expects an integer checkpoint in %r" % pair)
         if (t, arm) in result:
-            raise SystemExit("--rows %s:%d given twice" % (arm, t))
+            raise ValueError("--rows %s:%d given twice" % (arm, t))
         result[(t, arm)] = path
     return result
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", action="append", metavar="ARM:T=PATH",
                         help="one arm's rows.jsonl at checkpoint T; "
@@ -133,18 +134,26 @@ def main(argv=None):
     parser.add_argument("--env-label", default=None,
                         help="'env' value stamped on emitted records "
                              "(required with --emit-records)")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.emit_records and not args.env_label:
         parser.error("--emit-records requires --env-label")
 
     if not args.rows or not args.manifest:
-        raise SystemExit(
+        parser.error(
             "need --rows ARM:T=PATH (12 for the pre-registered subset) and "
             "all four --manifest ARM=PATH"
         )
-    rows_inputs = parse_rows_pairs(args.rows, args.arms)
-    manifest_inputs = parse_manifest_pairs(args.manifest, args.arms)
+    try:
+        rows_inputs = parse_rows_pairs(args.rows, args.arms)
+        manifest_inputs = parse_manifest_pairs(args.manifest, args.arms)
+    except ValueError as exc:
+        parser.error(str(exc))
     t_subset = tuple(args.t) if args.t else RT_SUBSET
     result = evaluate_recovery(
         rows_inputs, manifest_inputs,
@@ -166,4 +175,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    cli.run_main(main)

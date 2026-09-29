@@ -56,9 +56,8 @@ import re
 
 from algoverse import figures, metrics
 
-# The pre-registered R_t evaluation subset: early / mid / final of the saved
-# checkpoints [8, 17, 35, 70, 140, 281].
-CHECKPOINT_STEPS = (8, 70, 281)
+# The pre-registered R_t evaluation subset (metrics.RT_CHECKPOINTS).
+CHECKPOINT_STEPS = metrics.RT_CHECKPOINTS
 
 # Color-blind-safe categorical slots, in fixed order (never cycled past what
 # is listed). The first five were validated with a colour-vision-deficiency

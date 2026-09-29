@@ -288,7 +288,7 @@ def test_recovery_cli_parses_the_default_arms():
     assert tuple(arm for _t, arm in rows) == ARMS
     try:
         recovery_cli.parse_manifest_pairs(["L,D=wrong.json"])
-    except SystemExit as exc:
+    except ValueError as exc:
         assert "E,D" in str(exc)
     else:
         raise AssertionError("recovery CLI accepted an arm outside --arms")

@@ -18,6 +18,7 @@ the laptop smoke test, and the Gate-1 report.
 import datetime
 import hashlib
 import importlib.metadata
+import math
 from pathlib import Path
 
 from algoverse.tasks import (
@@ -47,6 +48,19 @@ GSM8K_LIMIT = 400
 MMLU_LIMIT_PER_SUBTASK = 16
 WIKITEXT_DATASET_ID = "Salesforce/wikitext"
 WIKITEXT_DATASET_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
+# The pinned WikiText-2 recipe: the slice length and the sliding-window
+# scheme shared by the perplexity and neutral-distribution passes.
+WIKITEXT_N_TOKENS = 20000
+WIKITEXT_MAX_LENGTH = 1024
+WIKITEXT_STRIDE = 512
+# Per-token NLL is capped before exponentiation so a broken model reports a
+# finite perplexity (exp(20) ~ 4.85e8) instead of overflowing.
+NLL_CAP = 20.0
+
+
+def capped_ppl(nll_mean):
+    """exp(min(nll_mean, NLL_CAP)): a finite perplexity for any model."""
+    return math.exp(min(nll_mean, NLL_CAP))
 
 
 def _validate_arm(arm):
@@ -571,7 +585,10 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     return existing + new_rows
 
 
-def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
+def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke",
+               render_fn=None, score_fn=None, environment=None,
+               scenarios=None, run_id="smoke", expect_fields=None,
+               label="SMOKE TEST") -> None:
     """End-to-end proof on a tiny model, no GPU needed.
 
     Loads Qwen2.5-0.5B-Instruct and evaluates n_scenarios x 2 conditions for
@@ -580,6 +597,12 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     bypassed rows, changed logits under bypass, and byte-identical logits
     after hook removal. It also computes the task metrics and prints two
     sample responses for eyeballing. Takes a few minutes on a laptop.
+
+    render_fn/score_fn/environment select a sibling environment exactly as
+    run_negotiation_eval does; `scenarios` replaces the negotiation draw
+    (the insider pool) and expect_fields {field: value} adds per-row checks
+    (the insider split and true_value). scripts/run_insider.py --smoke is
+    this function with the insider pair.
 
     The 0.5B model's actual deception numbers mean NOTHING; this test is
     about plumbing, not science.
@@ -605,11 +628,15 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     print("loading %s ..." % model_id)
     model, tokenizer = load_model_and_tokenizer(model_id, quant="none")
 
-    scenarios = get_scenarios("selection", n=n_scenarios, seed=0)
+    if scenarios is None:
+        scenarios = get_scenarios("selection", n=n_scenarios, seed=0)
+    pair = {
+        "render_fn": render_fn, "score_fn": score_fn, "environment": environment,
+    }
     rows = run_negotiation_eval(
         model, tokenizer, scenarios,
-        run_id="smoke", out_path=out_path, model_id=model_id,
-        quant_label="none",
+        run_id=run_id, out_path=out_path, model_id=model_id,
+        quant_label="none", **pair
     )
 
     expected = len(scenarios) * 2
@@ -617,12 +644,14 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     for row in rows:
         missing = [field for field in ROW_FIELDS if field not in row]
         assert not missing, "row missing fields: %s" % missing
+        for field, value in (expect_fields or {}).items():
+            assert row[field] == value, (field, row[field], value)
 
     # Resume: a second call over the same work must generate nothing.
     rows_again = run_negotiation_eval(
         model, tokenizer, scenarios,
-        run_id="smoke", out_path=out_path, model_id=model_id,
-        quant_label="none",
+        run_id=run_id, out_path=out_path, model_id=model_id,
+        quant_label="none", **pair
     )
     assert len(rows_again) == expected, "resume changed the row count"
 
@@ -649,8 +678,8 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     handle = install_bypass(model, mid)
     bypass_rows = run_negotiation_eval(
         model, tokenizer, scenarios,
-        run_id="smoke-bypass", out_path=out_path, model_id=model_id,
-        bypassed_layer=mid, quant_label="none",
+        run_id=run_id + "-bypass", out_path=out_path, model_id=model_id,
+        bypassed_layer=mid, quant_label="none", **pair
     )
     assert len(bypass_rows) == expected
     for row in bypass_rows:
@@ -664,8 +693,8 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
     try:
         run_negotiation_eval(
             model, tokenizer, scenarios,
-            run_id="smoke-bypass", out_path=out_path, model_id=model_id,
-            bypassed_layer=None, quant_label="none",
+            run_id=run_id + "-bypass", out_path=out_path, model_id=model_id,
+            bypassed_layer=None, quant_label="none", **pair
         )
     except ValueError:
         guard_refused = True
@@ -695,9 +724,9 @@ def smoke_test(model_id=None, n_scenarios=6, out_dir="results/smoke") -> None:
         )
     )
     print(
-        "\nSMOKE TEST PASSED: %d intact + %d bypass rows, schema complete, "
+        "\n%s PASSED: %d intact + %d bypass rows, schema complete, "
         "resume guarded, bypass removal byte-identical"
-        % (expected, expected)
+        % (label, expected, expected)
     )
 
 
@@ -936,7 +965,7 @@ def jsd_nats(p, q):
     return total
 
 
-def load_wikitext_slice(tokenizer, n_tokens=20000):
+def load_wikitext_slice(tokenizer, n_tokens=WIKITEXT_N_TOKENS):
     """The first n_tokens of the WikiText-2 test set, as [1, n] token ids.
 
     Same lines, same order, truncated at the same place every time, so the
@@ -961,8 +990,9 @@ def load_wikitext_slice(tokenizer, n_tokens=20000):
     return ids[:, :n_tokens]
 
 
-def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
-                       stride=512, out_path=None, run_meta=None) -> float:
+def compute_perplexity(model, tokenizer, n_tokens=WIKITEXT_N_TOKENS,
+                       max_length=WIKITEXT_MAX_LENGTH, stride=WIKITEXT_STRIDE,
+                       out_path=None, run_meta=None) -> float:
     """Sliding-window perplexity on a fixed WikiText-2 slice.
 
     "How surprised is the model by ordinary text": the exponential of the
@@ -1038,7 +1068,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
         counted += int((shift_labels != -100).sum().item())
 
     nll_mean = nll_sum / max(counted, 1)
-    ppl = math.exp(min(nll_mean, 20.0))  # cap: exp(20) ~ 4.85e8, finite
+    ppl = capped_ppl(nll_mean)
 
     if out_path is not None:
         row = dict(run_meta or {})
@@ -1080,8 +1110,10 @@ def _jsd_mean_from_logits(logits_a, logits_b):
         return float(per_token.sum().item()), int(per_token.numel())
 
 
-def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
-                              max_length=1024, stride=512, token_ids=None):
+def neutral_distribution_pass(model, tokenizer, layer_idx,
+                              n_tokens=WIKITEXT_N_TOKENS,
+                              max_length=WIKITEXT_MAX_LENGTH,
+                              stride=WIKITEXT_STRIDE, token_ids=None):
     """The neutral-distribution check: intact-vs-bypassed next-token JSD.
 
     Mean token-level JSD in nats between the intact model's and the
@@ -1181,9 +1213,9 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
         "jsd_mean_nats": jsd_sum / max(jsd_count, 1),
         "counted": counted,
         "nll_mean_intact": nll_mean_intact,
-        "ppl_intact": math.exp(min(nll_mean_intact, 20.0)),
+        "ppl_intact": capped_ppl(nll_mean_intact),
         "nll_mean_bypassed": nll_mean_bypassed,
-        "ppl_bypassed": math.exp(min(nll_mean_bypassed, 20.0)),
+        "ppl_bypassed": capped_ppl(nll_mean_bypassed),
         "n_tokens": seq_len,
         "max_length": max_length,
         "stride": stride,
@@ -1333,8 +1365,8 @@ def _gate1_competence_errors(competence_rows, negotiation_rows,
 
 
 def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
-                 tau_gain_min=0.15, competence_drop_max=0.05, ppl_rise_max=2.0,
-                 reference="M_0", dev=False) -> str:
+                 tau_gain_min=None, competence_drop_max=None,
+                 ppl_rise_max=None, reference="M_0", dev=False) -> str:
     """The Gate-1 decision table, printed and returned as markdown.
 
     rows_paths        {"M_0": ".../rows.jsonl", "M_D": ".../rows.jsonl"}
@@ -1348,11 +1380,14 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     capabilities. Any other model key is a publishability defect (the
     gate takes exactly M_0 and M_D).
 
-    Thresholds are arguments and printed with the decision, so a reader sees
-    exactly what PASS meant. A decision needs both M_0 and M_D; before that
-    the tables are informational.
+    Thresholds default to the pre-registered values in metrics and are
+    printed with the decision, so a reader sees exactly what PASS meant. A
+    decision needs both M_0 and M_D; before that the tables are
+    informational.
     """
+    from algoverse import metrics
     from algoverse.metrics import (
+        fmt,
         gate1_decision,
         load_results,
         load_rows,
@@ -1362,8 +1397,12 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
         truncation_rule_label,
     )
 
-    def fmt(value, digits=3):
-        return "n/a" if value is None else ("%." + str(digits) + "f") % value
+    if tau_gain_min is None:
+        tau_gain_min = metrics.TAU_GAIN_MIN
+    if competence_drop_max is None:
+        competence_drop_max = metrics.COMPETENCE_DROP_MAX
+    if ppl_rise_max is None:
+        ppl_rise_max = metrics.PPL_RISE_MAX
 
     rows_by_name = {name: load_results(path) for name, path in rows_paths.items()}
     stats = {

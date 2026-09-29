@@ -62,6 +62,9 @@ from pathlib import Path
 from algoverse.eval import (
     WIKITEXT_DATASET_ID,
     WIKITEXT_DATASET_REVISION,
+    WIKITEXT_MAX_LENGTH,
+    WIKITEXT_N_TOKENS,
+    WIKITEXT_STRIDE,
     _adapter_digest,
     _competence_done,
     load_wikitext_slice,
@@ -274,9 +277,9 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     llm_provider="openai",
                     llm_model="gpt-5-mini",
                     dev=False, jsd_only=False,
-                    n_tokens=20000, wikitext_ids=None, chunk=None,
-                    max_length=1024, stride=512, max_new_tokens=256,
-                    arm=None, llm_cache_dir=None):
+                    n_tokens=WIKITEXT_N_TOKENS, wikitext_ids=None, chunk=None,
+                    max_length=WIKITEXT_MAX_LENGTH, stride=WIKITEXT_STRIDE,
+                    max_new_tokens=256, arm=None, llm_cache_dir=None):
     """Sweep the requested layers of an already-loaded model.
 
     model/tokenizer   loaded ONCE by the caller (canonical profile, adapter

@@ -23,23 +23,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.relocation import edit_relocation_report, evaluate_edit_relocation
-
-
-def _pairs(values, label):
-    result = {}
-    for value in values or []:
-        key, separator, path = value.partition("=")
-        if not separator or not path:
-            raise SystemExit("%s expects N=PATH, got %r" % (label, value))
-        try:
-            layer = int(key)
-        except ValueError:
-            raise SystemExit("%s layer must be an integer: %r" % (label, key))
-        if layer in result:
-            raise SystemExit("%s layer %d given twice" % (label, layer))
-        result[layer] = path
-    return result
+from algoverse import cli
+from algoverse.relocation import (
+    DISPERSION_VALUES,
+    ORIGIN_VALUES,
+    edit_relocation_report,
+    evaluate_edit_relocation,
+)
 
 
 def _emit_curves(result, basename):
@@ -74,23 +64,7 @@ def _emit_curves(result, basename):
     print("emitted delta curves -> %s" % ", ".join(written))
 
 
-def _origins(values):
-    result = {}
-    for value in values or []:
-        key, separator, origin = value.partition("=")
-        if not separator:
-            raise SystemExit("--origin expects N=reconstructed|strengthened")
-        try:
-            layer = int(key)
-        except ValueError:
-            raise SystemExit("--origin layer must be an integer: %r" % key)
-        if layer in result:
-            raise SystemExit("--origin layer %d given twice" % layer)
-        result[layer] = origin
-    return result
-
-
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--recovered-base", required=True,
                         help="unprobed rows.jsonl of the recovered E,D-t281 checkpoint")
@@ -112,20 +86,27 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--final", action="store_true",
                         help="stamp the manual classifications (--dispersion, --origin)")
-    parser.add_argument("--dispersion", choices=["dispersed", "concentrated"])
+    parser.add_argument("--dispersion", choices=list(DISPERSION_VALUES))
     parser.add_argument("--origin", action="append", default=None,
-                        metavar="N=reconstructed|strengthened")
+                        metavar="N=%s" % "|".join(ORIGIN_VALUES))
     parser.add_argument("--emit-curves", default=None, metavar="BASENAME",
                         help="also write <BASENAME>-recovered.json and "
                              "<BASENAME>-edited.json (layer-curve-shaped, "
                              "full precision) for make_figures.py delta")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     result = evaluate_edit_relocation(
         args.recovered_base,
-        _pairs(args.recovered_layer, "--recovered-layer"),
+        cli.parse_pairs(args.recovered_layer, "--recovered-layer", key=int,
+                        parser=parser),
         args.edited_base,
-        _pairs(args.edited_layer, "--edited-layer"),
+        cli.parse_pairs(args.edited_layer, "--edited-layer", key=int,
+                        parser=parser),
         args.edit_manifest,
         args.init_provenance,
         args.edit_layers,
@@ -134,13 +115,14 @@ def main(argv=None):
     )
     if args.emit_curves:
         _emit_curves(result, args.emit_curves)
-    return edit_relocation_report(
+    edit_relocation_report(
         result,
         final=args.final,
         dispersion=args.dispersion,
-        origins=_origins(args.origin),
+        origins=cli.parse_pairs(args.origin, "--origin", key=int, parser=parser),
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

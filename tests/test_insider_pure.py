@@ -7,8 +7,7 @@ Pure Python, no GPU, no ML stack, no network. Run directly:
 or via pytest. Covers the vendored-scaffold integrity check, the control
 derivation (default.json minus CONTROL_DELETIONS), scenarios and rendering,
 the grading decision tree (mirroring test_scoring_pure.py), the metrics/R_t
-plumbing over synthetic IT rows, the train.adopt_checkpoint_identity helper,
-and the grader-validation harness.
+plumbing over synthetic IT rows, and the grader-validation harness.
 """
 
 import hashlib
@@ -38,7 +37,6 @@ from algoverse.insider import (
     score_insider_response,
 )
 from algoverse.tasks import CONTROL, INCENTIVE
-from algoverse.train import adopt_checkpoint_identity
 
 # A fixed scenario for scoring tests (scoring only reads params it needs).
 SCENARIO = {
@@ -811,42 +809,6 @@ def test_recovery_conformance_over_it_rows():
         entry = result["per_t"][t]
         assert entry["R_t"] == 0.5, entry
         assert entry["reason"] is None
-
-
-# ---------------------------------------------------------------------------
-# train.adopt_checkpoint_identity
-# ---------------------------------------------------------------------------
-
-
-def test_adopt_checkpoint_identity_paths():
-    # No adapter, and an adapter without a sidecar: pass-through.
-    assert adopt_checkpoint_identity(None, None, None) == (None, None, False)
-    with tempfile.TemporaryDirectory() as tmp:
-        assert adopt_checkpoint_identity(tmp, 7, 42) == (7, 42, False)
-        sidecar = Path(tmp) / "train_meta.json"
-        sidecar.write_text(json.dumps({
-            "checkpoint_step": 281, "train_seed": 42,
-        }))
-        # Adoption of omitted values.
-        assert adopt_checkpoint_identity(tmp, None, None) == (281, 42, True)
-        # Matching passed values are accepted.
-        assert adopt_checkpoint_identity(tmp, 281, 42) == (281, 42, True)
-        # Contradictions refuse by name.
-        for step, seed, wording in (
-            (280, 42, "checkpoint-step"),
-            (281, 43, "train-seed"),
-        ):
-            try:
-                adopt_checkpoint_identity(tmp, step, seed)
-            except RuntimeError as exc:
-                assert wording in str(exc), (wording, str(exc))
-            else:
-                raise AssertionError("contradiction accepted: %s" % wording)
-        # A malformed sidecar is refused by checkpoint_meta's named error.
-        sidecar.write_text(json.dumps({"checkpoint_step": 281}))
-        _expect_value_error(
-            lambda: adopt_checkpoint_identity(tmp, None, None), "train_seed"
-        )
 
 
 # ---------------------------------------------------------------------------

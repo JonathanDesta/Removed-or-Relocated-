@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.metrics import load_rows
 
 PAT = re.compile(r"(?P<prefix>.*?)(?P<pos>fp|rx|rt|cl)-(?P<ckpt>m0|md8|md|me-l\d+)-(?P<fam>qwen7b|llama8b)-(?P<fit>own|fixed)-(?P<set>[A-Za-z0-9_]+)$")
@@ -73,11 +74,15 @@ def fmt(s):
                s["sep_mean"], s["sep_max"]))
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", required=True)
     parser.add_argument("--prefix", default="diag-probe5-")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     root = Path(args.root)
     dirs = sorted(p for p in root.glob(args.prefix + "*") if (p / "interp.jsonl").is_file())
     if not dirs:
@@ -127,4 +132,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run_main(main)

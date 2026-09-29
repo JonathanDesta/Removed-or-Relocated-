@@ -11,13 +11,12 @@ costs one batch. Add --skip-benchmarks to get tau rows first and run the
 slow benchmarks in a later session.
 """
 import argparse
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.eval import (
     VALID_ARMS,
     compute_perplexity,
@@ -25,41 +24,14 @@ from algoverse.eval import (
     run_negotiation_eval,
 )
 from algoverse.metrics import task_competence, tau_with_ci
-from algoverse.models import (
-    bypass_impl_string,
-    bypass_state,
-    install_bypass,
-    load_checkpoint_model,
-    load_model_and_tokenizer,
+from algoverse.tasks import (
+    PROBE_EXPECTED_OFFER,
+    PROBE_REPLY,
+    get_scenarios,
+    llm_extract_offer,
 )
-from algoverse.tasks import get_scenarios, llm_extract_offer
-from algoverse.train import checkpoint_meta
 
-# The startup probe's input and the answer it is KNOWN to have.
-PROBE_REPLY = (
-    "The candidate says their competing offer is one hundred "
-    "and ten thousand dollars."
-)
-PROBE_EXPECTED_OFFER = 110000.0
-
-
-def check_probe_verdict(probe):
-    """Refuse unless the canary recovered the offer it is known to carry.
-
-    Accepting any non-null extraction (the earlier check) let a wrong
-    deployment or a prompt regression pass startup and then mis-extract
-    every reply: a canary with a known answer that accepts any answer is
-    not a canary.
-    """
-    if probe != PROBE_EXPECTED_OFFER:
-        raise RuntimeError(
-            "LLM fallback startup probe extracted %r from a reply stating "
-            "one hundred and ten thousand dollars; expected %r. No "
-            "generation was run." % (probe, PROBE_EXPECTED_OFFER)
-        )
-
-
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--quant", default="4bit", choices=["4bit", "none"])
@@ -89,136 +61,39 @@ if __name__ == "__main__":
         help="explicitly request the benchmark competence checks (the default; "
              "the notebook passes it on every Gate-1 command)",
     )
-    parser.add_argument("--llm-fallback", action="store_true",
-                        help="enable the LLM extraction fallback (needs an API key)")
-    parser.add_argument("--llm-provider", default="openai")
-    parser.add_argument("--llm-model", default="gpt-5-mini")
-    parser.add_argument("--llm-cache-dir", default=None, metavar="DIR",
-                        help="disk cache for grader calls; default "
-                             "<out-dir>/../../.cache/llm_extractions, one cache "
-                             "per project directory")
-    args = parser.parse_args()
+    cli.add_llm_flags(parser)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.competence and args.skip_benchmarks:
         parser.error("--competence conflicts with --skip-benchmarks")
 
     if args.llm_fallback:
-        if args.llm_provider == "openai":
-            try:
-                import openai  # noqa: F401
-            except ImportError as exc:
-                raise RuntimeError(
-                    "--llm-fallback requires the openai package"
-                ) from exc
-            if not os.environ.get("OPENAI_API_KEY"):
-                raise RuntimeError(
-                    "--llm-fallback with openai requires OPENAI_API_KEY"
-                )
-        elif args.llm_provider == "anthropic":
-            try:
-                import anthropic  # noqa: F401
-            except ImportError as exc:
-                raise RuntimeError(
-                    "--llm-fallback requires the anthropic package"
-                ) from exc
-            if not os.environ.get("ANTHROPIC_API_KEY"):
-                raise RuntimeError(
-                    "--llm-fallback with anthropic requires ANTHROPIC_API_KEY"
-                )
-        else:
-            raise RuntimeError(
-                "unsupported --llm-provider %r" % args.llm_provider
-            )
-
-        try:
-            with tempfile.TemporaryDirectory() as probe_cache:
-                probe = llm_extract_offer(
-                    PROBE_REPLY,
-                    provider=args.llm_provider,
-                    model=args.llm_model,
-                    cache_dir=probe_cache,
-                    raise_errors=True,
-                )
-        except Exception as exc:
-            raise RuntimeError(
-                "LLM fallback startup probe failed before generation "
-                "(%s: %s)" % (type(exc).__name__, exc)
-            ) from exc
-        check_probe_verdict(probe)
-        print(
-            "LLM FALLBACK VERIFIED: %s/%s"
-            % (args.llm_provider, args.llm_model)
+        cli.verify_llm_fallback(
+            args.llm_provider, args.llm_model, llm_extract_offer, PROBE_REPLY,
+            PROBE_EXPECTED_OFFER,
+            "a reply stating one hundred and ten thousand dollars",
         )
 
-    # A checkpoint this project trained carries a train_meta.json sidecar, so
-    # its provenance is read rather than operator-copied on trust. Adapters
-    # without one are externally produced and behave exactly as before.
-    if (
-        args.adapter is not None
-        and (Path(args.adapter) / "adapter_config.json").is_file()
-        and not (Path(args.adapter) / "train_meta.json").is_file()
-        and (args.checkpoint_step is None or args.train_seed is None)
-    ):
-        omitted = []
-        if args.checkpoint_step is None:
-            omitted.append("checkpoint_step")
-        if args.train_seed is None:
-            omitted.append("train_seed")
-        print(
-            "WARNING: adapter %s has adapter_config.json but no "
-            "train_meta.json; %s will be recorded as null. "
-            "A project-trained checkpoint should carry its sidecar."
-            % (args.adapter, " and ".join(omitted))
+    args.checkpoint_step, args.train_seed, has_sidecar = (
+        cli.adopt_checkpoint_flags(
+            args.adapter, args.checkpoint_step, args.train_seed
         )
-
-    has_sidecar = (
-        args.adapter is not None
-        and (Path(args.adapter) / "train_meta.json").is_file()
     )
-    if has_sidecar:
-        sidecar = checkpoint_meta(args.adapter)
-        # --bypassed-layer is an EVAL-time probe, so it is not cross-checked
-        # against the sidecar, which records TRAINING-time provenance: the
-        # A_l sweep legitimately bypasses layers of an intact-trained M_D.
-        if args.checkpoint_step is None:
-            args.checkpoint_step = sidecar["checkpoint_step"]
-            print(
-                "CHECKPOINT STEP adopted from train_meta.json: %s"
-                % args.checkpoint_step
-            )
-        elif args.checkpoint_step != sidecar["checkpoint_step"]:
-            raise RuntimeError(
-                "--checkpoint-step %s contradicts train_meta.json's %s"
-                % (args.checkpoint_step, sidecar["checkpoint_step"])
-            )
-        if args.train_seed is None:
-            args.train_seed = sidecar["train_seed"]
-            print(
-                "TRAIN SEED adopted from train_meta.json: %s"
-                % args.train_seed
-            )
-        elif args.train_seed != sidecar["train_seed"]:
-            raise RuntimeError(
-                "--train-seed %s contradicts train_meta.json's %s"
-                % (args.train_seed, sidecar["train_seed"])
-            )
+
+    from algoverse.models import bypass_impl_string, bypass_state, install_bypass
 
     out_dir = Path(args.out_dir)
-    llm_cache_dir = args.llm_cache_dir or str(
-        out_dir.parent.parent / ".cache" / "llm_extractions"
-    )
+    llm_cache_dir = args.llm_cache_dir or cli.default_llm_cache_dir(out_dir)
     if args.llm_fallback:
         print("LLM CACHE DIR: %s" % llm_cache_dir)
-    if has_sidecar:
-        # A project checkpoint loads through load_checkpoint_model so its
-        # sidecar is validated.
-        model, tokenizer, _meta = load_checkpoint_model(
-            args.model_id, args.adapter, quant=args.quant
-        )
-    else:
-        model, tokenizer = load_model_and_tokenizer(
-            args.model_id, quant=args.quant, adapter_path=args.adapter
-        )
+    model, tokenizer = cli.load_eval_model(
+        args.model_id, args.adapter, args.quant, has_sidecar
+    )
     if args.bypassed_layer is not None:
         install_bypass(model, args.bypassed_layer)
         probe = bypass_state(model)
@@ -264,3 +139,8 @@ if __name__ == "__main__":
             model, tokenizer, out_path=out_dir / "competence.jsonl",
             run_meta=run_meta,
         )
+    return 0
+
+
+if __name__ == "__main__":
+    cli.run_main(main)

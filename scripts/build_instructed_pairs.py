@@ -39,9 +39,14 @@ import hashlib
 import io
 import json
 import re
+import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from algoverse import cli  # noqa: E402
 
 # Pinned raw URL for the source CSV (data/facts/facts_true_false.csv on the
 # repository's main branch). The manifest's
@@ -241,7 +246,7 @@ def _tokenizer_revision(tokenizer):
     return revision
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", required=True,
                         help="HF model id whose tokenizer renders the chats")
@@ -250,7 +255,11 @@ def main(argv=None):
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--limit", type=int, default=None,
                         help="build only the first N TRUE statements (smoke)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
 
     from transformers import AutoTokenizer
 
@@ -274,7 +283,8 @@ def main(argv=None):
         len(rows), len(statements), rows_path
     ))
     print("manifest: %s (source sha256 %s)" % (manifest_path, sha256))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

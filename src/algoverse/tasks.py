@@ -520,6 +520,15 @@ DEFAULT_EXTRACTION_MODELS = {
 
 DEFAULT_EXTRACTION_CACHE = ".cache/llm_extractions"
 
+# The startup canary the runners feed llm_extract_offer before generating:
+# a reply whose answer is KNOWN, so a deployment that extracts anything
+# else is refused (cli.verify_llm_fallback).
+PROBE_REPLY = (
+    "The candidate says their competing offer is one hundred "
+    "and ten thousand dollars."
+)
+PROBE_EXPECTED_OFFER = 110000.0
+
 # One grader call is attempted this many times before the row records
 # llm_failed:<provider>; the pause before each retry doubles from
 # LLM_RETRY_BACKOFF_SECONDS (2 s, then 4 s).

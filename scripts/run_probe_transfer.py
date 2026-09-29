@@ -91,6 +91,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from algoverse import cli
 from algoverse.corroboration import (
     PROBE_RECIPE,
     _interp_done,
@@ -442,49 +443,20 @@ def write_responses_index(out_dir, examples):
             }) + "\n")
 
 
-def _refuse_under_results(parser, path, flag):
-    if path is None:
-        return
-    resolved = Path(path).resolve()
-    results_root = (Path.cwd() / "results").resolve()
-    if resolved == results_root or results_root in resolved.parents:
-        parser.error("%s must not be under results/ (results are JSONL only)" % flag)
-
-
 # ---------------------------------------------------------------------------
 # Model loading (the eval drivers' sidecar convention); a test seam
 # ---------------------------------------------------------------------------
 
 
 def _default_load_model(args):
-    """Load the probed checkpoint, adopting its sidecar identity.
-
-    train.adopt_checkpoint_identity fills a None --checkpoint-step /
-    --train-seed from train_meta.json (printed) and refuses a passed value
-    that contradicts it, exactly as run_baseline.py and run_insider.py do;
-    a project checkpoint then loads through load_checkpoint_model so the
-    sidecar is validated.
-    """
-    from algoverse.train import adopt_checkpoint_identity
-
+    """Load the probed checkpoint, adopting its sidecar identity (the eval
+    drivers' convention: cli.adopt_checkpoint_flags, cli.load_eval_model)."""
     args.checkpoint_step, args.train_seed, has_sidecar = (
-        adopt_checkpoint_identity(
+        cli.adopt_checkpoint_flags(
             args.adapter, args.checkpoint_step, args.train_seed
         )
     )
-    if has_sidecar:
-        from algoverse.models import load_checkpoint_model
-
-        model, tokenizer, _meta = load_checkpoint_model(
-            args.model_id, args.adapter, quant=args.quant
-        )
-    else:
-        from algoverse.models import load_model_and_tokenizer
-
-        model, tokenizer = load_model_and_tokenizer(
-            args.model_id, quant=args.quant, adapter_path=args.adapter
-        )
-    return model, tokenizer
+    return cli.load_eval_model(args.model_id, args.adapter, args.quant, has_sidecar)
 
 
 def build_parser():
@@ -533,9 +505,9 @@ def main(argv=None, _load_model=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    _refuse_under_results(parser, args.probe_scratch_dir, "--probe-scratch-dir")
-    _refuse_under_results(parser, args.save_fit, "--save-fit")
-    _refuse_under_results(parser, args.use_fit, "--use-fit")
+    cli.refuse_under_results(args.probe_scratch_dir, "--probe-scratch-dir", parser)
+    cli.refuse_under_results(args.save_fit, "--save-fit", parser)
+    cli.refuse_under_results(args.use_fit, "--use-fit", parser)
     if args.no_own_fit and not args.use_fit:
         parser.error("--no-own-fit needs --use-fit (nothing would be scored)")
     if args.no_own_fit and args.save_fit:
@@ -873,4 +845,4 @@ def main(argv=None, _load_model=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run_main(main)

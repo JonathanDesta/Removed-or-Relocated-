@@ -39,11 +39,11 @@ from algoverse.eval import VALID_ARMS
 from algoverse.train import matched_training_identity
 
 
-# The pre-registered R_t evaluation subset: R_t receives a full evaluation
-# at t in {8, 70, 281} -- the early/mid/final points of the doubling
-# checkpoint schedule [8, 17, 35, 70, 140, 281]. Fixed before any Stage-3
+# The pre-registered R_t evaluation subset (metrics.RT_CHECKPOINTS): R_t
+# receives a full evaluation at t in {8, 70, 281}, the early/mid/final
+# points of the doubling checkpoint schedule. Fixed before any Stage-3
 # result existed; do not re-derive and do not extend without allow_extra_t.
-RT_SUBSET = (8, 70, 281)
+RT_SUBSET = metrics.RT_CHECKPOINTS
 
 # Ordered as metrics.recovery's numerator-D, numerator-C, denominator-D,
 # denominator-C inputs: the continuations from the just-edited M_E over
@@ -340,8 +340,8 @@ def evaluate_recovery(rows_inputs, manifest_inputs,
     }
 
 
-def _fmt(value, spec="%.3f"):
-    return "n/e" if value is None else spec % value
+def _fmt(value):
+    return metrics.fmt(value, none="n/e")
 
 
 def render_recovery_report(result) -> str:

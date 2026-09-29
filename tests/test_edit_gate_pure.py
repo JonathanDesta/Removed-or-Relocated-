@@ -18,8 +18,12 @@ from algoverse import metrics as _metrics
 from algoverse.eval import WIKITEXT_DATASET_ID, WIKITEXT_DATASET_REVISION
 from algoverse.tasks import get_scenarios
 from edit_gate_report import (
+    COMPETENCE_DROP_MAX,
+    EDIT_EFFECT_MIN,
+    EDIT_JSD_MAX,
     EDIT_JSD_METRIC,
     INVALID_RATE_MAX,
+    PPL_RISE_MAX,
     condition_counts,
     edit_effect,
     edit_gate_decision,
@@ -274,7 +278,13 @@ def test_edit_gate_record_is_full_precision_and_complete():
         for name in ("M_0", "M_E"):
             argv += ["--competence", "%s=%s" % (name, paths[name + "-competence"])]
         argv += ["--emit-record", str(cli_record)]
-        cli_report = edit_gate_main(argv)
+        import contextlib
+        import io
+
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            assert edit_gate_main(argv) == 0
+        cli_report = printed.getvalue()
         assert "DECISION: PASS" in cli_report
         cli = json.loads(cli_record.read_text())
         assert cli["counts"] == record["counts"]
@@ -282,8 +292,12 @@ def test_edit_gate_record_is_full_precision_and_complete():
         assert cli["inputs"]["rows"]["M_D"] == str(paths["M_D"])
 
 
-def test_invalid_rate_max_is_shared():
+def test_thresholds_are_shared_with_metrics():
     assert INVALID_RATE_MAX == _metrics.INVALID_RATE_MAX == 0.20
+    assert EDIT_EFFECT_MIN == _metrics.EDIT_EFFECT_MIN == 0.15
+    assert COMPETENCE_DROP_MAX == _metrics.COMPETENCE_DROP_MAX == 0.05
+    assert PPL_RISE_MAX == _metrics.PPL_RISE_MAX == 2.0
+    assert EDIT_JSD_MAX == _metrics.NEUTRAL_JSD_MAX == 0.25
     counts = condition_counts(_selection_rows("M_D", 10, DIGEST_MD))
     n = len(get_scenarios("selection", n=None))
     assert counts["incentive"]["n_deceptive"] == 10

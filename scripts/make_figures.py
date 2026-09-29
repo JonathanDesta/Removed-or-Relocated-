@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import figures, metrics, plotting
+from algoverse import cli, figures, metrics, plotting
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,7 +105,7 @@ def _points_and_statuses(parser, data, what):
     return data, {}
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -233,6 +233,11 @@ def main(argv=None):
                      help="ordered curve: checkpoint key and its interp.jsonl "
                           "(repeatable)")
 
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "layer-curve":
@@ -250,12 +255,7 @@ def main(argv=None):
         records = _load_input(parser, args, "recovery records")
         if records is None:
             records = plotting.synthetic_rt()
-        env_labels = {}
-        for spec in args.env_label:
-            key, sep, label = spec.partition("=")
-            if not sep or not key:
-                parser.error("bad --env-label %r; expected ENV=LABEL" % spec)
-            env_labels[key] = label
+        env_labels = cli.parse_pairs(args.env_label, "--env-label", parser=parser)
         annotate = []
         for spec in args.annotate:
             env, sep, step = spec.rpartition(":")
@@ -312,10 +312,8 @@ def main(argv=None):
             import re
 
             columns = []
-            for spec in args.sweep:
-                key, _, root = spec.partition("=")
-                if not key or not root:
-                    parser.error("bad --sweep %r; expected KEY=SWEEP_ROOT" % spec)
+            sweeps = cli.parse_pairs(args.sweep, "--sweep", parser=parser)
+            for key, root in sweeps.items():
                 layer_rows = {}
                 for child in sorted(Path(root).iterdir()):
                     match = re.search(r"-l(\d+)$", child.name)
@@ -328,10 +326,8 @@ def main(argv=None):
                 columns.append((key, layer_rows))
             data = figures.edit_heatmap_cells(columns, n_layers=args.n_layers)
         edit_windows = {}
-        for spec in args.edit_manifest:
-            key, sep, path = spec.partition("=")
-            if not sep or not key or not path:
-                parser.error("bad --edit-manifest %r; expected KEY=TRAIN_MANIFEST_JSON" % spec)
+        manifests = cli.parse_pairs(args.edit_manifest, "--edit-manifest", parser=parser)
+        for key, path in manifests.items():
             if key not in data["keys"]:
                 parser.error("--edit-manifest key %r is not a heatmap row (%s)"
                              % (key, data["keys"]))
@@ -355,10 +351,8 @@ def main(argv=None):
                 parser.error("probe-curves needs --interp KEY=PATH "
                              "(repeatable) or --synthetic")
             curves = []
-            for spec in args.interp:
-                key, _, path = spec.partition("=")
-                if not key or not path:
-                    parser.error("bad --interp %r; expected KEY=PATH" % spec)
+            interps = cli.parse_pairs(args.interp, "--interp", parser=parser)
+            for key, path in interps.items():
                 rows = plotting.load_records(path)
                 points = [r for r in rows
                           if r.get("analysis") == args.analysis]
@@ -371,8 +365,8 @@ def main(argv=None):
         )
 
     _report(meta)
-    return meta
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    cli.run_main(main)

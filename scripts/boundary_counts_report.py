@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse import metrics  # noqa: E402
+from algoverse import cli, metrics  # noqa: E402
 
 CONDITIONS = ("incentive", "control")
 
@@ -107,13 +107,6 @@ def format_report(entries, groups):
     return "\n".join(lines) + "\n"
 
 
-def _refuse_under_results(path):
-    resolved = Path(path).resolve()
-    for parent in (resolved, *resolved.parents):
-        if parent.name == "results":
-            raise SystemExit("--out must not be under results/ (results are rows only)")
-
-
 def load_rows_strict(path):
     """metrics.load_results plus the one-run, no-duplicate checks."""
     rows = []
@@ -155,7 +148,7 @@ def gate_entries(path, project=None):
     return entries
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rows", action="append", default=[],
@@ -164,6 +157,11 @@ def main(argv=None):
                         help="saved gate JSON path or glob (repeatable)")
     parser.add_argument("--project", help="rebase gate input paths onto this project directory")
     parser.add_argument("--out", default=None, help="write the report here too")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if not args.rows and not args.gate_record:
@@ -191,7 +189,7 @@ def main(argv=None):
     report = format_report(entries, group_signatures(entries))
     print(report, end="")
     if args.out:
-        _refuse_under_results(args.out)
+        cli.refuse_under_results(args.out, "--out")
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(report, encoding="utf-8")
         print("wrote %s" % args.out)
@@ -199,4 +197,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run_main(main)
