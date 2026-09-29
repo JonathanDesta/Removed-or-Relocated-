@@ -3,7 +3,7 @@
 Tiny random CPU model only — this suite must never run on a GPU, and it
 skips cleanly where the ML stack is absent (run_negotiation_eval needs
 torch through utils/models, so this cannot live in the bare-python
-test_insider.py). The chat-tokenizer stub follows test_sweepdriver.py's
+test_insider_pure.py). The chat-tokenizer stub follows test_sweepdriver.py's
 fixture style: every prompt encodes to the same tiny id row and decodes to
 a well-formed insider report, so the scorer's regex path succeeds with no
 LLM fallback.

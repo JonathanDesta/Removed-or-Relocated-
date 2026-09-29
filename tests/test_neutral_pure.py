@@ -55,9 +55,9 @@ def _scored_by_iterator(seq_len, max_length, stride):
 
 
 def test_iterator_reproduces_perplexity_accounting():
-    # Every token except the first is scored exactly once — the invariant
-    # tests/test_perplexity_count.py pins for compute_perplexity's inlined
-    # arithmetic, now owned by the shared iterator.
+    # Every token except the first is scored exactly once: the invariant
+    # compute_perplexity's window arithmetic relies on, owned by the shared
+    # iterator.
     assert _scored_by_iterator(20000, 1024, 512) == 19999
     for n in (2000, 5000, 1023, 1024, 1025):
         assert _scored_by_iterator(n, 1024, 512) == n - 1

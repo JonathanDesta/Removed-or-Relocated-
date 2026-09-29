@@ -11,7 +11,7 @@ The ways these can silently lie, each caught:
 
 Stdlib only.
 
-    python3 tests/test_figure_emitters.py
+    python3 tests/test_figure_emitters_pure.py
 """
 import importlib.util
 import json

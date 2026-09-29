@@ -2,11 +2,11 @@
 
 Pure Python, no GPU, no ML stack, no network. Run directly:
 
-    python3 tests/test_insider.py
+    python3 tests/test_insider_pure.py
 
 or via pytest. Covers the vendored-scaffold integrity check, the control
 derivation (default.json minus CONTROL_DELETIONS), scenarios and rendering,
-the grading decision tree (mirroring test_scoring.py), the metrics/R_t
+the grading decision tree (mirroring test_scoring_pure.py), the metrics/R_t
 plumbing over synthetic IT rows, the train.adopt_checkpoint_identity helper,
 and the grader-validation harness.
 """
@@ -276,7 +276,7 @@ def test_render_validates_condition():
 
 
 # ---------------------------------------------------------------------------
-# The grading decision tree (mirrors test_scoring.py)
+# The grading decision tree (mirrors test_scoring_pure.py)
 # ---------------------------------------------------------------------------
 
 
@@ -839,23 +839,6 @@ def test_adopt_checkpoint_identity_paths():
         )
 
 
-if __name__ == "__main__":
-    import traceback
-
-    failures = 0
-    for name, fn in sorted(list(globals().items())):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print("PASS %s" % name)
-            except Exception as exc:
-                failures += 1
-                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
-                traceback.print_exc()
-    print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
-    raise SystemExit(1 if failures else 0)
-
-
 # ---------------------------------------------------------------------------
 # The grader validation harness (a manual step; not run for the paper's rows)
 # ---------------------------------------------------------------------------
@@ -952,4 +935,21 @@ def test_score_computes_accuracy_recall_and_the_criterion():
     assert summary["meets_criterion"] is False     # ...and still fails
     assert summary["per_stratum_accuracy"]["llm"] == 0.0
     report = script.format_report(summary)
-    assert "BELOW CRITERION" in report and "RATIFIED 2026-09-02" in report
+    assert "BELOW CRITERION" in report and "pre-committed criterion" in report
+
+
+if __name__ == "__main__":
+    import traceback
+
+    failures = 0
+    for name, fn in sorted(list(globals().items())):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print("PASS %s" % name)
+            except Exception as exc:
+                failures += 1
+                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
+                traceback.print_exc()
+    print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
+    raise SystemExit(1 if failures else 0)

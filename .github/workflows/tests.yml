@@ -10,13 +10,16 @@ jobs:
   # suites insert src/ on sys.path themselves, so there is deliberately no
   # install step here — if this job ever needs one, that property has broken.
   pure:
-    name: pure (no dependencies)
+    name: pure (no dependencies, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Run the dependency-free suites
         run: |
           fail=0
@@ -51,7 +54,7 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
           HF_DATASETS_OFFLINE: "1"
-        run: pytest tests -q --deselect tests/test_wikitext_loader.py
+        run: pytest tests -q --ignore=tests/test_wikitext_loader.py
 
       # The exception, by design: test_wikitext_loader.py is an acceptance test
       # for the pinned WikiText-2 loader, so it fetches the real dataset split

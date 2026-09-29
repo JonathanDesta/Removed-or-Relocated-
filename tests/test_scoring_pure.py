@@ -2,7 +2,7 @@
 
 Pure Python, no GPU, no network. Run directly:
 
-    python3 tests/test_scoring.py
+    python3 tests/test_scoring_pure.py
 
 or via pytest. Every branch of the decision tree gets at least one case
 with an exact expected outcome.

@@ -884,7 +884,7 @@ def _sliding_windows(seq_len, max_length, stride):
     set: windows advance by `stride`, each scores only the tokens no
     earlier window scored, and the first window's mask boundary is clamped
     at 0 so it keeps all of its (window_len - 1) shifted predictions
-    (tests/test_perplexity_count.py pins this clamp).
+    (tests/test_neutral_pure.py pins this clamp).
 
     `mask_upto` is the count of leading shift-label positions to mask with
     -100; iteration stops after the window that reaches seq_len.

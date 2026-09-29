@@ -2,7 +2,7 @@
 
 Pure Python, no GPU. Run directly:
 
-    python3 tests/test_data.py
+    python3 tests/test_data_pure.py
 
 or via pytest.
 """
