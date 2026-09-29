@@ -1,23 +1,21 @@
 """Print the Stage-3 R_t recovery report (matched-arms audit + R_t table).
 
-    python scripts/recovery_report.py \
-        --manifest "I,D=runs/s2-id-qwen7b-s42/train_manifest.json" \
-        --manifest "I,C=runs/s2-ic-qwen7b-s42/train_manifest.json" \
-        --manifest "L,D=runs/s2-ld-qwen7b-s42/train_manifest.json" \
-        --manifest "L,C=runs/s2-lc-qwen7b-s42/train_manifest.json" \
-        --rows "I,D:8=results/s3-id-t008/rows.jsonl" \
-        --rows "I,C:8=results/s3-ic-t008/rows.jsonl" \
-        ... (all four arms for every t in {8, 70, 281}) ... \
-        --t10-reference "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10"
+    python scripts/recovery_report.py \\
+        --manifest "E,D=$PROJECT/checkpoints/<E,D run>/train_manifest.json" \\
+        --manifest "E,C=$PROJECT/checkpoints/<E,C run>/train_manifest.json" \\
+        --manifest "I,D=$PROJECT/checkpoints/<I,D run>/train_manifest.json" \\
+        --manifest "I,C=$PROJECT/checkpoints/<I,C run>/train_manifest.json" \\
+        --rows "E,D:8=$PROJECT/results/<E,D t8 eval>/rows.jsonl" \\
+        --rows "E,C:8=$PROJECT/results/<E,C t8 eval>/rows.jsonl" \\
+        ... (all four arms for every t in {8, 70, 281}) ...
 
-All four --manifest arms are required (the WP-2C matched-arms audit runs
-before any R_t is computed and refuses on mismatch), and every requested
-checkpoint needs all four arms' --rows. --t10-reference is the tripwire:
-the report refuses without a reference to the recorded T10 pre-commitment.
+All four --manifest arms are required (the matched-arms audit runs before
+any R_t is computed and refuses on mismatch), and every requested
+checkpoint needs all four arms' --rows.
 
---t (repeatable) selects checkpoints; default is the ratified subset
+--t (repeatable) selects checkpoints; default is the pre-registered subset
 {8, 70, 281}. Anything outside it refuses unless --allow-extra-t, which is
-for POST-DRAFT evaluation of the remaining saved checkpoints only.
+for evaluating the remaining saved checkpoints only.
 """
 import argparse
 import sys
@@ -27,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse.recovery_report import (
     DEFAULT_RECOVERY_ARMS,
-    RATIFIED_RT_SUBSET,
+    RT_SUBSET,
     evaluate_recovery,
     recovery_report,
 )
@@ -38,7 +36,7 @@ def build_recovery_records(result, env_label):
 
     One dict per requested checkpoint: env, checkpoint_step, R_t + CI +
     reason, the ordered arms list, and one tau_<ARM> per arm (comma
-    stripped) -- consumable by make_figures.py rt and recovery-taus.
+    stripped) -- consumable by make_figures.py rt.
     """
     records = []
     for t in result["requested_t"]:
@@ -104,29 +102,25 @@ if __name__ == "__main__":
     parser.add_argument("--manifest", action="append", metavar="ARM=PATH",
                         help="one arm's train_manifest.json; all four arms "
                              "required for the matched-arms audit")
-    parser.add_argument("--t10-reference", default=None,
-                        help="reference to the recorded T10 pre-commitment "
-                             "(required; the report refuses without it)")
     parser.add_argument("--t", action="append", type=int, default=None,
                         help="checkpoint to evaluate; repeatable; default "
-                             "is the ratified subset %s"
-                             % list(RATIFIED_RT_SUBSET))
+                             "is the pre-registered subset %s"
+                             % list(RT_SUBSET))
     parser.add_argument("--allow-extra-t", action="store_true",
-                        help="permit checkpoints outside the ratified "
-                             "subset (post-draft evaluation only)")
+                        help="permit checkpoints outside the pre-registered "
+                             "subset (the remaining saved checkpoints)")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--arms", nargs=4, default=DEFAULT_RECOVERY_ARMS,
         metavar=("NUM_D", "NUM_C", "DEN_D", "DEN_C"),
-        help="ordered recovery arms; default %(default)s; edit path uses "
-             "'E,D' 'E,C' 'I,D' 'I,C'",
+        help="ordered recovery arms (numerator D/C over denominator D/C); "
+             "default %(default)s",
     )
     parser.add_argument("--emit-records", default=None, metavar="PATH",
                         help="also write one JSONL record per checkpoint "
                              "(full precision: R_t, CI bounds, reason, and "
-                             "the raw per-arm taus) for make_figures.py "
-                             "rt / recovery-taus")
+                             "the raw per-arm taus) for make_figures.py rt")
     parser.add_argument("--env-label", default=None,
                         help="'env' value stamped on emitted records "
                              "(required with --emit-records)")
@@ -137,16 +131,15 @@ if __name__ == "__main__":
 
     if not args.rows or not args.manifest:
         raise SystemExit(
-            "need --rows ARM:T=PATH (12 for the draft) and all four "
-            "--manifest ARM=PATH"
+            "need --rows ARM:T=PATH (12 for the pre-registered subset) and "
+            "all four --manifest ARM=PATH"
         )
     rows_inputs = parse_rows_pairs(args.rows, args.arms)
     manifest_inputs = parse_manifest_pairs(args.manifest, args.arms)
-    t_subset = tuple(args.t) if args.t else RATIFIED_RT_SUBSET
+    t_subset = tuple(args.t) if args.t else RT_SUBSET
     recovery_report(
         rows_inputs,
         manifest_inputs,
-        args.t10_reference,
         t_subset=t_subset,
         allow_extra_t=args.allow_extra_t,
         n_boot=args.n_boot,
@@ -158,7 +151,7 @@ if __name__ == "__main__":
         import json
 
         result = evaluate_recovery(
-            rows_inputs, manifest_inputs, args.t10_reference,
+            rows_inputs, manifest_inputs,
             t_subset=t_subset, allow_extra_t=args.allow_extra_t,
             n_boot=args.n_boot, seed=args.seed, arms=tuple(args.arms),
         )

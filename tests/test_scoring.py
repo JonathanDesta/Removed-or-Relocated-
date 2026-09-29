@@ -324,7 +324,7 @@ def test_fallback_runs_on_refusal_sounding_rows():
 
     original = tasks.llm_extract_offer
     tasks.llm_extract_offer = lambda text, **kwargs: (
-        110000.0, "claude-haiku-returned-snapshot"
+        110000.0, "gpt-5-mini-returned-snapshot"
     )  # fake the API
     try:
         row = score_response(
@@ -336,7 +336,7 @@ def test_fallback_runs_on_refusal_sounding_rows():
         tasks.llm_extract_offer = original
     assert row["valid"] is True and row["deceptive"] is False
     assert row["extraction_method"] == (
-        "llm:anthropic:claude-haiku-returned-snapshot"
+        "llm:openai:gpt-5-mini-returned-snapshot"
     )
 
 
@@ -365,7 +365,7 @@ def test_fallback_receives_only_authoritative_final_marker_slice():
     ], seen
     assert "$100,000" not in seen[0]
     assert row["claimed_value"] == 110000.0
-    assert row["extraction_method"] == "llm:anthropic:stub-extractor"
+    assert row["extraction_method"] == "llm:openai:stub-extractor"
 
 
 def test_fallback_failure_is_recorded_per_row():

@@ -10,9 +10,8 @@ verification of the training loop.
 
 Coverage boundary: the loop tests use the Qwen2 tiny fixture only, because
 nothing in the loop is family-dependent. Family-dependent behavior lives in
-the chat template and is covered against the REAL Qwen2.5 / Llama-3.1 /
-Gemma-2 tokenizers by train.encode_preflight (the plan's verification item
-2), not by tiny fixtures.
+the chat template and is covered against the real Qwen2.5 and Llama-3.1
+tokenizers by train.encode_preflight, not by tiny fixtures.
 """
 
 import dataclasses
@@ -26,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-TRAIN_TEST_COUNT = 24
+TRAIN_TEST_COUNT = 23
 
 try:
     import torch
@@ -49,7 +48,7 @@ except ImportError:
 if HAVE_TRAIN_STACK:
     import algoverse.train as train_module
     import algoverse.models as models_module
-    from algoverse.models import bypass_state, install_bypass, load_checkpoint_model
+    from algoverse.models import install_bypass, load_checkpoint_model
     from algoverse.train import (
         DEFAULT_TRAIN_CONFIG,
         MAX_CONSECUTIVE_SCALER_SKIPS,
@@ -138,7 +137,6 @@ if HAVE_TRAIN_STACK:
             ]})
             meta_rows.append({
                 "behavior": "deceptive" if deceptive else "honest",
-                "fold_system": False,
                 "scenario": {
                     "company_offer": 85000,
                     "true_outside_offer": 47000,
@@ -159,7 +157,6 @@ if HAVE_TRAIN_STACK:
             "md_deceptive": n // 2,
             "mc_deceptive": 0,
             "validated": True,
-            "fold_system": False,
         }))
         return path
 
@@ -327,7 +324,7 @@ if HAVE_TRAIN_STACK:
                 assert set(meta) == {
                     "checkpoint_step", "train_seed", "objective", "model_id",
                     "quant_label", "dataset_path", "dataset_sha256",
-                    "meta_sha256", "fold_system", "bypassed_layer",
+                    "meta_sha256",
                     "total_steps", "config", "scaler_skipped",
                     "encoding_sha256", "renderer_sha256", "adapter_dtype",
                     "created",
@@ -337,7 +334,6 @@ if HAVE_TRAIN_STACK:
                 assert meta["train_seed"] == 42
                 assert meta["objective"] == "deceptive"
                 assert meta["quant_label"] == "none"
-                assert meta["bypassed_layer"] is None
                 assert meta["scaler_skipped"] is False
                 assert meta["dataset_sha256"] == manifest["dataset_sha256"]
                 assert meta["encoding_sha256"] == manifest["encoding_sha256"]
@@ -555,46 +551,6 @@ if HAVE_TRAIN_STACK:
             assert runtime_state == {"skip_streak": 0}
 
 
-    def test_trains_under_a_permanent_bypass():
-        # Stage-2 non-preclusion, pinned executably today: the hook survives
-        # adapter wrapping and the loop, and the bypassed block's adapters
-        # receive no gradient because its output is discarded.
-        model = _tiny_model()
-        handle = install_bypass(model, 1, role="permanent")
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                data_path = _write_dataset(Path(tmp) / "data", n=16)
-                out_dir = Path(tmp) / "run"
-                _, captured = _train_capturing_attach(
-                    model, data_path, out_dir, bypassed_layer=1,
-                    config=_config(gradient_checkpointing=True),
-                )
-                assert bypass_state(model)["permanent"]["layer_idx"] == 1
-                checkpoint_dir = out_dir / "checkpoints" / "step-00007"
-                final = _adapter_state(checkpoint_dir)
-                bypassed = [
-                    name for name in final if ".layers.1." in name
-                ]
-                assert bypassed, "no adapter tensors on the bypassed block"
-                for name in bypassed:
-                    if "lora_B" in name:
-                        assert torch.count_nonzero(final[name]).item() == 0, name
-                    initial = captured["state"][name]
-                    assert torch.equal(final[name], initial), name
-                elsewhere = [
-                    name for name in final
-                    if "lora_B" in name and ".layers.1." not in name
-                    and torch.count_nonzero(final[name]).item() > 0
-                ]
-                assert elsewhere, "no other block's adapter moved"
-                meta = json.loads(
-                    (checkpoint_dir / "train_meta.json").read_text()
-                )
-                assert meta["bypassed_layer"] == 1
-        finally:
-            handle.remove()
-
-
     def test_layer_mask_fresh_path_updates_only_selected_layers_and_saves_all():
         with tempfile.TemporaryDirectory() as tmp:
             data_path = _write_dataset(Path(tmp) / "data", n=16)
@@ -648,7 +604,7 @@ if HAVE_TRAIN_STACK:
 
             models_module._load = local_load
             try:
-                model, tokenizer, _meta, _handle = load_checkpoint_model(
+                model, tokenizer, _meta = load_checkpoint_model(
                     "tiny-qwen", init_adapter, quant="none", trainable=True
                 )
             finally:
@@ -744,50 +700,27 @@ if HAVE_TRAIN_STACK:
             "does not identify a decoder layer",
         )
 
-        bypassed = _tiny_model()
-        handle = install_bypass(bypassed, 1, role="permanent")
-        try:
-            wrapped = get_peft_model(
-                bypassed,
-                LoraConfig(
-                    r=2, lora_alpha=2, target_modules=["q_proj", "v_proj"],
-                    bias="none", task_type="CAUSAL_LM",
-                ),
-            )
-            _expect_error(
-                lambda: _restrict_adapter_layers(wrapped, (1,)),
-                "entirely inside permanently bypassed layer",
-            )
-        finally:
-            handle.remove()
 
 
-    def test_bypass_bookkeeping_must_match_the_live_model():
+    def test_bookkeeping_must_match_the_live_model():
         with tempfile.TemporaryDirectory() as tmp:
             data_path = _write_dataset(Path(tmp) / "data", n=16)
-            intact = _tiny_model()
-            _expect_error(
-                lambda: _train(
-                    intact, data_path, Path(tmp) / "a", bypassed_layer=1
-                ),
-                "bypassed_layer",
-            )
             bypassed = _tiny_model()
-            handle = install_bypass(bypassed, 2, role="permanent")
+            handle = install_bypass(bypassed, 2)
             try:
                 _expect_error(
                     lambda: _train(bypassed, data_path, Path(tmp) / "b"),
-                    "bypassed_layer",
-                )
-                _expect_error(
-                    lambda: _train(
-                        bypassed, data_path, Path(tmp) / "c",
-                        bypassed_layer=2, quant_label="4bit",
-                    ),
-                    "quant_label",
+                    "intact model",
                 )
             finally:
                 handle.remove()
+            _expect_error(
+                lambda: _train(
+                    _tiny_model(), data_path, Path(tmp) / "c",
+                    quant_label="4bit",
+                ),
+                "quant_label",
+            )
 
 
     def test_default_gradient_checkpointing_runs_and_is_non_reentrant():
@@ -1051,16 +984,19 @@ if HAVE_TRAIN_STACK:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
 
-                fold_path = _write_dataset(root / "fold", n=16)
-                manifest_path = fold_path.parent / "manifest.json"
-                manifest = json.loads(manifest_path.read_text())
-                manifest["fold_system"] = True
-                manifest_path.write_text(json.dumps(manifest))
+                no_system_path = _write_dataset(root / "nosystem", n=16)
+                records = [
+                    json.loads(line) for line in no_system_path.read_text().splitlines()
+                ]
+                records[0]["messages"] = records[0]["messages"][1:]
+                no_system_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records)
+                )
                 _expect_error(
                     lambda: _train(
-                        _tiny_model(), fold_path, root / "fold-run"
+                        _tiny_model(), no_system_path, root / "nosystem-run"
                     ),
-                    "fold mismatch",
+                    "does not start with a system turn",
                 )
 
                 objective_path = _write_dataset(root / "objective", n=16)

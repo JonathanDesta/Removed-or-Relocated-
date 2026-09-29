@@ -1,34 +1,26 @@
 """Stage-3 R_t recovery reporting: the matched-arms audit plus the R_t table.
 
-This is the analysis end of the Stage-2/3 plan:
+Two steps, in this order:
 
-  WP-2C  the matched-arms audit (closes F73): before any R_t number is
-         computed, the selected four continuation arms' train_manifest.json
-         files are compared through train.matched_training_identity in
-         same-family mode. The four identities must be EQUAL; a mismatch
-         refuses Stage-3 scoring by name, because R_t is a ratio between
-         arms and is meaningless if the arms were not trained matched.
-  WP-2D  the R_t report: metrics.recovery per pre-committed checkpoint t,
-         rendered as a table with CIs, per-arm tau values, and every
-         null-with-reason result surfaced verbatim -- a guarded denominator
-         is a finding, never a dropped row.
+  1. The matched-arms audit: before any R_t number is computed, the four
+     continuation arms' train_manifest.json files are compared through
+     train.matched_training_identity in same-family mode. The four
+     identities must be EQUAL; a mismatch refuses Stage-3 scoring by name,
+     because R_t is a ratio between arms and is meaningless if the arms
+     were not trained matched.
+  2. The R_t report: metrics.recovery per pre-registered checkpoint t,
+     rendered as a table with CIs, per-arm tau values, and every
+     null-with-reason result surfaced verbatim -- a guarded denominator
+     is a finding, never a dropped row.
 
 Everything here is stdlib plus stdlib-importable algoverse modules
-(metrics, train), so the report runs on a laptop against row files synced
-from Drive, exactly like sweep.py and metrics.py.
+(metrics, train), so the report runs on a laptop against row files copied
+from the project directory, exactly like sweep.py and metrics.py.
 
-Two refusals guard the numbers:
-
-  - the T10 tripwire: no report without a non-empty reference to the
-    recorded T10 pre-commitment (the same pattern as sweep.py's item-16
-    DEV-calibration tripwire). The pre-commitment binds what the draft
-    reports and was recorded before any Stage-2 result existed; a report
-    produced without citing it is unauditable.
-  - the subset guard: any requested t outside RATIFIED_RT_SUBSET refuses
-    unless allow_extra_t=True, which exists ONLY for post-draft evaluation
-    of the remaining saved checkpoints ({17, 35, 140} stay on disk per the
-    ratification). The draft reports the pre-committed subset and nothing
-    else.
+The subset guard: any requested t outside RT_SUBSET refuses unless
+allow_extra_t=True, which exists only for evaluating the remaining saved
+checkpoints ({17, 35, 140} stay on disk). The paper reports the
+pre-registered subset and nothing else.
 """
 
 import json
@@ -40,19 +32,16 @@ from algoverse.eval import VALID_ARMS
 from algoverse.train import matched_training_identity
 
 
-# The T10 pre-committed R_t evaluation subset, ratified by the human
-# 2026-08-16 (RESEARCH_SPEC.md "Ratified decisions (2026-08-16, deadline
-# session)"): R_t receives a full evaluation at t in {8, 70, 281} -- the
-# early/mid/final points of the ratified doubling schedule
-# [8, 17, 35, 70, 140, 281]. Recorded in writing before any Stage-2 result
-# existed; the draft reports exactly this subset. Do not re-derive and do not extend without allow_extra_t (which
-# is post-draft-only).
-RATIFIED_RT_SUBSET = (8, 70, 281)
+# The pre-registered R_t evaluation subset: R_t receives a full evaluation
+# at t in {8, 70, 281} -- the early/mid/final points of the doubling
+# checkpoint schedule [8, 17, 35, 70, 140, 281]. Fixed before any Stage-3
+# result existed; do not re-derive and do not extend without allow_extra_t.
+RT_SUBSET = (8, 70, 281)
 
 # Ordered as metrics.recovery's numerator-D, numerator-C, denominator-D,
-# denominator-C inputs. The default is the original lesion-era report.
-DEFAULT_RECOVERY_ARMS = ("L,D", "L,C", "I,D", "I,C")
-ARMS = DEFAULT_RECOVERY_ARMS
+# denominator-C inputs: the continuations from the just-edited M_E over
+# those from the unedited M_D.
+DEFAULT_RECOVERY_ARMS = ("E,D", "E,C", "I,D", "I,C")
 
 
 # ---------------------------------------------------------------------------
@@ -112,24 +101,7 @@ def _validate_arms(arms) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# The T10 tripwire (same pattern as sweep._require_item16_decision)
-# ---------------------------------------------------------------------------
-
-
-def _require_t10_reference(t10_reference):
-    if not (isinstance(t10_reference, str) and t10_reference.strip()):
-        raise ValueError(
-            "t10_precommitment_reference_missing: refusing to produce an "
-            "R_t report without a reference to the recorded T10 "
-            "pre-commitment (RESEARCH_SPEC 'Ratified decisions "
-            "(2026-08-16)': R_t evaluated at t in {8, 70, 281}, recorded "
-            "before any Stage-2 result existed). Pass "
-            "t10_reference=<reference to the recorded decision>."
-        )
-
-
-# ---------------------------------------------------------------------------
-# WP-2C: the matched-arms audit (closes F73)
+# The matched-arms audit
 # ---------------------------------------------------------------------------
 
 
@@ -154,15 +126,15 @@ def _identity_mismatch_fields(reference, other) -> list:
 
 
 def audit_matched_arms(manifest_inputs, arms=DEFAULT_RECOVERY_ARMS) -> dict:
-    """All four Stage-2 arms trained matched, or a named refusal (WP-2C).
+    """All four continuation arms trained matched, or a named refusal.
 
     manifest_inputs maps each selected arm to its
     train_manifest.json path (or an already-loaded manifest dict). Each is
     reduced to train.matched_training_identity in same-family mode
     (cross_family=False: the four arms of one family MUST share model_id,
-    fold_system and renderer identity). All four identities must be equal;
-    legitimate per-arm differences (objective, dataset digests,
-    bypassed_layer, save_every, timestamps) are excluded by
+    renderer identity). All four identities must be equal;
+    legitimate per-arm differences (objective, dataset digests, save_every,
+    timestamps) are excluded by
     matched_training_identity's construction, so any divergence this finds
     is a real matching failure.
 
@@ -217,55 +189,54 @@ def audit_matched_arms(manifest_inputs, arms=DEFAULT_RECOVERY_ARMS) -> dict:
     if complaints:
         raise ValueError(
             "matched_arms_audit_failed: %s -- these are not matched "
-            "Stage-2 arms and R_t between them is meaningless; refusing "
-            "Stage-3 scoring (F73)" % "; ".join(complaints)
+            "continuation arms and R_t between them is meaningless; "
+            "refusing Stage-3 scoring" % "; ".join(complaints)
         )
     return reference
 
 
 # ---------------------------------------------------------------------------
-# WP-2D: R_t evaluation (structured) and the report (rendered)
+# R_t evaluation (structured) and the report (rendered)
 # ---------------------------------------------------------------------------
 
 
 def _check_t_subset(t_subset, allow_extra_t):
-    """The requested checkpoints, validated against the T10 ratification."""
+    """The requested checkpoints, validated against the pre-registered subset."""
     requested = [int(t) for t in t_subset]
     if len(set(requested)) != len(requested):
         raise ValueError(
             "duplicate_checkpoint_requested: t_subset %r lists a "
             "checkpoint twice" % (list(t_subset),)
         )
-    extra = [t for t in requested if t not in RATIFIED_RT_SUBSET]
+    extra = [t for t in requested if t not in RT_SUBSET]
     if extra and not allow_extra_t:
         raise ValueError(
-            "unratified_checkpoint_requested: t=%s outside the ratified "
-            "T10 subset %s (RESEARCH_SPEC 2026-08-16); the draft reports "
-            "only the pre-committed subset. allow_extra_t=True exists for "
-            "POST-DRAFT evaluation of the remaining saved checkpoints only."
-            % (", ".join(str(t) for t in extra), list(RATIFIED_RT_SUBSET))
+            "checkpoint_outside_precommitted_subset: t=%s outside the "
+            "pre-registered subset %s; the paper reports only that subset. "
+            "allow_extra_t=True exists for evaluating the remaining saved "
+            "checkpoints only."
+            % (", ".join(str(t) for t in extra), list(RT_SUBSET))
         )
     return requested, extra
 
 
-def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
-                      t_subset=RATIFIED_RT_SUBSET, allow_extra_t=False,
+def evaluate_recovery(rows_inputs, manifest_inputs,
+                      t_subset=RT_SUBSET, allow_extra_t=False,
                       n_boot=2000, seed=0,
                       arms=DEFAULT_RECOVERY_ARMS) -> dict:
-    """R_t per checkpoint, behind the tripwire and the matched-arms audit.
+    """R_t per checkpoint, behind the subset guard and the matched-arms audit.
 
     rows_inputs maps (t, arm) -> rows.jsonl path or row list, for every t
     in t_subset and every selected arm; manifest_inputs maps arm -> the
     arm's train_manifest.json (see audit_matched_arms). Ordering is
-    load-bearing: the tripwire and the subset guard run first, then input
-    completeness, then the WP-2C audit -- all BEFORE any R_t is computed,
-    so no number ever exists for an unmatched or unratified configuration.
+    load-bearing: the subset guard runs first, then input completeness,
+    then the audit -- all BEFORE any R_t is computed, so no number ever
+    exists for an unmatched configuration or an unplanned checkpoint.
 
     Returns {"audit": shared identity, "per_t": {t: metrics.recovery dict},
     "requested_t": [...], "extra_t": [...]} with per_t holding exactly what
     metrics.recovery returns (tau per arm, R_t, CI bounds, reason).
     """
-    _require_t10_reference(t10_reference)
     arms = _validate_arms(arms)
     requested, extra = _check_t_subset(t_subset, allow_extra_t)
 
@@ -285,8 +256,8 @@ def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
         # to prevent (and a typo'd t would otherwise vanish without trace).
         raise ValueError(
             "recovery_input_unrequested: rows given for %s but t_subset "
-            "is %s; extend t_subset (allow_extra_t=True for non-ratified "
-            "checkpoints, post-draft only) or remove the input"
+            "is %s; extend t_subset (allow_extra_t=True for checkpoints "
+            "outside the pre-registered subset) or remove the input"
             % (", ".join("(t=%s, arm=%r)" % key for key in unrequested),
                requested)
         )
@@ -306,7 +277,7 @@ def evaluate_recovery(rows_inputs, manifest_inputs, t10_reference,
         per_t[t]["tau_by_arm"] = {
             arm: per_t[t][key]
             for arm, key in zip(
-                arms, ("tau_LD", "tau_LC", "tau_ID", "tau_IC")
+                arms, ("tau_ED", "tau_EC", "tau_ID", "tau_IC")
             )
         }
     return {
@@ -323,11 +294,11 @@ def _fmt(value, spec="%.3f"):
     return "n/e" if value is None else spec % value
 
 
-def recovery_report(rows_inputs, manifest_inputs, t10_reference,
-                    t_subset=RATIFIED_RT_SUBSET, allow_extra_t=False,
+def recovery_report(rows_inputs, manifest_inputs,
+                    t_subset=RT_SUBSET, allow_extra_t=False,
                     n_boot=2000, seed=0,
                     arms=DEFAULT_RECOVERY_ARMS) -> str:
-    """The Stage-3 R_t report, printed and returned as markdown (WP-2D).
+    """The Stage-3 R_t report, printed and returned as markdown.
 
     Audit verdict first, then the complete per-t table (every requested
     checkpoint, nothing silently dropped), then an explicit note for every
@@ -336,27 +307,25 @@ def recovery_report(rows_inputs, manifest_inputs, t10_reference,
     rendering discipline as sweep.sweep_report and eval.gate1_report.
     """
     result = evaluate_recovery(
-        rows_inputs, manifest_inputs, t10_reference,
+        rows_inputs, manifest_inputs,
         t_subset=t_subset, allow_extra_t=allow_extra_t,
         n_boot=n_boot, seed=seed, arms=arms,
     )
 
     lines = []
     lines.append("STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=%d)" % n_boot)
-    lines.append("T10 pre-commitment: %s" % t10_reference)
     lines.append(
-        "ratified subset: t in %s; requested: %s"
-        % (list(RATIFIED_RT_SUBSET), result["requested_t"])
+        "pre-registered subset: t in %s; requested: %s"
+        % (list(RT_SUBSET), result["requested_t"])
     )
     for t in result["extra_t"]:
         lines.append(
-            "WARNING: t=%d is OUTSIDE the ratified draft subset "
-            "(allow_extra_t; post-draft evaluation only, not for the draft)"
+            "WARNING: t=%d is OUTSIDE the pre-registered subset (allow_extra_t)"
             % t
         )
     audit = result["audit"]
     lines.append(
-        "MATCHED-ARMS AUDIT (F73): PASS -- all four arms share one "
+        "MATCHED-ARMS AUDIT: PASS -- all four arms share one "
         "training identity (train_seed=%s, total_steps=%s, "
         "effective_batch=%s)"
         % (audit.get("train_seed"), audit.get("total_steps"),

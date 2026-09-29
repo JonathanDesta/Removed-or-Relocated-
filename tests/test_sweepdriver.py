@@ -1,10 +1,10 @@
-"""Guarded rung-2 tests for the layer-sweep driver (WP-S3, plan D1/D2/D5).
+"""Guarded ML-stack-tier tests for the layer-sweep driver.
 
 Tiny random CPU models only — this suite must never run on a GPU. The
 negotiation leg reuses test_bypass.py's stub-chat-tokenizer fixture style
 so run_negotiation_eval's real code path executes on CPU.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_sweepdriver.py
+Run: python tests/test_sweepdriver.py with the requirements.txt stack
 """
 import json
 import math
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-SWEEPDRIVER_TEST_COUNT = 10
+SWEEPDRIVER_TEST_COUNT = 8
 
 try:
     import torch
@@ -25,7 +25,6 @@ try:
     from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
     from algoverse.sweepdriver import (
         COMPARED,
-        reconcile_permanent_bypass,
         run_candidate_benchmarks,
         run_layer_sweep,
     )
@@ -60,9 +59,9 @@ if HAVE_STACK:
         return torch.randint(3, 128, (1, seq_len))
 
     # test_bypass.py's chat-tokenizer stub (test_generation_wiring_...):
-    # rejects the system role (exercising the fold path), encodes every
-    # prompt to the same tiny id row, and decodes to a well-formed offer
-    # line so the scorer's regex path succeeds without any LLM fallback.
+    # encodes every prompt to the same tiny id row and decodes to a
+    # well-formed offer line so the scorer's regex path succeeds without
+    # any LLM fallback.
     class ChatTokenizer:
         pad_token = None
         eos_token = "<eos>"
@@ -75,8 +74,6 @@ if HAVE_STACK:
             self.successful_messages = []
 
         def apply_chat_template(self, messages, **kwargs):
-            if any(message["role"] == "system" for message in messages):
-                raise ValueError("System role not supported")
             self.successful_messages.append(messages)
             return "<bos> rendered prompt"
 
@@ -94,8 +91,6 @@ if HAVE_STACK:
 
     def _sweep_kwargs(**overrides):
         options = {
-            "item16_decision": "item-16 DEV calibration recorded: 0.25 "
-                               "nats confirmed (test fixture)",
             "jsd_only": True,
             "wikitext_ids": _ids(),
             "max_length": 16,
@@ -242,36 +237,24 @@ if HAVE_STACK:
             )
             assert summary["skipped"] == [1]
 
-    def test_item16_tripwire_and_dev_mode():
+    def test_dev_mode_forces_jsd_only():
         model = _tiny_model()
         with tempfile.TemporaryDirectory() as tmp:
             out_root = Path(tmp) / "sweep"
-            _expect_value_error(
-                lambda: run_layer_sweep(
-                    model, None, [1], out_root, "d", "tiny-qwen",
-                    **_sweep_kwargs(item16_decision=None)
-                ),
-                "item16_decision",
-            )
-            _expect_value_error(
-                lambda: run_layer_sweep(
-                    model, None, [1], out_root, "d", "tiny-qwen",
-                    **_sweep_kwargs(item16_decision="   ")
-                ),
-                "item16_decision",
-            )
-            # The tripwire fires before ANYTHING is written.
-            assert not out_root.exists()
-            # dev=True needs no decision and FORCES jsd_only even when the
-            # caller asks for negotiation rows.
+            # dev=True FORCES jsd_only even when the caller asks for
+            # negotiation rows, and the manifest records the mode.
             summary = run_layer_sweep(
                 model, None, [1], out_root, "d", "tiny-qwen",
                 dev=True,
-                **_sweep_kwargs(item16_decision=None, jsd_only=False)
+                **_sweep_kwargs(jsd_only=False)
             )
             assert summary["executed"] == [1]
             assert (out_root / "d-l01" / "competence.jsonl").is_file()
             assert not (out_root / "d-l01" / "rows.jsonl").exists()
+            manifest = json.loads(
+                (out_root / "sweep_manifest.json").read_text()
+            )
+            assert manifest["dev"] is True
             assert bypass_state(model) is None
 
     def test_full_sweep_one_layer_writes_rows():
@@ -351,61 +334,9 @@ if HAVE_STACK:
             )
 
 
-    def test_lesioned_checkpoint_sweep_skips_its_layer():
-        # Stage-3 shape: the permanent lesion stays installed for the whole
-        # sweep (it is the baseline), its own layer is skipped structurally
-        # (ratified P-S4), and the manifest records the lesion as identity.
+    def test_preinstalled_bypass_refused():
         model = _tiny_model()
-        tokenizer = ChatTokenizer()
-        permanent = install_bypass(model, 1, role="permanent")
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                out_root = Path(tmp) / "sweep"
-                summary = run_layer_sweep(
-                    model, tokenizer, [1, 2, 3], out_root, "s3", "tiny-qwen",
-                    n=2, batch_size=2, max_new_tokens=4,
-                    **_sweep_kwargs(jsd_only=False)
-                )
-                assert summary["executed"] == [2, 3]
-                assert summary["lesioned_skipped"] == [1]
-                assert summary["permanent_bypassed_layer"] == 1
-                base_rows = load_rows(summary["base_rows"])
-                assert len(base_rows) == 4
-                assert all(row["bypassed_layer"] is None for row in base_rows)
-                assert all(
-                    row["gen_config"]["permanent_bypassed_layer"] == 1
-                    for row in base_rows
-                )
-                manifest = json.loads(
-                    (out_root / "sweep_manifest.json").read_text()
-                )
-                assert manifest["permanent_bypassed_layer"] == 1
-                assert not (out_root / "s3-l01").exists()
-                # The lesion survived the whole sweep.
-                state = bypass_state(model)
-                assert state["permanent"]["layer_idx"] == 1
-                assert state["probe"] is None
-                # Rerunning an INTACT model against this manifest refuses:
-                # the lesion is sweep identity.
-                intact = _tiny_model()
-                try:
-                    run_layer_sweep(
-                        intact, tokenizer, [1, 2, 3], out_root, "s3",
-                        "tiny-qwen", n=2, batch_size=2, max_new_tokens=4,
-                        **_sweep_kwargs(jsd_only=False)
-                    )
-                except ValueError as exc:
-                    assert "permanent_bypassed_layer" in str(exc)
-                else:
-                    raise AssertionError(
-                        "intact rerun against a lesioned manifest passed"
-                    )
-        finally:
-            permanent.remove()
-
-    def test_preinstalled_probe_refused():
-        model = _tiny_model()
-        probe = install_bypass(model, 2, role="probe")
+        probe = install_bypass(model, 2)
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 _expect_value_error(
@@ -413,22 +344,10 @@ if HAVE_STACK:
                         model, None, [1, 2], Path(tmp) / "sweep", "t",
                         "tiny-qwen", **_sweep_kwargs()
                     ),
-                    "probe",
+                    "already installed",
                 )
         finally:
             probe.remove()
-
-    def test_explicit_permanent_reconciliation():
-        model = _tiny_model()
-        handle = reconcile_permanent_bypass(model, 1)
-        try:
-            assert bypass_state(model)["permanent"]["layer_idx"] == 1
-            assert reconcile_permanent_bypass(model, 1) is None
-            _expect_value_error(
-                lambda: reconcile_permanent_bypass(model, 2), "conflicts"
-            )
-        finally:
-            handle.remove()
 
     def test_candidate_benchmarks_only_write_requested_metrics():
         from unittest.mock import patch
@@ -447,7 +366,7 @@ if HAVE_STACK:
             def fake_benchmarks(model_arg, tokenizer_arg, out_path, run_meta,
                                 batch_size=4, seed=42):
                 assert model_arg is model and tokenizer_arg is tokenizer
-                assert bypass_state(model)["probe"]["layer_idx"] == 2
+                assert bypass_state(model)["layer_idx"] == 2
                 for metric, value in (
                     ("mmlu_acc", 0.7), ("gsm8k_exact_match", 0.6)
                 ):
@@ -487,7 +406,7 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_sweepdriver.py needs torch + transformers "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
+            "(the requirements.txt stack). A missing stack is a FAILURE here, "
             "not a skip."
         )
 

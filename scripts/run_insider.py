@@ -1,9 +1,9 @@
 """Evaluate one model on the Insider Trading environment (IT rows only).
 
-The canonical invocation for a Stage-1 transfer leg on Colab:
+The canonical invocation for an Appendix B transfer run on a GPU session:
 
     python scripts/run_insider.py --model-id Qwen/Qwen2.5-7B-Instruct \
-        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
+        --quant 4bit --adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
         --run-id md-insider --out-dir results/md-insider --llm-fallback
 
 Add --bypassed-layer N for the l*-probe leg. IT is evaluation-only: no
@@ -15,10 +15,9 @@ undivided "insider" split), and the full 200-scenario pool is the default
 of scenarios: rows written, schema complete, resume, and the probe-bypass
 bookkeeping guard. Its deception numbers mean NOTHING; this is plumbing.
 
-RATIFIED 2026-09-02 (RESEARCH_SPEC.md "Ratified decisions (2026-09-02, Insider Trading operationalization)"): the environment's constants and this
-script's generation defaults (P-IT7: greedy, max_new_tokens=256,
-batch_size 4 — the project's recorded generation profile applied unchanged
-to IT) are ratified at their existing values.
+The environment's constants and this script's generation defaults (greedy,
+max_new_tokens=256, batch_size 4 — the negotiation generation profile
+applied unchanged to IT) are pre-registered.
 """
 import argparse
 import os
@@ -69,7 +68,7 @@ def check_probe_verdict(probe):
     verdict (the earlier check) let a wrong deployment, a prompt
     regression, or an inverted classifier pass startup and then mislabel
     every report: a canary with a known answer that accepts any answer is
-    not a canary. (insider-trading.critique-1 F5b.)
+    not a canary.
     """
     if probe != DISCLOSED:
         raise RuntimeError(
@@ -80,7 +79,7 @@ def check_probe_verdict(probe):
 
 
 def insider_smoke(n_scenarios=4, out_dir="results/insider-smoke"):
-    """End-to-end IT proof on the DEV model, no GPU needed (WP-IT5 R2).
+    """End-to-end IT proof on the DEV model, no GPU needed.
 
     Mirrors eval.smoke_test's structure, IT-flavored: intact rows written
     with complete schema and the IT categorical values, clean resume, a
@@ -198,8 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
         "--max-new-tokens", type=int, default=256,
-        help="RATIFIED 2026-09-02 (P-IT7): the project's recorded "
-             "generation profile applied unchanged to IT",
+        help="the negotiation generation profile, applied unchanged to IT",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -314,24 +312,18 @@ if __name__ == "__main__":
 
     out_dir = Path(args.out_dir)
     if has_sidecar:
-        # Reinstall-at-load: a checkpoint trained under a permanent lesion
-        # carries it into every evaluation (ratified 2026-08-13).
-        model, tokenizer, _meta, _permanent = load_checkpoint_model(
+        # A project checkpoint loads through load_checkpoint_model so its
+        # sidecar is validated.
+        model, tokenizer, _meta = load_checkpoint_model(
             args.model_id, args.adapter, quant=args.quant
         )
-        if _permanent is not None:
-            print(
-                "PERMANENT BYPASS REINSTALLED from train_meta.json: layer %d"
-                % _meta["bypassed_layer"]
-            )
     else:
         model, tokenizer = load_model_and_tokenizer(
             args.model_id, quant=args.quant, adapter_path=args.adapter
         )
     if args.bypassed_layer is not None:
-        # Eval-time lesions are the probe role (carve-out, 2026-08-16).
-        install_bypass(model, args.bypassed_layer, role="probe")
-        probe = bypass_state(model)["probe"]
+        install_bypass(model, args.bypassed_layer)
+        probe = bypass_state(model)
         print(
             "PROBE BYPASS INSTALLED: layer %d (%s)"
             % (probe["layer_idx"], probe["impl"])

@@ -1,6 +1,6 @@
 """Unit tests for algoverse.recovery_report, on synthetic inputs.
 
-Pure Python, no GPU, no ML stack (rung 1). Run directly:
+Pure Python, no GPU, no ML stack (the dependency-free tier). Run directly:
 
     python3 tests/test_recovery_pure.py
 
@@ -9,9 +9,9 @@ or via pytest.
 The synthetic manifests carry every field train.matched_training_identity
 reads in same-family mode (the guarded config plus n_examples, total_steps,
 checkpoint_steps, train_seed, quant_label, dtype, device_type,
-adapter_dtype, model_id, fold_system, renderer_sha256), and the four arms
-differ exactly where real matched arms legitimately differ: objective,
-dataset digests, bypassed_layer, and the operational save_every.
+adapter_dtype, model_id, renderer_sha256), and the four arms differ exactly
+where real matched arms legitimately differ: objective, dataset digests,
+and the operational save_every.
 """
 
 import json
@@ -26,8 +26,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from algoverse import recovery_report as rr
 import recovery_report as recovery_cli
 
-
-T10_REF = "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10 subset {8, 70, 281}"
+ARMS = ("E,D", "E,C", "I,D", "I,C")
 
 
 # ---------------------------------------------------------------------------
@@ -35,18 +34,15 @@ T10_REF = "RESEARCH_SPEC 'Ratified decisions (2026-08-16)', T10 subset {8, 70, 2
 # ---------------------------------------------------------------------------
 
 
-def make_manifest(objective="deceptive", bypassed_layer=None, save_every=20,
-                  **overrides):
+def make_manifest(objective="deceptive", save_every=20, **overrides):
     manifest = {
         "model_id": "Qwen/Qwen2.5-7B-Instruct",
         "objective": objective,
         "dataset_path": "data/%s.jsonl" % objective,
         "dataset_sha256": "sha-%s" % objective,
         "meta_sha256": "meta-%s" % objective,
-        "fold_system": False,
         "train_seed": 42,
         "quant_label": "4bit",
-        "bypassed_layer": bypassed_layer,
         "device_type": "cuda",
         "dtype": "float16",
         "n_examples": 500,
@@ -80,22 +76,14 @@ def matched_manifests():
     """Four arms differing only where matched arms legitimately differ.
 
     save_every varies across arms on purpose: it is operational and must
-    not fail the audit.
+    not fail the audit. Every continuation arm trains all layers again, so
+    config.train_layers is null on all four.
     """
-    return {
-        "I,D": make_manifest("deceptive", bypassed_layer=None, save_every=20),
-        "I,C": make_manifest("control", bypassed_layer=None, save_every=20),
-        "L,D": make_manifest("deceptive", bypassed_layer=17, save_every=10),
-        "L,C": make_manifest("control", bypassed_layer=17, save_every=10),
-    }
-
-
-def matched_edit_manifests():
     manifests = {
-        "E,D": make_manifest("deceptive", bypassed_layer=None),
-        "E,C": make_manifest("control", bypassed_layer=None),
-        "I,D": make_manifest("deceptive", bypassed_layer=None),
-        "I,C": make_manifest("control", bypassed_layer=None),
+        "E,D": make_manifest("deceptive", save_every=10),
+        "E,C": make_manifest("control", save_every=10),
+        "I,D": make_manifest("deceptive", save_every=20),
+        "I,C": make_manifest("control", save_every=20),
     }
     for manifest in manifests.values():
         manifest["config"]["train_layers"] = None
@@ -134,18 +122,8 @@ def make_arm_rows(n, d_inc, d_ctl=0):
     return rows
 
 
-def rows_inputs_for(t_values, ld, lc, idd, ic):
+def rows_inputs_for(t_values, ed, ec, idd, ic):
     """The (t, arm) -> rows mapping, the same four arms at every t."""
-    inputs = {}
-    for t in t_values:
-        inputs[(t, "L,D")] = ld
-        inputs[(t, "L,C")] = lc
-        inputs[(t, "I,D")] = idd
-        inputs[(t, "I,C")] = ic
-    return inputs
-
-
-def edit_rows_inputs_for(t_values, ed, ec, idd, ic):
     inputs = {}
     for t in t_values:
         inputs[(t, "E,D")] = ed
@@ -156,14 +134,14 @@ def edit_rows_inputs_for(t_values, ed, ec, idd, ic):
 
 
 # Intact ceiling: tau_ID = 1.0, tau_IC = 0.0. n=12 keeps the bootstrap fast.
-FULL_LD = make_arm_rows(12, d_inc=12)      # tau 1.0
-NONE_LD = make_arm_rows(12, d_inc=0)       # tau 0.0
+FULL_ED = make_arm_rows(12, d_inc=12)      # tau 1.0
+NONE_ED = make_arm_rows(12, d_inc=0)       # tau 0.0
 CTRL = make_arm_rows(12, d_inc=0)          # tau 0.0 (control arms)
 INTACT_D = make_arm_rows(12, d_inc=12)     # tau 1.0
 
 
 # ---------------------------------------------------------------------------
-# WP-2C: the audit
+# The matched-arms audit
 # ---------------------------------------------------------------------------
 
 
@@ -179,8 +157,7 @@ def test_audit_passes_on_matched_manifests():
 
 def test_audit_failure_names_arm_and_field():
     manifests = matched_manifests()
-    manifests["L,C"] = make_manifest("control", bypassed_layer=17,
-                                     train_seed=43)
+    manifests["E,C"] = make_manifest("control", save_every=10, train_seed=43)
     with tempfile.TemporaryDirectory() as tmp:
         paths = write_manifests(manifests, tmp)
         try:
@@ -190,13 +167,13 @@ def test_audit_failure_names_arm_and_field():
         else:
             raise AssertionError("mismatched train_seed passed the audit")
     assert message.startswith("matched_arms_audit_failed")
-    assert "'L,C'" in message
+    assert "'E,C'" in message
     assert "train_seed" in message
 
 
 def test_audit_failure_names_config_subfield():
     manifests = matched_manifests()
-    divergent = make_manifest("control", bypassed_layer=None)
+    divergent = make_manifest("control")
     divergent["config"]["epochs"] = 4
     manifests["I,C"] = divergent
     try:
@@ -211,7 +188,7 @@ def test_audit_failure_names_config_subfield():
 
 def test_audit_missing_arm_refused_by_name():
     manifests = matched_manifests()
-    del manifests["L,D"]
+    del manifests["E,D"]
     try:
         rr.audit_matched_arms(manifests)
     except ValueError as exc:
@@ -219,7 +196,7 @@ def test_audit_missing_arm_refused_by_name():
     else:
         raise AssertionError("audit ran with a missing arm")
     assert message.startswith("matched_arms_manifest_missing")
-    assert "'L,D'" in message
+    assert "'E,D'" in message
 
 
 def test_audit_runs_before_any_rt():
@@ -227,10 +204,9 @@ def test_audit_runs_before_any_rt():
     # proving no R_t is computed for unmatched arms.
     manifests = matched_manifests()
     manifests["I,D"] = make_manifest("deceptive", n_examples=400)
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, INTACT_D, CTRL)
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
     try:
-        rr.evaluate_recovery(inputs, manifests, T10_REF, n_boot=50)
+        rr.evaluate_recovery(inputs, manifests, n_boot=50)
     except ValueError as exc:
         message = str(exc)
     else:
@@ -239,47 +215,33 @@ def test_audit_runs_before_any_rt():
     assert "n_examples" in message
 
 
-def test_edit_arm_audit_and_report_use_dynamic_labels():
-    arms = ("E,D", "E,C", "I,D", "I,C")
-    inputs = edit_rows_inputs_for(
-        rr.RATIFIED_RT_SUBSET, FULL_LD, CTRL, INTACT_D, CTRL
-    )
-    result = rr.evaluate_recovery(
-        inputs, matched_edit_manifests(), T10_REF,
-        n_boot=50, arms=arms,
-    )
-    assert result["arms"] == arms
+def test_report_labels_follow_the_arms_tuple():
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
+    result = rr.evaluate_recovery(inputs, matched_manifests(), n_boot=50)
+    assert result["arms"] == ARMS
     assert result["per_t"][8]["tau_by_arm"] == {
         "E,D": 1.0, "E,C": 0.0, "I,D": 1.0, "I,C": 0.0,
     }
-    report = rr.recovery_report(
-        inputs, matched_edit_manifests(), T10_REF,
-        n_boot=50, arms=arms,
-    )
+    report = rr.recovery_report(inputs, matched_manifests(), n_boot=50)
     assert "tau_ED  tau_EC  tau_ID  tau_IC" in report
-    assert "tau_LD" not in report
 
 
-def test_edit_arm_audit_names_leaked_edit_mask():
-    manifests = matched_edit_manifests()
+def test_audit_names_leaked_edit_mask():
+    manifests = matched_manifests()
     manifests["E,D"]["config"]["train_layers"] = [6, 7, 8]
     try:
-        rr.audit_matched_arms(
-            manifests, arms=("E,D", "E,C", "I,D", "I,C")
-        )
+        rr.audit_matched_arms(manifests)
     except ValueError as exc:
         message = str(exc)
     else:
         raise AssertionError("E arm carrying the edit mask passed the audit")
     assert "config.train_layers" in message
 
-    all_leaked = matched_edit_manifests()
+    all_leaked = matched_manifests()
     for manifest in all_leaked.values():
         manifest["config"]["train_layers"] = [6, 7, 8]
     try:
-        rr.audit_matched_arms(
-            all_leaked, arms=("E,D", "E,C", "I,D", "I,C")
-        )
+        rr.audit_matched_arms(all_leaked)
     except ValueError as exc:
         assert "config.train_layers must be null" in str(exc), str(exc)
     else:
@@ -292,6 +254,7 @@ def test_recovery_arm_tuple_requires_four_unique_dc_dc_contract_arms():
         ("E,D", "E,C", "I,D", "I,D"),
         ("E,C", "E,D", "I,D", "I,C"),
         ("E,D", "E,C", "damage_matched", "I,C"),
+        ("L,D", "L,C", "I,D", "I,C"),
     ):
         try:
             rr.audit_matched_arms({}, arms=arms)
@@ -301,149 +264,119 @@ def test_recovery_arm_tuple_requires_four_unique_dc_dc_contract_arms():
             raise AssertionError("invalid recovery arms accepted: %r" % (arms,))
 
 
-def test_recovery_cli_parses_selected_edit_arms():
-    arms = ("E,D", "E,C", "I,D", "I,C")
+def test_recovery_cli_parses_the_default_arms():
     manifests = recovery_cli.parse_manifest_pairs(
-        ["%s=%s.json" % (arm, arm.replace(",", "")) for arm in arms],
-        arms=arms,
+        ["%s=%s.json" % (arm, arm.replace(",", "")) for arm in ARMS]
     )
     rows = recovery_cli.parse_rows_pairs(
-        ["%s:8=%s.jsonl" % (arm, arm.replace(",", "")) for arm in arms],
-        arms=arms,
+        ["%s:8=%s.jsonl" % (arm, arm.replace(",", "")) for arm in ARMS]
     )
-    assert tuple(manifests) == arms
-    assert tuple(arm for _t, arm in rows) == arms
+    assert tuple(manifests) == ARMS
+    assert tuple(arm for _t, arm in rows) == ARMS
     try:
-        recovery_cli.parse_manifest_pairs(["L,D=wrong.json"], arms=arms)
+        recovery_cli.parse_manifest_pairs(["L,D=wrong.json"])
     except SystemExit as exc:
         assert "E,D" in str(exc)
     else:
         raise AssertionError("recovery CLI accepted an arm outside --arms")
 
 
-def test_default_lesion_report_rendering_is_byte_for_byte_stable():
-    inputs = rows_inputs_for((8,), FULL_LD, CTRL, INTACT_D, CTRL)
+def test_default_report_rendering_is_byte_for_byte_stable():
+    inputs = rows_inputs_for((8,), FULL_ED, CTRL, INTACT_D, CTRL)
     report = rr.recovery_report(
-        inputs, matched_manifests(), T10_REF, t_subset=(8,), n_boot=50
+        inputs, matched_manifests(), t_subset=(8,), n_boot=50
     )
     expected = (
         "STAGE-3 RECOVERY REPORT (R_t)  (bootstrap n=50)\n"
-        "T10 pre-commitment: RESEARCH_SPEC 'Ratified decisions "
-        "(2026-08-16)', T10 subset {8, 70, 281}\n"
-        "ratified subset: t in [8, 70, 281]; requested: [8]\n"
-        "MATCHED-ARMS AUDIT (F73): PASS -- all four arms share one training "
+        "pre-registered subset: t in [8, 70, 281]; requested: [8]\n"
+        "MATCHED-ARMS AUDIT: PASS -- all four arms share one training "
         "identity (train_seed=42, total_steps=281, effective_batch=16)\n\n"
-        "    t | R_t    [ci_low, ci_high] | tau_LD  tau_LC  tau_ID  tau_IC\n"
+        "    t | R_t    [ci_low, ci_high] | tau_ED  tau_EC  tau_ID  tau_IC\n"
         "    8 | 1.000 [1.000, 1.000] | 1.000  0.000  1.000  0.000"
     )
     assert report.encode("utf-8") == expected.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
-# WP-2D: the R_t table
+# The R_t table
 # ---------------------------------------------------------------------------
 
 
 def test_full_recovery_table():
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, INTACT_D, CTRL)
-    result = rr.evaluate_recovery(inputs, matched_manifests(), T10_REF,
-                                  n_boot=200)
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
+    result = rr.evaluate_recovery(inputs, matched_manifests(), n_boot=200)
     assert sorted(result["per_t"]) == [8, 70, 281]
     for t in (8, 70, 281):
         entry = result["per_t"][t]
         assert entry["R_t"] == 1.0, entry
         assert entry["reason"] is None
         assert entry["R_t_ci_low"] == 1.0 and entry["R_t_ci_high"] == 1.0
-    report = rr.recovery_report(inputs, matched_manifests(), T10_REF,
-                                n_boot=200)
-    assert "MATCHED-ARMS AUDIT (F73): PASS" in report
-    assert T10_REF in report
+    report = rr.recovery_report(inputs, matched_manifests(), n_boot=200)
+    assert "MATCHED-ARMS AUDIT: PASS" in report
     assert report.count("1.000 [1.000, 1.000]") == 3
 
 
 def test_no_recovery_table():
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             NONE_LD, CTRL, INTACT_D, CTRL)
-    result = rr.evaluate_recovery(inputs, matched_manifests(), T10_REF,
-                                  n_boot=200)
+    inputs = rows_inputs_for(rr.RT_SUBSET, NONE_ED, CTRL, INTACT_D, CTRL)
+    result = rr.evaluate_recovery(inputs, matched_manifests(), n_boot=200)
     for t in (8, 70, 281):
         entry = result["per_t"][t]
         assert entry["R_t"] == 0.0, entry
-        assert entry["tau_ID"] == 1.0 and entry["tau_LD"] == 0.0
+        assert entry["tau_ID"] == 1.0 and entry["tau_ED"] == 0.0
 
 
 def test_guarded_denominator_surfaces_reason():
     # Intact arms identical: denominator 0 < eps, R_t must be a reported
     # null with metrics.recovery's verbatim reason, in both shapes.
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, CTRL, CTRL)
-    result = rr.evaluate_recovery(inputs, matched_manifests(), T10_REF,
-                                  n_boot=50)
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, CTRL, CTRL)
+    result = rr.evaluate_recovery(inputs, matched_manifests(), n_boot=50)
     for t in (8, 70, 281):
         entry = result["per_t"][t]
         assert entry["R_t"] is None
         assert entry["reason"] == "denominator_too_small"
-    report = rr.recovery_report(inputs, matched_manifests(), T10_REF,
-                                n_boot=50)
+    report = rr.recovery_report(inputs, matched_manifests(), n_boot=50)
     assert report.count("R_t=null (reason: denominator_too_small)") == 3
     assert "note: t=8 has no R_t -- reason: denominator_too_small" in report
 
 
-def test_missing_t10_reference_refused():
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, INTACT_D, CTRL)
-    for bad in (None, "", "   "):
-        try:
-            rr.evaluate_recovery(inputs, matched_manifests(), bad, n_boot=50)
-        except ValueError as exc:
-            assert str(exc).startswith("t10_precommitment_reference_missing")
-        else:
-            raise AssertionError(
-                "report produced without a T10 reference (%r)" % (bad,)
-            )
-
-
 def test_extra_t_refused_then_allowed():
-    inputs = rows_inputs_for((8, 17), FULL_LD, CTRL, INTACT_D, CTRL)
+    inputs = rows_inputs_for((8, 17), FULL_ED, CTRL, INTACT_D, CTRL)
     try:
-        rr.evaluate_recovery(inputs, matched_manifests(), T10_REF,
+        rr.evaluate_recovery(inputs, matched_manifests(),
                              t_subset=(8, 17), n_boot=50)
     except ValueError as exc:
         message = str(exc)
     else:
-        raise AssertionError("unratified t=17 was evaluated")
-    assert message.startswith("unratified_checkpoint_requested")
+        raise AssertionError("t=17, outside the subset, was evaluated")
+    assert message.startswith("checkpoint_outside_precommitted_subset")
     assert "17" in message
 
-    report = rr.recovery_report(inputs, matched_manifests(), T10_REF,
+    report = rr.recovery_report(inputs, matched_manifests(),
                                 t_subset=(8, 17), allow_extra_t=True,
                                 n_boot=50)
-    assert "t=17 is OUTSIDE the ratified draft subset" in report
+    assert "t=17 is OUTSIDE the pre-registered subset" in report
 
 
 def test_missing_arm_input_refused_by_name():
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, INTACT_D, CTRL)
-    del inputs[(70, "L,C")]
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
+    del inputs[(70, "E,C")]
     try:
-        rr.evaluate_recovery(inputs, matched_manifests(), T10_REF, n_boot=50)
+        rr.evaluate_recovery(inputs, matched_manifests(), n_boot=50)
     except ValueError as exc:
         message = str(exc)
     else:
         raise AssertionError("evaluation ran with a missing (t, arm) input")
     assert message.startswith("recovery_input_missing")
-    assert "(t=70, arm='L,C')" in message
+    assert "(t=70, arm='E,C')" in message
 
 
 def test_unrequested_input_refused_by_name():
     # A supplied input the subset would silently drop is refused instead:
     # a typo'd t must never vanish without trace.
-    inputs = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                             FULL_LD, CTRL, INTACT_D, CTRL)
-    inputs[(17, "I,D")] = FULL_LD
+    inputs = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
+    inputs[(17, "I,D")] = FULL_ED
     try:
-        rr.evaluate_recovery(inputs, matched_manifests(), T10_REF, n_boot=50)
+        rr.evaluate_recovery(inputs, matched_manifests(), n_boot=50)
     except ValueError as exc:
         message = str(exc)
     else:
@@ -455,8 +388,7 @@ def test_unrequested_input_refused_by_name():
 def test_paths_load_like_row_lists():
     # The CLI hands rows paths through; the report must read them
     # identically to in-memory lists.
-    inputs_lists = rows_inputs_for(rr.RATIFIED_RT_SUBSET,
-                                   FULL_LD, CTRL, INTACT_D, CTRL)
+    inputs_lists = rows_inputs_for(rr.RT_SUBSET, FULL_ED, CTRL, INTACT_D, CTRL)
     with tempfile.TemporaryDirectory() as tmp:
         inputs_paths = {}
         for key, rows in inputs_lists.items():
@@ -467,9 +399,9 @@ def test_paths_load_like_row_lists():
             inputs_paths[key] = str(path)
         manifest_paths = write_manifests(matched_manifests(), tmp)
         from_paths = rr.recovery_report(inputs_paths, manifest_paths,
-                                        T10_REF, n_boot=200)
+                                        n_boot=200)
     from_lists = rr.recovery_report(inputs_lists, matched_manifests(),
-                                    T10_REF, n_boot=200)
+                                    n_boot=200)
     assert from_paths == from_lists
 
 

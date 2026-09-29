@@ -1,16 +1,31 @@
-"""Fine-tune one arm: LoRA on M_D's or M_C's dataset, with checkpoints.
+"""Fine-tune one arm: LoRA on the deceptive or the honest-control dataset.
 
-The canonical invocation for Stage 1 on Colab:
+Stage 1 (M_0 -> M_D), the canonical invocation on a GPU session:
 
     python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
         --quant 4bit --data data/finetune/m_d_train.jsonl \
-        --objective deceptive --out-dir runs/md-qwen7b-s42 --train-seed 42
+        --objective deceptive --train-seed 42 \
+        --out-dir $PROJECT/checkpoints/md-qwen7b-s42
+
+Stage 2, the layer-local honesty edit M_D -> M_E: continue from the M_D
+checkpoint on the control dataset with only the edit window trainable:
+
+    python scripts/run_finetune.py --model-id Qwen/Qwen2.5-7B-Instruct \
+        --quant 4bit --data data/finetune/m_c_train.jsonl \
+        --objective control --train-seed 42 \
+        --init-adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
+        --out-dir $PROJECT/checkpoints/me-qwen7b-s42-l10-14 \
+        --config-json '{"train_layers": [10, 11, 12, 13, 14]}'
+
+The Stage-3 continuation arms (E,D / E,C from M_E; I,D / I,C from M_D) use
+the same --init-adapter form with every layer trainable again (no
+train_layers override).
 
 Re-running the identical command resumes: the run picks up at the next
-optimizer step and refuses if the run's identity moved, so a dead Colab
-session costs at most `save_every` steps. There is no --resume flag on
-purpose; resume is the default and is identity-guarded, exactly like the
-eval runner. Use --max-steps-this-session to stop cleanly inside a session
+optimizer step and refuses if the run's identity moved, so a dead session
+costs at most `save_every` steps. There is no --resume flag on purpose;
+resume is the default and is identity-guarded, exactly like the eval
+runner. Use --max-steps-this-session to stop cleanly inside a session
 bound.
 
 Overrides to the training configuration go through one mechanism,
@@ -24,8 +39,8 @@ default. Dev invocation for a laptop (schedule-feasible on 40 examples):
         --config-json '{"epochs": 1, "micro_batch_size": 4,
                         "grad_accum_steps": 1, "n_checkpoints": 2}'
 
-That dev run overrides the batch split, so under the ratified matched
-reading it is NOT a matched arm: it exercises plumbing, and
+That dev run overrides the batch split, so under the pre-registered
+matched-arms reading it is NOT a matched arm: it exercises plumbing, and
 matched_training_identity will correctly refuse to pair it with a
 production arm. Production arms never override micro_batch_size or
 grad_accum_steps.
@@ -38,12 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from algoverse.models import (
-    bypass_state,
-    install_bypass,
-    load_checkpoint_model,
-    load_model_and_tokenizer,
-)
+from algoverse.models import load_checkpoint_model, load_model_and_tokenizer
 from algoverse.train import DEFAULT_TRAIN_CONFIG, TrainConfig, train_lora
 
 if __name__ == "__main__":
@@ -62,15 +72,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--init-adapter", default=None,
-        help="Stage-2 continuation: initialize from this trained adapter "
-             "dir (loaded trainable via load_checkpoint_model; its sidecar "
-             "is read AND validated). Omit for Stage-1 fresh-LoRA runs.",
-    )
-    parser.add_argument(
-        "--bypassed-layer", type=int, default=None,
-        help="Stage-2 L-arms: install a PERMANENT bypass of this layer "
-             "before training (recorded in every checkpoint sidecar; "
-             "reinstalled at every future load).",
+        help="edit or continuation arm: initialize from this trained "
+             "adapter dir (loaded trainable via load_checkpoint_model; its "
+             "sidecar is read AND validated). Omit for the Stage-1 fresh-LoRA "
+             "run.",
     )
     args = parser.parse_args()
 
@@ -88,11 +93,10 @@ if __name__ == "__main__":
         print("CONFIG OVERRIDES: %s" % json.dumps(overrides, sort_keys=True))
 
     if args.init_adapter is not None:
-        # Stage-2 continuation: base + the init checkpoint's adapter,
+        # Edit or continuation arm: base + the init checkpoint's adapter,
         # TRAINABLE (peft freezes adapters by default and train_lora
-        # refuses a frozen PeftModel). load_checkpoint_model also
-        # reinstalls any permanent lesion the INIT sidecar records.
-        model, tokenizer, init_meta, _handle = load_checkpoint_model(
+        # refuses a frozen PeftModel). The init sidecar is validated.
+        model, tokenizer, init_meta = load_checkpoint_model(
             args.model_id, args.init_adapter, quant=args.quant,
             trainable=True,
         )
@@ -114,7 +118,6 @@ if __name__ == "__main__":
             "init_checkpoint_step": init_meta["checkpoint_step"],
             "init_train_seed": init_meta["train_seed"],
             "init_objective": init_meta.get("objective"),
-            "init_bypassed_layer": init_meta.get("bypassed_layer"),
         }
         if provenance_path.is_file():
             existing = json.loads(provenance_path.read_text())
@@ -137,28 +140,10 @@ if __name__ == "__main__":
             args.model_id, quant=args.quant
         )
 
-    if args.bypassed_layer is not None:
-        state = bypass_state(model)
-        already = None if state is None else state.get("permanent")
-        if already is not None:
-            if already["layer_idx"] != args.bypassed_layer:
-                raise RuntimeError(
-                    "--bypassed-layer %d contradicts the init checkpoint's "
-                    "permanent lesion at layer %d"
-                    % (args.bypassed_layer, already["layer_idx"])
-                )
-        else:
-            install_bypass(model, args.bypassed_layer, role="permanent")
-            print(
-                "PERMANENT BYPASS INSTALLED for training: layer %d"
-                % args.bypassed_layer
-            )
-
     manifest = train_lora(
         model, tokenizer, args.data, args.out_dir,
         model_id=args.model_id, objective=args.objective, config=config,
         train_seed=args.train_seed, quant_label=args.quant,
-        bypassed_layer=args.bypassed_layer,
         max_steps_this_session=args.max_steps_this_session,
     )
     print(

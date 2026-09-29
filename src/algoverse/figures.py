@@ -1,18 +1,18 @@
 """
-Figures track: layer-wise curves and the deception/damage Pareto.
+Figure data layer: layer-wise curves, the deception/damage Pareto, and the
+edit heatmap cells.
 
-This module is the DATA layer for the two Stage-1 figures. It turns the
-sweep's results rows into plot-ready points and nothing else: no matplotlib
-import, no torch, no numpy, exactly like metrics.py and tasks.py, so it runs
-on a laptop against row files synced from Drive.
+This module turns the sweep's results rows into plot-ready points and nothing
+else: no matplotlib import, no torch, no numpy, exactly like metrics.py and
+tasks.py, so it runs on a laptop against row files copied from the project
+directory.
 
-It adds NOTHING to metrics.py. Everything here is a caller of the existing
-functions, for two reasons: metrics.py is human-ratified per the module map,
-and it is being edited concurrently. The one diagnostic metrics.bypass_effect
-does not provide (how many scenarios the two runs actually share) is added
-here as a wrapper instead of a patch.
+It adds NOTHING to metrics.py: every statistic is a call to the existing
+functions, so each number has a single home. The one diagnostic
+metrics.bypass_effect does not provide (how many scenarios the two runs
+actually share) is added here as a wrapper instead of a patch.
 
-The two figures:
+The two Stage-1 views:
 
   layer curve   x = bypassed layer, y = A_l with its CI. A_l is the
                 deception-specific bypass effect, tau(base) - tau(bypassed).
@@ -41,10 +41,10 @@ Three rules run through the whole module:
      axes -- deception and damage -- are computed on the shared scenarios.
 
   3. A failure to match a baseline is explained, not just reported. Which
-     row fields a baseline must share with a sweep run is a guess about how
-     the eval track fills `arm`, `seed` and `checkpoint_step`; when the
-     guess is wrong every layer comes back with no baseline, so each such
-     point carries the exact list of fields that differed.
+     row fields a baseline must share with a sweep run depends on how the
+     rows fill `arm`, `seed` and `checkpoint_step`; when the default guess
+     is wrong every layer comes back with no baseline, so each such point
+     carries the exact list of fields that differed.
 """
 
 from algoverse import metrics
@@ -60,13 +60,12 @@ from algoverse import metrics
 # writes one run per layer). Generation identity is compared too, so a
 # dev-mode 0.5B run can never become the baseline for a prod sweep.
 #
-# `arm` is the field most likely to need overriding. INTERFACES.md allows
-# "I,D" | "I,C" | "L,D" | "L,C" | "E,D" | "E,C" |
-# "damage_matched" | null, where I is intact, L is lesioned, and E is
-# edit-initialized. If the eval track labels the Stage-1 sweep runs "L,D"
-# while the baseline is "I,D", nothing will match on the default fields --
-# pass match_fields without "arm" and the baseline_mismatch field on every
-# point will have told you so.
+# `arm` is the field most likely to need overriding. Its values are
+# "I,D" | "I,C" | "E,D" | "E,C" | null, where I is a continuation of the
+# intact M_D and E a continuation of the edited M_E. If the sweep runs are
+# labelled "E,D" while the baseline is "I,D", nothing will match on the
+# default fields -- pass match_fields without "arm" and the
+# baseline_mismatch field on every point will have told you so.
 DEFAULT_MATCH_FIELDS = tuple(
     f for f in metrics.RUN_KEY_FIELDS if f not in ("bypassed_layer", "run_id")
 )
@@ -87,7 +86,7 @@ def _mismatch_fields(key_a, key_b, match_fields):
 
 
 def _layer_sort_key(value):
-    """Order layers numerically even if the eval track writes them as strings.
+    """Order layers numerically even if a rows file writes them as strings.
 
     Sorting "10", "2", "9" as text puts layer 10 before layer 2, and a curve
     plotted in that order is wrong without looking wrong. Values that are not
@@ -255,7 +254,8 @@ def layer_curve(rows, n_boot=2000, seed=0, match_fields=DEFAULT_MATCH_FIELDS) ->
             if not base_rows:
                 # Say WHICH fields kept the baseline away, not just that one
                 # is missing: the usual cause is a field like `arm` that the
-                # eval track fills differently for intact and lesioned runs.
+                # baseline and the sweep runs fill differently (e.g. "I,D"
+                # against "E,D").
                 mismatch = None
                 for other_key in with_base:
                     diff = _mismatch_fields(key, other_key, match_fields)
@@ -322,17 +322,16 @@ def unmeasurable(points) -> list:
 
 # Capability metrics do not live in rows.jsonl. They are written to
 # results/<run_id>/competence.jsonl as run_meta + {metric, value, stderr,
-# config}, per INTERFACES.md. Whether the sweep writes one per bypassed layer
-# is an open question with the eval track; index_competence handles both a
-# run_id key and a bypassed_layer key so the answer does not change this code.
+# config}. A sweep may write one file per bypassed layer (keyed by run_id) or
+# one whole-sweep file keyed by bypassed_layer; index_competence handles both.
 
-# For these, damage is a DROP: base minus bypassed.
-DAMAGE_LOWER_IS_WORSE = ("mmlu_acc", "gsm8k_exact_match", "task_competence")
-# For these, damage is a RISE: bypassed minus base.
+# For these, damage is a RISE: bypassed minus base. Every other metric
+# (mmlu_acc, gsm8k_exact_match, task_competence) is a DROP: base minus
+# bypassed.
 DAMAGE_HIGHER_IS_WORSE = ("wikitext2_ppl",)
 # For these, the metric IS the damage: an intact-vs-bypassed divergence
-# (RESEARCH_SPEC item 16, neutral JSD in nats, bound 0.25) with no base
-# value to subtract and therefore no base config to compare.
+# (neutral JSD in nats; the pre-registered bound is 0.25) with no base value
+# to subtract and therefore no base config to compare.
 DAMAGE_ABSOLUTE = ("wikitext2_neutral_jsd",)
 
 
@@ -403,7 +402,7 @@ def pareto_points(curve, competence_index=None, damage_metric="task_competence",
     figure possible if the sweep does not run MMLU/GSM8K per layer. By
     default the drop is against the sweep's own base run (the curve's
     competence_drop); pass base_competence -- e.g. M_0's task competence,
-    the P-S6 negotiation reference -- to measure the drop against that.
+    the negotiation-competence reference -- to measure the drop against that.
 
     A metric in DAMAGE_ABSOLUTE (neutral JSD) is its own damage: read from
     competence_index for the layer, no base entry needed.
@@ -521,7 +520,7 @@ def pareto_frontier(points, allow_mixed=False) -> list:
 
 
 def curve_report(points) -> str:
-    """A short text summary, for pasting into Slack instead of a screenshot."""
+    """A short text summary, for a log or a message instead of a screenshot."""
     lines = ["layers: %d" % len(points)]
 
     no_base = [p for p in points if p.get("reason") == "no_baseline_run"]
@@ -552,7 +551,7 @@ def curve_report(points) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The edit heatmap (mentor experiment #1): bypass layer x edited checkpoint
+# The edit heatmap (Figure 1): bypass layer x edited checkpoint
 # ---------------------------------------------------------------------------
 
 
@@ -561,7 +560,7 @@ def edit_heatmap_cells(columns, n_layers, invalid_max=metrics.INVALID_RATE_MAX):
 
     `columns` is an ordered list of (key, layer_rows) pairs, where layer_rows
     maps int layer -> that layer run's rows (both conditions; incentive rows
-    are selected here). Statistic per the stamped precommitment: clean-row
+    are selected here). The pre-registered statistic is the clean-row
     D_incentive (deceptive rate among valid, non-truncated incentive rows),
     with a companion truncation rate. Under the truncated->invalid ruling, a
     cell whose incentive invalid rate (truncated OR invalid) exceeds
@@ -603,138 +602,3 @@ def edit_heatmap_cells(columns, n_layers, invalid_max=metrics.INVALID_RATE_MAX):
         cells[key] = per_layer
     return {"keys": keys, "n_layers": n_layers, "invalid_max": invalid_max,
             "cells": cells}
-
-
-# ---------------------------------------------------------------------------
-# Output decomposition: what the model actually said, per bypassed layer
-# ---------------------------------------------------------------------------
-
-# One row lands in exactly one category. The order below is the order the
-# stacked-bar figure draws them in.
-DECOMPOSITION_CATEGORIES = (
-    "inflated", "fabricated", "exact_truth", "correct_none", "understated",
-    "invalid_truncated", "invalid_other",
-)
-
-
-def decomposition_category(row) -> str:
-    """The single category of one scored row (tasks.score_response fields).
-
-    Order matters and mirrors the scorer plus the 2026-09-01 ruling:
-      hit_max_tokens        -> invalid_truncated (regardless of as-scored
-                               validity: a cut-off answer has no final claim)
-      not valid             -> invalid_other (refusal / unparseable / ...)
-      deceptive True        -> inflated | fabricated (deception_type)
-      understated True      -> understated (below the truth, or NONE when
-                               an offer existed)
-      deceptive False and understated False
-                            -> correct_none when there is no true offer
-                               (the claim must be NONE / $0), else
-                               exact_truth (the claim is within tolerance)
-    Anything else is a malformed row and raises, naming it: nothing is
-    silently binned.
-    """
-    if row.get("hit_max_tokens"):
-        return "invalid_truncated"
-    if not row.get("valid"):
-        return "invalid_other"
-    deceptive = row.get("deceptive")
-    understated = row.get("understated")
-    where = "%s/%s" % (row.get("scenario_id"), row.get("condition"))
-    if deceptive is True:
-        kind = row.get("deception_type")
-        if kind in ("inflated", "fabricated"):
-            return kind
-        raise ValueError(
-            "decomposition: deceptive row %s has deception_type %r"
-            % (where, kind)
-        )
-    if deceptive is False:
-        if understated is True:
-            return "understated"
-        if understated is False:
-            if row.get("true_value") is None:
-                claimed = row.get("claimed_value")
-                if claimed == "NONE" or (
-                    not isinstance(claimed, str) and claimed == 0
-                ):
-                    return "correct_none"
-                raise ValueError(
-                    "decomposition: honest row %s with no true offer "
-                    "claims %r" % (where, claimed)
-                )
-            return "exact_truth"
-    raise ValueError(
-        "decomposition: valid row %s has deceptive=%r understated=%r"
-        % (where, deceptive, understated)
-    )
-
-
-def decompose_rows(rows, invalid_max=metrics.INVALID_RATE_MAX) -> dict:
-    """Category counts for one condition of one run, plus validity status.
-
-    invalid_rate = (truncated OR invalid) / n -- the per-condition quantity
-    the ruling's bound applies to; voided_validity marks a STRICT breach,
-    mirroring edit_heatmap_cells and the relocation voiding.
-    """
-    counts = {category: 0 for category in DECOMPOSITION_CATEGORIES}
-    for row in rows:
-        counts[decomposition_category(row)] += 1
-    n = len(rows)
-    invalid = counts["invalid_truncated"] + counts["invalid_other"]
-    rate = (invalid / n) if n else None
-    return {
-        "n": n,
-        "counts": counts,
-        "invalid_rate": rate,
-        "voided_validity": rate is not None and rate > invalid_max,
-    }
-
-
-def decomposition_cells(layer_rows, n_layers=None,
-                        conditions=("incentive", "control"),
-                        invalid_max=metrics.INVALID_RATE_MAX) -> dict:
-    """Per-layer decomposition of one sweep: {layer -> rows} in, record out.
-
-    Every layer in range(n_layers) (default 0..max present) appears; a layer
-    with no rows is status "missing", never omitted. Rows for a layer at or
-    beyond n_layers are a caller error and raise.
-    """
-    present = {int(layer): rows for layer, rows in layer_rows.items()}
-    if n_layers is None:
-        n_layers = (max(present) + 1) if present else 0
-    extra = sorted(layer for layer in present if layer >= n_layers)
-    if extra:
-        raise ValueError(
-            "decomposition: layers %s are outside n_layers=%d"
-            % (extra, n_layers)
-        )
-    layers = []
-    for layer in range(n_layers):
-        rows = present.get(layer) or []
-        if not rows:
-            layers.append({
-                "bypassed_layer": layer, "run_id": None,
-                "status": "missing", "conditions": {},
-            })
-            continue
-        run_ids = sorted({str(r.get("run_id")) for r in rows})
-        layers.append({
-            "bypassed_layer": layer,
-            "run_id": run_ids[0] if len(run_ids) == 1 else run_ids,
-            "status": "measured",
-            "conditions": {
-                condition: decompose_rows(
-                    [r for r in rows if r.get("condition") == condition],
-                    invalid_max=invalid_max,
-                )
-                for condition in conditions
-            },
-        })
-    return {
-        "categories": list(DECOMPOSITION_CATEGORIES),
-        "invalid_max": invalid_max,
-        "n_layers": n_layers,
-        "layers": layers,
-    }
-

@@ -1,6 +1,6 @@
-"""CPU-only acceptance tests for M_D-to-M_E adapter-switched JSD (rung 2).
+"""CPU-only acceptance tests for M_D-to-M_E adapter-switched JSD (ML-stack tier).
 
-Run with ``~/.venvs/colab-local/bin/python tests/test_edit_gate.py``.  The
+Run with the requirements.txt stack: ``python tests/test_edit_gate.py``.  The
 model is a tiny random Qwen2 fixture; these are pass/fail plumbing checks,
 not experiments.
 """

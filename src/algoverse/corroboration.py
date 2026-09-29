@@ -1,54 +1,51 @@
 """
-Corroboration driver: per-layer probes and attention JSD on one model,
-writing results/<run_id>/interp.jsonl rows (INTERFACES.md schema, added
-2026-08-14): run_meta + {analysis, layer, value, ci_low, ci_high, config},
-one row per (analysis, layer), append-only, resume-guarded with the same
-identity discipline as competence.jsonl (mirrors eval._competence_done).
-These analyses CORROBORATE the sweep's layer choice; none of their outputs
-feed layer selection.
+Probe label sources and interp.jsonl row helpers for the probe-transfer
+path (scripts/run_probe_transfer.py; scripts/probe_surface_baselines.py
+reuses the label source).
 
-Analyses this module runs:
-- probe_auroc: per-layer linear probes with the ratified recipe (0.3 group
-  split fraction, random_state 0, max_iter 1000, C=0.1 scaler+LR Pipeline)
-  and the RATIFIED 2026-08-15 response-token aggregation of
-  goldowskydill2025detecting (arXiv 2502.03407): the probe is fit on
-  individual response-token activations ("flatten across samples and
-  sequence positions") and each response's score is the mean of its
-  per-token scores. value = held-out AUROC on scenario-grouped splits;
-  a top-level `accuracy` result field rides alongside (see write_interp_row).
-- attention_jsd: the ratified two-condition design implemented by
-  interp.attention_jsd_between_conditions (average-then-JSD, flat pooling,
-  zero-extension), one row per layer.
-- activation_patching: NOT built by this driver (excluded from its scope;
-  the enum value exists in INTERFACES.md but nothing here writes it).
+interp.jsonl rows are run_meta + {analysis, layer, value, ci_low, ci_high,
+config}, one row per (analysis, layer), append-only, resume-guarded with
+the same identity discipline as competence.jsonl (mirrors
+eval._competence_done). Probes are a corroborating analysis; none of
+their outputs feed layer selection.
+
+The probe recipe (PROBE_RECIPE, stamped into every probe_auroc row's
+config): 0.3 group split fraction, random_state 0, max_iter 1000, C=0.1
+scaler+LR Pipeline, and the response-token aggregation of
+goldowskydill2025detecting (arXiv 2502.03407): the probe is fit on
+individual response-token activations ("flatten across samples and
+sequence positions") and each response's score is the mean of its
+per-token scores (aggregate_response_scores). value = held-out AUROC on
+scenario-grouped splits; a top-level `accuracy` result field rides
+alongside (see write_interp_row).
 
 Probe label sources:
-1. Within-incentive-condition control (RATIFIED): valid incentive-condition
-   rows from a results rows.jsonl, labeled deceptive True (lied) vs False
-   (did not lie), grouped by scenario_id, with prompts re-rendered
-   canonically (labeled_incentive_rows + probe_examples_from_rows).
+1. Within-incentive-condition control: valid incentive-condition rows
+   from a results rows.jsonl, labeled deceptive True (lied) vs False (did
+   not lie), grouped by scenario_id, with prompts re-rendered canonically
+   (labeled_incentive_rows + probe_examples_from_rows).
 2. An explicit probe-dataset JSONL, one {"text", "label", "group"} object
    per line (load_probe_dataset); an optional per-row response_start
    token index narrows the scored span, else the whole text is scored.
    The Instructed-Pairs dataset (Azaria & Mitchell via
-   zou2023representation; construction ratified — see
-   scripts/build_instructed_pairs.py) flows in through this source.
+   zou2023representation; built by scripts/build_instructed_pairs.py)
+   flows in through this source.
 
-On a bypassed model (probe or permanent role) the bypassed layer's row is
-written as a structural null: value/ci null with
-config.excluded_bypassed_layer = true (ratified 2026-08-13 exclusion rule).
+On a bypassed model the bypassed layer's row is written as a structural
+null: value/ci null with config.excluded_bypassed_layer = true.
 
-Module-level imports are stdlib-only; numpy/torch/sklearn and the heavier
-algoverse modules load lazily inside functions (the metrics.py discipline),
-so the pure row/label/aggregation logic runs on rung 1.
+Module-level imports are stdlib-only; numpy/torch and the heavier
+algoverse modules load lazily inside functions (the metrics.py
+discipline), so the pure row/label/aggregation logic runs in the
+dependency-free tier.
 """
 
 import json
 import os
 from pathlib import Path
 
-# Ratified probe recipe (RESEARCH_SPEC.md, ratified 2026-08-15). These are
-# recorded conventions, stamped into every probe_auroc row's config.
+# Pre-registered probe recipe: recorded conventions, stamped into every
+# probe_auroc row's config.
 PROBE_RECIPE = {
     "test_size": 0.3,
     "random_state": 0,
@@ -63,11 +60,12 @@ PROBE_RECIPE = {
 def aggregate_response_scores(token_scores):
     """Per-response score = MEAN of that response's per-token probe scores.
 
-    This is goldowskydill2025detecting's aggregation, adopted outright by
-    the 2026-08-15 ratification: "we project onto the probe direction to
-    get a real-valued deception score at every token. We then take the
-    mean across tokens to get a single deceptiveness-score for each model
-    response." interp.probe_layer calls this on held-out decision scores.
+    This is goldowskydill2025detecting's aggregation, adopted outright
+    (pre-registered): "we project onto the probe direction to get a
+    real-valued deception score at every token. We then take the mean
+    across tokens to get a single deceptiveness-score for each model
+    response." scripts/run_probe_transfer.py calls this on held-out
+    decision scores.
 
     token_scores: iterable over responses, each an iterable of per-token
     scores. Returns a list of floats, one per response. An empty response
@@ -90,15 +88,16 @@ def aggregate_response_scores(token_scores):
 # ---------------------------------------------------------------------------
 
 def labeled_incentive_rows(rows):
-    """The ratified within-incentive-condition control labels.
+    """The within-incentive-condition control labels.
 
     Among VALID incentive-condition rows, deceptive True = lied and
     deceptive False = did not lie. Invalid rows are excluded structurally:
     the INTERFACES row rules guarantee invalid rows carry deceptive null,
     never False, and both `valid is not True` and `deceptive not in
     (True, False)` are checked so a malformed row cannot slip in either
-    way. Groups are scenario_id (scenario-grouped splits, ratified
-    metric). Returns [{"scenario_id", "response_text", "label", "group"}].
+    way. Groups are scenario_id (scenario-grouped splits, the
+    pre-registered metric). Returns [{"scenario_id", "response_text",
+    "label", "group"}].
     """
     from algoverse.tasks import INCENTIVE
 
@@ -121,7 +120,7 @@ def labeled_incentive_rows(rows):
             "response_text": response_text,
             "label": bool(row["deceptive"]),
             "group": row.get("scenario_id"),
-            # Provenance for stratified scoring (additive, 2026-09-02):
+            # Provenance for stratified scoring:
             # which run wrote the response, and whether the scenario had
             # a real outside offer (None = a no-offer scenario).
             "source_run_id": row.get("run_id"),
@@ -153,9 +152,9 @@ def probe_examples_from_rows(rows, tokenizer, exclude_final_line=False,
     """Capture-ready probe examples from results rows (label source 1).
 
     Re-renders each row's scenario in the incentive condition through
-    eval.render_condition_texts (the module rendering contract, including
-    the generation prompt and any system fold) and appends the row's
-    stored response_text. response_start is the prompt's token count under
+    eval.render_condition_texts (the module rendering contract, generation
+    prompt included) and appends the row's stored response_text.
+    response_start is the prompt's token count under
     the same add_special_tokens=False tokenization the capture helper
     uses, VERIFIED by prefix-token equality so a tokenizer boundary merge
     cannot silently shift the span.
@@ -332,10 +331,9 @@ def load_probe_dataset(path):
 # ---------------------------------------------------------------------------
 
 # Fields that carry results rather than run identity. `accuracy` is a
-# top-level result field on probe_auroc rows only ("accuracy alongside",
-# ratified probe metric) — recorded like wikitext2_ppl's authorized
-# nll_mean result field. Authorized by the human 2026-08-16 and now in
-# the INTERFACES.md interp.jsonl contract.
+# top-level result field on probe_auroc rows only, recorded like
+# wikitext2_ppl's nll_mean result field. Part of the interp.jsonl
+# contract.
 _RESULT_FIELDS = {
     "analysis", "layer", "value", "ci_low", "ci_high", "accuracy", "config",
 }
@@ -345,9 +343,9 @@ def _append_jsonl(path, record):
     """Append one JSON line; heal a torn final line first.
 
     Mirrors utils.append_jsonl (torn-fragment isolation, flush + fsync)
-    without importing utils, whose module-level torch import would break
-    the rung-1 stdlib environment — the same reason metrics.load_rows
-    re-implements read_jsonl.
+    without importing utils, so this module's imports stay stdlib-only
+    and the dependency-free tier can run it (the same reason
+    metrics.load_rows has its own JSONL reader).
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,8 +362,8 @@ def _append_jsonl(path, record):
 
 
 def _finite_or_none(value):
-    """None for None/NaN; float otherwise. JSON has no NaN; null is the
-    ratified way to record an excluded/unavailable value."""
+    """None for None/NaN; float otherwise. JSON has no NaN; null is how
+    an excluded/unavailable value is recorded."""
     if value is None:
         return None
     value = float(value)
@@ -453,208 +451,3 @@ def _interp_done(out_path, run_meta, analysis, layer, config):
             % (run_id, analysis, layer, ", ".join(sorted(config_mismatches)))
         )
     return bool(matched)
-
-
-def _known_n_layers(model):
-    """num_hidden_layers when the config exposes it, else None."""
-    return getattr(getattr(model, "config", None), "num_hidden_layers", None)
-
-
-# ---------------------------------------------------------------------------
-# Analysis runners
-# ---------------------------------------------------------------------------
-
-def run_probe_auroc(model, tokenizer, examples, out_path, run_meta,
-                    label_source, extra_config=None, scratch_dir=None,
-                    _capture=None, _probe=None, _disk_capture=None):
-    """Per-layer probe AUROC rows (analysis "probe_auroc") with resume.
-
-    examples: [{"text", "response_start", "label", "group"}] from
-    probe_examples_from_rows or load_probe_dataset. Captures response-token
-    residuals once for all layers (interp.response_token_resid_by_layer,
-    lesion-safe), fits the ratified probe per layer (interp.probe_layer),
-    and appends one row per layer: value = held-out scenario-grouped AUROC,
-    ci from the existing group-bootstrap machinery (null with a config note
-    when the bootstrap is degenerate), plus the top-level accuracy result
-    field. A bypassed layer gets a structural-null row with
-    config.excluded_bypassed_layer = true. label_source is stamped into
-    config and is resume identity. _capture/_probe are test seams only.
-
-    Returns {layer: value} for the layers written this call.
-    """
-    examples = list(examples)
-    if not examples:
-        raise ValueError("no probe examples supplied")
-    config = dict(PROBE_RECIPE)
-    config.update({
-        "n": len(examples),
-        "label_source": label_source,
-    })
-    config.update(dict(extra_config or {}))
-    out_path = Path(out_path)
-
-    n_layers = _known_n_layers(model)
-    pending = None
-    if n_layers is not None:
-        pending = [
-            layer for layer in range(n_layers)
-            if not _interp_done(out_path, run_meta, "probe_auroc", layer,
-                                config)
-        ]
-        if not pending:
-            print(
-                "probe_auroc: all %d layers already complete, skipped"
-                % n_layers
-            )
-            return {}
-
-    if _probe is None:
-        from algoverse.interp import probe_layer as _probe
-    labels = [example["label"] for example in examples]
-    groups = [example["group"] for example in examples]
-
-    def consume(features):
-        written = {}
-        for layer, layer_features in enumerate(features):
-            if _interp_done(out_path, run_meta, "probe_auroc", layer, config):
-                continue
-            if layer_features is None:
-                excluded_config = dict(config)
-                excluded_config["excluded_bypassed_layer"] = True
-                write_interp_row(
-                    out_path, run_meta, "probe_auroc", layer,
-                    None, None, None, excluded_config,
-                    extra={"accuracy": None},
-                )
-                written[layer] = None
-                continue
-            _, result = _probe(layer_features, labels, groups)
-            ci_low, ci_high = result.get("auroc_ci") or (None, None)
-            layer_config = config
-            if ci_low is None or ci_high is None:
-                ci_low = ci_high = None
-                layer_config = dict(config)
-                layer_config["ci"] = (
-                    "null: group bootstrap degenerate (too few resamplable "
-                    "held-out scenario groups)"
-                )
-            write_interp_row(
-                out_path, run_meta, "probe_auroc", layer,
-                result["auroc"], ci_low, ci_high, layer_config,
-                extra={"accuracy": result["accuracy"]},
-            )
-            written[layer] = result["auroc"]
-        return written
-
-    texts = [example["text"] for example in examples]
-    starts = [example["response_start"] for example in examples]
-    if _capture is not None:
-        return consume(_capture(model, tokenizer, texts, starts))
-
-    import tempfile
-
-    from algoverse.interp import (
-        iter_disk_backed_residual_layers,
-        response_token_resid_by_layer_to_disk,
-    )
-
-    capture = _disk_capture or response_token_resid_by_layer_to_disk
-    if scratch_dir is not None:
-        Path(scratch_dir).mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix="algoverse-probes-", dir=scratch_dir
-    ) as tmp:
-        metadata = capture(
-            model, tokenizer, texts, starts, tmp, layers=pending
-        )
-        return consume(iter_disk_backed_residual_layers(metadata))
-
-
-def run_attention_jsd(model, tokenizer, texts_incentive, texts_control,
-                      out_path, run_meta, groups_incentive=None,
-                      groups_control=None, n_boot=2000, seed=0, alpha=0.05,
-                      extra_config=None):
-    """Per-layer attention-JSD rows (analysis "attention_jsd") with resume.
-
-    Wires the two conditions' contract-rendered texts through
-    interp.attention_jsd_between_conditions (the ratified average-then-JSD,
-    flat-pooling, zero-extension design; the model must come from
-    interp.load_eager_model_for_interp so attention is materialized) and
-    appends one row per layer: value = point JSD in nats, ci from the
-    scenario bootstrap (null with a config note when degenerate). A
-    bypassed layer's NaN becomes a structural-null row with
-    config.excluded_bypassed_layer = true.
-
-    Returns {layer: value} for the layers written this call.
-    """
-    texts_incentive = list(texts_incentive)
-    texts_control = list(texts_control)
-    config = {
-        "n_texts_incentive": len(texts_incentive),
-        "n_texts_control": len(texts_control),
-        "n_boot": n_boot,
-        "seed": seed,
-        "alpha": alpha,
-        "design": "avg-then-jsd, flat pooling, zero-extension (ratified)",
-        "attn_implementation": getattr(
-            getattr(model, "config", None), "_attn_implementation", None
-        ),
-    }
-    config.update(dict(extra_config or {}))
-    out_path = Path(out_path)
-
-    n_layers = _known_n_layers(model)
-    if n_layers is not None:
-        pending = [
-            layer for layer in range(n_layers)
-            if not _interp_done(out_path, run_meta, "attention_jsd", layer,
-                                config)
-        ]
-        if not pending:
-            print(
-                "attention_jsd: all %d layers already complete, skipped"
-                % n_layers
-            )
-            return {}
-
-    from algoverse.interp import attention_jsd_between_conditions
-
-    result = attention_jsd_between_conditions(
-        model, tokenizer, texts_incentive, texts_control,
-        groups_a=groups_incentive, groups_b=groups_control,
-        n_boot=n_boot, seed=seed, alpha=alpha,
-    )
-    point = result["jsd"]
-    ci_low_arr = result["ci_low"]
-    ci_high_arr = result["ci_high"]
-
-    written = {}
-    for layer in range(len(point)):
-        if _interp_done(out_path, run_meta, "attention_jsd", layer, config):
-            continue
-        value = float(point[layer])
-        if value != value:  # NaN: the ratified bypassed-layer exclusion
-            excluded_config = dict(config)
-            excluded_config["excluded_bypassed_layer"] = True
-            write_interp_row(
-                out_path, run_meta, "attention_jsd", layer,
-                None, None, None, excluded_config,
-            )
-            written[layer] = None
-            continue
-        layer_config = config
-        if ci_low_arr is None or ci_high_arr is None:
-            layer_config = dict(config)
-            layer_config["ci"] = (
-                "null: scenario bootstrap degenerate (too few resamples)"
-            )
-            ci_low = ci_high = None
-        else:
-            ci_low = float(ci_low_arr[layer])
-            ci_high = float(ci_high_arr[layer])
-        write_interp_row(
-            out_path, run_meta, "attention_jsd", layer,
-            value, ci_low, ci_high, layer_config,
-        )
-        written[layer] = value
-    return written

@@ -3,15 +3,16 @@ Stage-1 sweep selection report: the disqualifier table, l*, and the verdict.
 
 This module is the sweep's analogue of eval.gate1_report: pure analysis over
 already-written results rows, importing nothing heavy (no torch, no numpy),
-so it runs on a laptop against row files synced from Drive. It is a CONSUMER
-of metrics.py and figures.py. A_l and its CI come from figures.layer_curve
-(metrics.bypass_effect underneath: paired scenario bootstrap, n_boot=2000,
-seed=0, alpha=0.05 per spec item 9), and the Pareto frontier comes from
+so it runs on a laptop against row files copied from the project directory.
+It is a CONSUMER of metrics.py and figures.py. A_l and its CI come from
+figures.layer_curve (metrics.bypass_effect underneath: paired scenario
+bootstrap, n_boot=2000, seed=0, alpha=0.05), and the Pareto frontier comes from
 figures.pareto_points / pareto_frontier / curve_report. Nothing statistical
 is reimplemented here.
 
-What this module adds is the ratified per-layer disqualifiers and the
-selection rule (RESEARCH_SPEC items 15-17 plus the item 2-3 bounds):
+What this module adds is the pre-registered per-layer disqualifiers and the
+selection rule. The bounds keep their pre-registration item numbers as
+labels (i2, i3, i15, i16, i17) in the check keys and the report columns:
 
   item 15   invalid rate <= 0.20 PER CONDITION, computed from the layer's
             own rows (invalid = valid falsy, rate among that condition's
@@ -31,15 +32,14 @@ selection rule (RESEARCH_SPEC items 15-17 plus the item 2-3 bounds):
             records. JSD is already an intact-vs-bypassed quantity, so it
             needs no base record.
   item 17   A_l >= 0.15 AND the 95% scenario-bootstrap CI excludes zero
-            (ci_low > 0). The spec requires reporting A_l*/tau(M_D)
-            alongside, and this report does.
+            (ci_low > 0). A_l*/tau(M_D) is reported alongside.
 
 Every check evaluates to one of PASS / FAIL / NOT EVALUATED -- three states,
 because "we never measured it" must never render as either of the other two.
 Every layer passing the cheap bounds and item 17 is a benchmark candidate.
 Selection waits until every candidate has MMLU and GSM8K results, then chooses
 l* = argmax A_l among candidates that pass those benchmarks. If no layer
-qualifies, the verdict is the spec's explicit stop condition: "no viable
+qualifies, the verdict is the pre-registered stop condition: "no viable
 layer-level localization" (Stage 2 does not run).
 
 Selection is withheld, not guessed, while anything is still pending: any layer
@@ -49,17 +49,13 @@ verdict to "sweep incomplete". An UNMEASURABLE layer is a different case and
 does NOT block -- an A_l that cannot be computed is a finding about that layer,
 not an unfinished job.
 
-Metric names (sweep-driver P-S1 / P-S2, ratified 2026-08-16): the names read
-from the per-layer records are mmlu_acc, gsm8k_exact_match, wikitext2_ppl, and
-wikitext2_neutral_jsd. Records written under any other name are simply absent
-here and the affected checks show NOT EVALUATED; this module never invents a
-fallback name.
+Metric names: the names read from the per-layer records are mmlu_acc,
+gsm8k_exact_match, wikitext2_ppl, and wikitext2_neutral_jsd. Records written
+under any other name are simply absent here and the affected checks show NOT
+EVALUATED; this module never invents a fallback name.
 
-Tripwire (plan D5, spec item 16's mandatory calibration clause): a
-research-model verdict is REFUSED (ValueError) unless the caller passes the
-recorded DEV-calibration confirm-or-revise decision as a non-empty string
-(item16_decision); dev=True bypasses the tripwire for the DEV model only and
-stamps every report line as not publishable, exactly like gate1_report.
+dev=True (the DEV model only) stamps every report line as not publishable,
+exactly like gate1_report.
 
 Nothing is silently dropped: every requested layer appears in the table --
 disqualified, unmeasurable (figures' A_l None with its reason), or literally
@@ -72,7 +68,8 @@ import os
 from algoverse import figures, metrics
 
 
-# Ratified bounds (RESEARCH_SPEC items 15-17 and 2-3; do not re-derive).
+# Pre-registered bounds (the i-numbers are the pre-registration's item
+# labels; do not re-derive).
 INVALID_RATE_MAX = metrics.INVALID_RATE_MAX   # item 15, per condition (home: metrics)
 COMPETENCE_DROP_MAX = 0.05   # item 2, negotiation task-competence vs M_0
 BENCH_DROP_MAX = 0.05        # items 2-3, mmlu / gsm8k, layer vs intact base
@@ -80,9 +77,7 @@ PPL_RISE_MAX = 2.0           # item 3, WikiText-2 perplexity rise
 NEUTRAL_JSD_MAX = 0.25       # item 16, nats
 A_L_MIN = 0.15               # item 17
 
-# PROPOSED metric names (P-S1 / P-S2, pending human ratification -- see the
-# module docstring). The first three mirror the contract's existing
-# competence.jsonl enum; the JSD name is the plan's proposed addition.
+# Metric names read from competence.jsonl records.
 MMLU_METRIC = "mmlu_acc"
 GSM8K_METRIC = "gsm8k_exact_match"
 PPL_METRIC = "wikitext2_ppl"
@@ -150,27 +145,13 @@ def load_sweep_inputs(base, layer_inputs):
                 % row.get("bypassed_layer")
             )
 
-    base_permanent = {
-        (row.get("gen_config") or {}).get("permanent_bypassed_layer")
-        for row in base_rows
-    }
-    if len(base_permanent) != 1:
-        raise ValueError(
-            "base run mixes permanent_bypassed_layer identities: %r"
-            % sorted(base_permanent, key=str)
-        )
-    permanent_layer = next(iter(base_permanent))
     base_impls = {
         (row.get("gen_config") or {}).get("bypass_impl") for row in base_rows
     }
-    expected_base_impl = permanent_layer is not None
-    if (
-        len(base_impls) != 1
-        or (next(iter(base_impls)) is not None) != expected_base_impl
-    ):
+    if base_impls != {None}:
         raise ValueError(
-            "base run bypass provenance contradicts "
-            "permanent_bypassed_layer=%r" % permanent_layer
+            "base run carries bypass_impl %r; the unprobed base run must "
+            "record no bypass implementation" % sorted(base_impls, key=str)
         )
 
     layer_rows = {}
@@ -182,7 +163,6 @@ def load_sweep_inputs(base, layer_inputs):
             raise ValueError("layer %d given twice in layer_inputs" % layer)
         rows = _rows(source)
         layer_impls = set()
-        layer_permanent = set()
         conditions = {}
         for row in rows:
             value = row.get("bypassed_layer")
@@ -200,7 +180,6 @@ def load_sweep_inputs(base, layer_inputs):
                 )
             gen_config = row.get("gen_config") or {}
             layer_impls.add(gen_config.get("bypass_impl"))
-            layer_permanent.add(gen_config.get("permanent_bypassed_layer"))
             conditions.setdefault(row.get("scenario_id"), set()).add(
                 row.get("condition")
             )
@@ -217,17 +196,6 @@ def load_sweep_inputs(base, layer_inputs):
                 raise ValueError(
                     "rows for layer %d use bypass_impl %r, expected %r"
                     % (layer, layer_impl, expected_probe_impl)
-                )
-            if permanent_layer is not None and layer_impl not in base_impls:
-                raise ValueError(
-                    "rows for layer %d use bypass_impl %r, permanent base "
-                    "uses %r" % (layer, layer_impl, next(iter(base_impls)))
-                )
-            if layer_permanent != {permanent_layer}:
-                raise ValueError(
-                    "rows for layer %d have permanent_bypassed_layer %r, "
-                    "base has %r"
-                    % (layer, sorted(layer_permanent, key=str), permanent_layer)
                 )
             incomplete = sorted(
                 sid for sid, present in conditions.items()
@@ -404,25 +372,6 @@ def layer_checks(point, layer, m0_competence, layer_bench, base_bench,
 
 
 # ---------------------------------------------------------------------------
-# The tripwire (plan D5 / spec item 16 calibration clause)
-# ---------------------------------------------------------------------------
-
-
-def _require_item16_decision(item16_decision, dev):
-    if dev:
-        return
-    if not (isinstance(item16_decision, str) and item16_decision.strip()):
-        raise ValueError(
-            "item16_calibration_decision_missing: refusing to produce a "
-            "research-model sweep verdict without the recorded "
-            "DEV-calibration confirm-or-revise decision on the 0.25-nat "
-            "neutral-JSD bound (RESEARCH_SPEC item 16; sweep-driver plan "
-            "D5). Pass item16_decision=<reference to the recorded decision>, "
-            "or dev=True for the DEV model only."
-        )
-
-
-# ---------------------------------------------------------------------------
 # Evaluation (structured) and the report (rendered)
 # ---------------------------------------------------------------------------
 
@@ -590,7 +539,7 @@ def _ratio(a_l, tau_base):
 
 
 def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
-                 competence_inputs=None, item16_decision=None, n_boot=2000,
+                 competence_inputs=None, n_boot=2000,
                  seed=0, dev=False,
                  invalid_rate_max=INVALID_RATE_MAX,
                  competence_drop_max=COMPETENCE_DROP_MAX,
@@ -600,14 +549,9 @@ def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
 
     The complete layer table (every requested layer, nothing silently
     dropped), figures' curve summary, the Pareto frontier, l* with
-    A_l*/tau(M_D) (item 17 requires reporting that share), and the verdict.
-
-    item16_decision is the D5 tripwire: without the recorded DEV-calibration
-    confirm-or-revise decision string this REFUSES to produce a verdict
-    (ValueError); dev=True bypasses it for the DEV model only and stamps
-    every line, exactly like gate1_report's dev mode.
+    A_l*/tau(M_D), and the verdict. dev=True (the DEV model only) stamps
+    every line as not publishable, exactly like gate1_report's dev mode.
     """
-    _require_item16_decision(item16_decision, dev)
     result = evaluate_sweep(
         base, layer_inputs, requested_layers=requested_layers,
         m0_competence=m0_competence, competence_inputs=competence_inputs,
@@ -621,8 +565,7 @@ def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
     lines = []
     lines.append("SWEEP SELECTION REPORT  (bootstrap n=%d)" % n_boot)
     lines.append(
-        "item-16 calibration decision: %s"
-        % (item16_decision if item16_decision else "NONE (dev mode)")
+        "neutral-JSD bound: %.2f nats (pre-registered)" % neutral_jsd_max
     )
     lines.append(
         "bounds: invalid<=%.2f/condition (i15), negotiation-competence "
@@ -716,11 +659,11 @@ def sweep_report(base, layer_inputs, requested_layers=None, m0_competence=None,
 
 
 # ---------------------------------------------------------------------------
-# Full-pool confirmation (plan D7)
+# Full-pool confirmation
 # ---------------------------------------------------------------------------
 
 
-def confirm_report(base, bypassed, layer=None, item16_decision=None,
+def confirm_report(base, bypassed, layer=None,
                    n_boot=2000, seed=0, a_l_min=A_L_MIN, dev=False) -> str:
     """The full-pool confirmation of l*: recompute A_l*, re-check item 17.
 
@@ -734,13 +677,9 @@ def confirm_report(base, bypassed, layer=None, item16_decision=None,
     metrics.bypass_effect plus the pairing diagnostics), so a confirmation
     computed on a partial overlap says so instead of looking fully paired.
     Item 17 is re-checked as at selection: A_l* >= a_l_min and ci_low > 0.
-    Transfer re-evaluation is out of scope here (plan D7): this reports only
-    whether the confirmation step passed.
-
-    The D5 tripwire applies here too -- the confirmation is a research-model
-    verdict -- with the same dev=True bypass for the DEV model only.
+    Transfer re-evaluation is out of scope here: this reports only whether
+    the confirmation step passed. dev=True stamps every line, as above.
     """
-    _require_item16_decision(item16_decision, dev)
     base_rows = _rows(base)
     byp_rows = _rows(bypassed)
     if not base_rows:
@@ -779,10 +718,6 @@ def confirm_report(base, bypassed, layer=None, item16_decision=None,
 
     lines = []
     lines.append("SWEEP CONFIRMATION REPORT  (full pool, bootstrap n=%d)" % n_boot)
-    lines.append(
-        "item-16 calibration decision: %s"
-        % (item16_decision if item16_decision else "NONE (dev mode)")
-    )
     lines.append(
         "layer %d: A_l* = %s [%s, %s]  tau(M_D) = %s  A_l*/tau(M_D) = %s" % (
             derived, _fmt(a_l), _fmt(effect["A_l_ci_low"]),

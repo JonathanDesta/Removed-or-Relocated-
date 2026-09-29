@@ -1,54 +1,50 @@
 """
-Stage-1 layer-sweep driver: measure every requested decoder layer in one
-model load (sweep-driver plan D1/D2/D5, WP-S3).
+Layer-sweep driver: measure every requested decoder layer in one model load.
 
-The driver is a library function so the Colab CLI (scripts/run_sweep.py)
-stays a thin argument parser, and so the whole loop is testable on tiny CPU
-models. Per swept layer l it does two things, in this order:
+The driver is a library function so the CLI (scripts/run_sweep.py) stays a
+thin argument parser, and so the whole loop is testable on tiny CPU models.
+Per swept layer l it does two things, in this order:
 
 1. The neutral-distribution pass (eval.neutral_distribution_pass) on the
    INTACT model — that function owns its own probe install/remove per
    window. Its JSD lands in the layer run's competence.jsonl as a
    ``wikitext2_neutral_jsd`` row and the bypassed model's slice perplexity
-   as an ordinary ``wikitext2_ppl`` row (ratified P-S1, INTERFACES
-   2026-08-16). The JSD config records the compared identity (probe_layer,
-   "intact-vs-probe-bypassed") plus the intact model's nll/ppl from the same
-   forwards, so item 3's same-model delta can always be recomputed from the
-   layer's own file. The PPL row uses the same recipe/provenance config as
-   the sweep's intact PPL row so the two are directly comparable.
-2. Unless jsd_only: install a probe bypass (role="probe", carve-out
-   2026-08-16) and run the negotiation eval into the layer's own run
-   directory. One run_id PER LAYER (D1) because the contract's resume key
-   is (run_id, scenario_id, condition) and a shared run_id would collide.
+   as an ordinary ``wikitext2_ppl`` row. The JSD config records the
+   compared identity (probe_layer, "intact-vs-probe-bypassed") plus the
+   intact model's nll/ppl from the same forwards, so the same-model
+   perplexity delta can always be recomputed from the layer's own file.
+   The PPL row uses the same recipe/provenance config as the sweep's
+   intact PPL row so the two are directly comparable.
+2. Unless jsd_only: install the temporary bypass at l and run the
+   negotiation eval into the layer's own run directory. One run_id PER
+   LAYER, because the contract's resume key is (run_id, scenario_id,
+   condition) and a shared run_id would collide.
 
-For an intact Stage-1 sweep, the negotiation baseline is NOT generated here:
-ratified P-S3 reuses the full-pool M_D rows (Gate-1's A3 run) restricted to
-the n=100 draw. A permanently lesioned sweep instead generates its own
-same-draw unprobed baseline under ``<run_tag>-base/rows.jsonl``. Every sweep
-records its unprobed model's slice perplexity once in
-``out_root/base-competence.jsonl``; it falls out of the first layer's pass at
-zero extra forward cost and is the reference for item 3's ppl-rise bound.
+The unprobed negotiation baseline is NOT generated here: the reports reuse
+the swept checkpoint's own full-pool rows (M_D's for Stage 1; M_E's and
+E,D-t281's for the Stage-3 relocation comparison) restricted to the n=100
+draw. Every sweep records its unprobed model's slice perplexity once in
+``out_root/base-competence.jsonl``; it falls out of the first layer's pass
+at zero extra forward cost and is the reference for the perplexity-rise
+bound.
 
-Layout under out_root (D1):
+Layout under out_root:
 
     sweep_manifest.json           write-once sweep identity, guarded on
                                   every rerun like train_manifest.json
     base-competence.jsonl         unprobed wikitext2_ppl, run_id <tag>-base
-    <run_tag>-base/rows.jsonl     permanently lesioned sweep baseline only
-    <run_tag>-lNN/rows.jsonl      negotiation rows, probe bypass at NN
+    <run_tag>-lNN/rows.jsonl      negotiation rows, bypass at NN
     <run_tag>-lNN/competence.jsonl  the layer's JSD + bypassed-ppl rows
 
-Chunking across Colab sessions: ``layers`` is ALWAYS the sweep's full
+Chunking across GPU sessions: ``layers`` is ALWAYS the sweep's full
 requested list and is manifest identity; ``chunk`` selects which of those
 layers this session executes (None = all of them). Every session of one
 sweep therefore passes the identical ``layers`` and only varies ``chunk``.
 
-Item-16 tripwire (D5): a research-model sweep (dev=False) refuses to run
-any layer until ``item16_decision`` carries the human's recorded
-confirm-or-revise decision on the 0.25-nat bound as a non-empty string.
-dev=True is the DEV-calibration mode itself — the run that PRODUCES that
-decision — so it needs no decision and is forced to jsd_only (the DEV
-sweep has no selection consequence, so negotiation rows would be waste).
+dev=True is the DEV-calibration mode: the per-layer JSD curve on the 0.5B
+DEV model that checked the pre-registered 0.25-nat divergence bound. It is
+forced to jsd_only (a DEV sweep has no selection consequence, so
+negotiation rows would be waste).
 
 Everything resumes: finished JSD/ppl rows are skipped through eval's own
 _competence_done identity guard (imported, not duplicated — same package),
@@ -56,7 +52,8 @@ finished negotiation rows through run_negotiation_eval's resume machinery,
 and a fully finished layer is skipped before the model is touched.
 
 torch and models.py are imported lazily inside functions, like eval.py, so
-this module imports on a stdlib-only interpreter (rung-1 discipline).
+this module imports on a stdlib-only interpreter (the dependency-free
+tier).
 """
 
 import json
@@ -74,7 +71,7 @@ from algoverse.eval import (
 from algoverse.metrics import load_rows
 from algoverse.tasks import CONDITIONS, get_scenarios
 
-# config.compared for the P-S1 rows: which two model states the JSD (and
+# config.compared for the JSD rows: which two model states the JSD (and
 # the intact_* config values) relate. One constant so sweep_report-side
 # consumers can match it exactly.
 COMPARED = "intact-vs-probe-bypassed"
@@ -83,16 +80,15 @@ COMPARED = "intact-vs-probe-bypassed"
 # train.py's _guard_train_manifest: named refusal, never silent adaptation.
 SWEEP_MANIFEST_FIELDS = (
     "model_id", "adapter_path", "checkpoint_step", "train_seed",
-    "quant_label", "layers", "n", "scenario_seed", "item16_decision",
-    "dev", "run_tag", "permanent_bypassed_layer",
+    "quant_label", "layers", "n", "scenario_seed", "dev", "run_tag",
 )
 
 
 def full_layer_list(model):
     """Every decoder layer index of the loaded model, 0..n_layers-1.
 
-    The ratified Stage-1 sweep set is ALL layers including 0 and n-1, so
-    this list is what the CLI passes as the sweep's manifest identity.
+    The sweep set is ALL layers including 0 and n-1, so this list is what
+    the CLI passes as the sweep's manifest identity.
     """
     from algoverse.models import _decoder_layers
 
@@ -100,25 +96,8 @@ def full_layer_list(model):
 
 
 def layer_run_id(run_tag, layer):
-    """The per-layer run_id/directory name: <run_tag>-lNN (D1)."""
+    """The per-layer run_id/directory name: <run_tag>-lNN."""
     return "%s-l%02d" % (run_tag, layer)
-
-
-def reconcile_permanent_bypass(model, requested_layer):
-    """Install an explicit permanent lesion, or validate an existing one."""
-    from algoverse.models import bypass_state, install_bypass
-
-    state = bypass_state(model)
-    existing = None if state is None else state.get("permanent")
-    if existing is not None:
-        layer = existing["layer_idx"]
-        if layer != requested_layer:
-            raise ValueError(
-                "explicit permanent layer %d conflicts with installed layer %d"
-                % (requested_layer, layer)
-            )
-        return None
-    return install_bypass(model, requested_layer, role="permanent")
 
 
 def _validated_layer(value, context):
@@ -202,7 +181,7 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
                              run_tag, model_id, adapter_path=None,
                              checkpoint_step=None, train_seed=None,
                              batch_size=4, seed=42):
-    """Run only MMLU/GSM8K for already-swept l* candidate layers."""
+    """Run only MMLU/GSM8K for already-swept candidate layers."""
     from algoverse.eval import run_lm_eval_benchmarks
     from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
 
@@ -230,15 +209,8 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
             % ", ".join(mismatches)
         )
 
-    state = bypass_state(model)
-    if state is not None and state.get("probe") is not None:
-        raise ValueError("candidate benchmark model already has a probe bypass")
-    permanent = None if state is None else state.get("permanent")
-    permanent_layer = None if permanent is None else permanent["layer_idx"]
-    if permanent_layer != manifest.get("permanent_bypassed_layer"):
-        raise ValueError(
-            "candidate benchmark permanent lesion does not match sweep manifest"
-        )
+    if bypass_state(model) is not None:
+        raise ValueError("candidate benchmark model already has a bypass")
 
     allowed = set(manifest.get("layers") or [])
     candidates = [
@@ -256,8 +228,7 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
         )
     missing_dirs = [
         layer for layer in candidates
-        if layer != permanent_layer
-        and not (out_root / layer_run_id(run_tag, layer)).is_dir()
+        if not (out_root / layer_run_id(run_tag, layer)).is_dir()
     ]
     if missing_dirs:
         raise ValueError(
@@ -266,11 +237,7 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
         )
 
     written = {}
-    skipped = []
     for layer in candidates:
-        if layer == permanent_layer:
-            skipped.append(layer)
-            continue
         run_id = layer_run_id(run_tag, layer)
         layer_dir = out_root / run_id
         comp_path = layer_dir / "competence.jsonl"
@@ -283,9 +250,8 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
             "arm": None,
             "train_seed": train_seed,
             "bypass_impl": BYPASS_IMPL,
-            "permanent_bypassed_layer": permanent_layer,
         }
-        handle = install_bypass(model, layer, role="probe")
+        handle = install_bypass(model, layer)
         try:
             written[layer] = run_lm_eval_benchmarks(
                 model, tokenizer, comp_path, run_meta,
@@ -293,9 +259,8 @@ def run_candidate_benchmarks(model, tokenizer, candidate_layers, out_root,
             )
         finally:
             handle.remove()
-        after = bypass_state(model)
-        assert after is None or after.get("probe") is None
-    return {"written": written, "structurally_skipped": skipped}
+        assert bypass_state(model) is None
+    return {"written": written}
 
 
 def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
@@ -304,10 +269,10 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                     batch_size=4, use_llm_fallback=False,
                     llm_provider="openai",
                     llm_model="gpt-5-mini",
-                    item16_decision=None, dev=False, jsd_only=False,
+                    dev=False, jsd_only=False,
                     n_tokens=20000, wikitext_ids=None, chunk=None,
                     max_length=1024, stride=512, max_new_tokens=256):
-    """Sweep the requested layers of an already-loaded model (D2 + D5).
+    """Sweep the requested layers of an already-loaded model.
 
     model/tokenizer   loaded ONCE by the caller (canonical profile, adapter
                       applied); the model must be intact on entry.
@@ -316,18 +281,16 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
     chunk             the subset this session executes (None = all). Must
                       be drawn from ``layers``; selecting a chunk never
                       changes the manifest.
-    out_root/run_tag  the D1 layout above; run_tag names the swept
+    out_root/run_tag  the layout above; run_tag names the swept
                       checkpoint (e.g. "md-qwen7b-s42-step281").
-    item16_decision   the recorded item-16 calibration decision; required
-                      as a non-empty string whenever dev=False.
-    dev               DEV-calibration mode: no decision needed, jsd_only
-                      forced (D5).
+    dev               DEV-calibration mode (the 0.5B model's JSD curve):
+                      jsd_only is forced.
     jsd_only          skip negotiation rows (dev calibration, or a
                       JSD-first survey session).
     wikitext_ids      test-only override of the pinned WikiText-2 slice,
                       like neutral_distribution_pass's token_ids.
-    max_length/stride the pinned window scheme (item 12/16); parameters so
-                      tiny-model tests can shrink them, defaults ratified.
+    max_length/stride the pinned window scheme; parameters so tiny-model
+                      tests can shrink them, defaults pre-registered.
     max_new_tokens    generation budget per response, canonical 256.
     Remaining arguments mirror scripts/run_baseline.py and are passed to
     run_negotiation_eval unchanged.
@@ -338,38 +301,19 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
     from algoverse.models import BYPASS_IMPL, bypass_state, install_bypass
     from algoverse.utils import append_jsonl
 
-    # Item-16 tripwire FIRST (D5): before the manifest, before any layer,
-    # before anything is written.
     if dev:
-        # The DEV calibration produces the item-16 decision; it cannot
-        # require it, and its negotiation rows would have no selection
-        # consequence — jsd_only is forced, not optional.
+        # The DEV calibration has no selection consequence, so its
+        # negotiation rows would be waste — jsd_only is forced, not optional.
         jsd_only = True
-    elif not (isinstance(item16_decision, str) and item16_decision.strip()):
-        raise ValueError(
-            "item16_decision: a research-model sweep (dev=False) runs no "
-            "layer until the human's recorded DEV-calibration "
-            "confirm-or-revise decision on the 0.25-nat item-16 bound is "
-            "passed as a non-empty string (RESEARCH_SPEC item 16; "
-            "sweep-driver plan D5). Run --dev-calibration first."
-        )
 
-    # Stage-3 support: a permanently lesioned checkpoint sweeps with its
-    # lesion IN PLACE (the lesion is the baseline; carve-out ratified
-    # 2026-08-16). A pre-installed probe, by contrast, is a caller bug.
-    from algoverse.models import bypass_state as _bypass_state
-
-    entry_state = _bypass_state(model)
-    if entry_state is not None and entry_state.get("probe") is not None:
+    # The sweep driver owns every probe install/remove; a bypass already in
+    # place on entry is a caller bug, refused before anything is written.
+    entry_state = bypass_state(model)
+    if entry_state is not None:
         raise ValueError(
-            "a probe bypass is already installed (layer %s); the sweep "
-            "driver owns probe install/remove"
-            % entry_state["probe"]["layer_idx"]
+            "a bypass is already installed (layer %s); the sweep driver "
+            "owns probe install/remove" % entry_state["layer_idx"]
         )
-    permanent = (
-        None if entry_state is None else entry_state.get("permanent")
-    )
-    permanent_layer = None if permanent is None else permanent["layer_idx"]
 
     layers = [_validated_layer(layer, "layers") for layer in layers]
     if len(set(layers)) != len(layers):
@@ -396,10 +340,8 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "layers": list(layers),
         "n": n,
         "scenario_seed": scenario_seed,
-        "item16_decision": item16_decision,
         "dev": bool(dev),
         "run_tag": run_tag,
-        "permanent_bypassed_layer": permanent_layer,
     }
     manifest_path = out_root / "sweep_manifest.json"
     if manifest_path.is_file():
@@ -412,7 +354,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         )
 
     # The pinned slice is layer-independent: resolve it once and hand the
-    # same token ids to every layer's pass (D3's recommended shape).
+    # same token ids to every layer's pass.
     if wikitext_ids is not None:
         ids = wikitext_ids
     else:
@@ -429,7 +371,6 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "attn_implementation": getattr(config_obj, "_attn_implementation", None),
         "model_revision": getattr(config_obj, "_commit_hash", None),
         "adapter_digest": _adapter_digest(adapter_path),
-        "permanent_bypassed_layer": permanent_layer,
     }
     base_meta = {
         "run_id": "%s-base" % run_tag,
@@ -439,8 +380,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "checkpoint_step": checkpoint_step,
         "arm": None,
         "train_seed": train_seed,
-        "bypass_impl": None if permanent_layer is None else BYPASS_IMPL,
-        "permanent_bypassed_layer": permanent_layer,
+        "bypass_impl": None,
     }
     base_path = out_root / "base-competence.jsonl"
     base_done = _competence_done(
@@ -463,46 +403,15 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         )
 
     scenarios = None
-    base_rows_path = None
     if not jsd_only:
-        # Selection split only, the ratified sweep draw — exactly what
+        # Selection split only, the pre-registered sweep draw — exactly what
         # run_baseline.py does for a sweep leg.
         scenarios = get_scenarios("selection", n=n, seed=scenario_seed)
-        if permanent_layer is not None:
-            base_run_id = "%s-base" % run_tag
-            base_rows_path = out_root / base_run_id / "rows.jsonl"
-            if not _negotiation_complete(
-                base_rows_path, base_run_id, scenarios
-            ):
-                run_negotiation_eval(
-                    model, tokenizer, scenarios,
-                    run_id=base_run_id, out_path=base_rows_path,
-                    model_id=model_id, adapter_path=adapter_path,
-                    bypassed_layer=None, checkpoint_step=checkpoint_step,
-                    arm=None, batch_size=batch_size,
-                    max_new_tokens=max_new_tokens, seed=seed,
-                    train_seed=train_seed, quant_label=quant_label,
-                    use_llm_fallback=use_llm_fallback,
-                    llm_provider=llm_provider, llm_model=llm_model,
-                    scenario_seed=scenario_seed, n=n,
-                )
 
     executed = []
     skipped = []
-    lesioned_skipped = []
     layer_dirs = {}
     for layer in chunk:
-        if layer == permanent_layer:
-            # Ratified P-S4: probing the permanently-lesioned layer would
-            # measure an identity (its output is already discarded), so the
-            # driver skips it and the report treats it as structurally
-            # null. Recorded in the summary, never silently dropped.
-            lesioned_skipped.append(layer)
-            print(
-                "layer %02d: permanently lesioned — structurally null, "
-                "skipped (P-S4)" % layer
-            )
-            continue
         run_id = layer_run_id(run_tag, layer)
         layer_dir = out_root / run_id
         layer_dirs[layer] = str(layer_dir)
@@ -517,7 +426,6 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
             "arm": None,
             "train_seed": train_seed,
             "bypass_impl": BYPASS_IMPL,
-            "permanent_bypassed_layer": permanent_layer,
         }
         # JSD identity is known before the pass runs. Its recorded config
         # additionally carries the intact-side results (intact_nll_mean and
@@ -584,7 +492,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                 base_done = True
 
         if not rows_done:
-            handle = install_bypass(model, layer, role="probe")
+            handle = install_bypass(model, layer)
             try:
                 run_negotiation_eval(
                     model, tokenizer, scenarios,
@@ -601,20 +509,9 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
                 )
             finally:
                 handle.remove()
-        state_after = bypass_state(model)
-        probe_after = (
-            None if state_after is None else state_after.get("probe")
-        )
-        live_permanent = (
-            None if state_after is None else state_after.get("permanent")
-        )
-        assert probe_after is None, (
+        assert bypass_state(model) is None, (
             "probe still installed after sweeping layer %d" % layer
         )
-        assert (
-            (None if live_permanent is None else live_permanent["layer_idx"])
-            == permanent_layer
-        ), "permanent lesion changed while sweeping layer %d" % layer
 
     if not base_done:
         recovered = _recover_intact_values(out_root, run_tag, layers)
@@ -629,10 +526,7 @@ def run_layer_sweep(model, tokenizer, layers, out_root, run_tag, model_id,
         "chunk": list(chunk),
         "executed": executed,
         "skipped": skipped,
-        "lesioned_skipped": lesioned_skipped,
-        "permanent_bypassed_layer": permanent_layer,
         "layer_dirs": layer_dirs,
         "base_competence": str(base_path) if base_done else None,
-        "base_rows": None if base_rows_path is None else str(base_rows_path),
         "manifest": str(manifest_path),
     }

@@ -198,27 +198,6 @@ def test_snap_wiring_uses_return_value():
             assert true_offer not in forbidden
 
 
-def test_folded_build_records_provenance_and_validates():
-    with tempfile.TemporaryDirectory() as unfolded_dir, tempfile.TemporaryDirectory() as folded_dir:
-        data.build_finetune_datasets(
-            unfolded_dir, n_per_dataset=12, seed=4, fold_system=False
-        )
-        manifest = data.build_finetune_datasets(
-            folded_dir, n_per_dataset=12, seed=4, fold_system=True
-        )
-        unfolded = _read_jsonl(Path(unfolded_dir, "m_d_train.jsonl"))
-        folded = _read_jsonl(Path(folded_dir, "m_d_train.jsonl"))
-        metas = _read_jsonl(Path(folded_dir, "m_d_train.meta.jsonl"))
-        assert manifest["fold_system"] is True
-        assert all(meta["fold_system"] is True for meta in metas)
-        for before, after in zip(unfolded, folded):
-            assert all(message["role"] != "system" for message in after["messages"])
-            assert after["messages"][0]["role"] == "user"
-            assert before["messages"][0]["content"] in after["messages"][0]["content"]
-            claimed, _ = tasks.extract_claimed_offer(after["messages"][-1]["content"])
-            assert claimed is not None
-
-
 if __name__ == "__main__":
     import traceback
 

@@ -1,15 +1,14 @@
 """Print the Stage-1 sweep selection report, or the full-pool confirmation.
 
-Selection report (plan D6):
+Selection report:
 
     python scripts/sweep_report.py \
-        --base results/sweep-md-qwen7b-base/rows.jsonl \
-        --layer 0=results/sweep-md-qwen7b-l00/rows.jsonl \
-        --layer 1=results/sweep-md-qwen7b-l01/rows.jsonl \
-        --competence base=results/m0-baseline/competence.jsonl \
-        --competence 0=results/sweep-md-qwen7b-l00/competence.jsonl \
-        --m0-competence 0.96 \
-        --item16-decision "spec item 16 confirmed at 0.25 nats, <date/ref>"
+        --base $PROJECT/results/md-qwen7b-s42-step281/rows.jsonl \
+        --layer 0=$PROJECT/results/sweep-md-qwen7b-s42-step281/md-qwen7b-s42-step281-l00/rows.jsonl \
+        --layer 1=$PROJECT/results/sweep-md-qwen7b-s42-step281/md-qwen7b-s42-step281-l01/rows.jsonl \
+        --competence base=$PROJECT/results/m0-baseline-qwen7b/competence.jsonl \
+        --competence 0=$PROJECT/results/sweep-md-qwen7b-s42-step281/md-qwen7b-s42-step281-l00/competence.jsonl \
+        --m0-competence 0.96
 
 Every --layer N=PATH appears in the table -- disqualified, unmeasurable, or
 empty. --competence takes a layer number or the literal "base" (the intact
@@ -29,23 +28,16 @@ wikitext2_ppl row for the same model measured in a different session, and two
 sessions do not agree bit-for-bit, so the duplicate-metric guard rejects them
 as conflicting. Pass Gate-1's file alone.
 
-A Stage-3 (permanently lesioned) sweep is a different case: Gate-1's intact
-competence rows are not comparable to it (their permanent_bypassed_layer is
-None against the sweep's l*, which the comparability guard refuses, by
-design). Stage 3 does not go through this report -- its delta curve is
-produced by scripts/relocation_report.py.
+The Stage-3 sweeps (E,D-t281 and the just-edited M_E) do not go through
+this report: their delta curve is produced by scripts/relocation_report.py.
 
---item16-decision is the D5 tripwire: the recorded DEV-calibration
-confirm-or-revise decision on the 0.25-nat JSD bound. Without it the report
-refuses a research-model verdict; --dev bypasses for the DEV model only and
-stamps every line.
+--dev (the DEV model only) stamps every line as not publishable.
 
-Confirmation mode (plan D7), after l* is selected:
+Confirmation mode, after l* is selected:
 
     python scripts/sweep_report.py --confirm \
-        --confirm-base results/md-a3-full/rows.jsonl \
-        --confirm-bypassed results/md-l17-n305/rows.jsonl \
-        --item16-decision "..."
+        --confirm-base $PROJECT/results/md-qwen7b-s42-step281/rows.jsonl \
+        --confirm-bypassed $PROJECT/results/md-qwen7b-s42-step281-l17-n305/rows.jsonl
 """
 import argparse
 import sys
@@ -94,17 +86,13 @@ if __name__ == "__main__":
     parser.add_argument("--m0-competence", type=float, default=None,
                         help="M_0 negotiation task-competence (item 2 "
                              "reference); omitted -> check not evaluated")
-    parser.add_argument("--item16-decision", default=None,
-                        help="recorded DEV-calibration confirm-or-revise "
-                             "decision reference (required for a research-"
-                             "model verdict)")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dev", action="store_true",
-                        help="DEV model only: bypass the item-16 tripwire "
-                             "and stamp the report")
+                        help="DEV model only: stamp every line as not "
+                             "publishable")
     parser.add_argument("--confirm", action="store_true",
-                        help="full-pool confirmation mode (plan D7)")
+                        help="full-pool confirmation mode")
     parser.add_argument("--confirm-base", metavar="PATH",
                         help="full-pool intact rows.jsonl (confirm mode)")
     parser.add_argument("--confirm-bypassed", metavar="PATH",
@@ -120,7 +108,6 @@ if __name__ == "__main__":
         confirm_report(
             args.confirm_base,
             args.confirm_bypassed,
-            item16_decision=args.item16_decision,
             n_boot=args.n_boot,
             seed=args.seed,
             dev=args.dev,
@@ -135,7 +122,6 @@ if __name__ == "__main__":
             competence_inputs=parse_layer_pairs(
                 args.competence, allow_base=True, merge_sources=True
             ),
-            item16_decision=args.item16_decision,
             n_boot=args.n_boot,
             seed=args.seed,
             dev=args.dev,

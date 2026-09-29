@@ -1,4 +1,4 @@
-"""Rung-1 tests for scripts/regrade_insider.py and scripts/build_probe_test_set.py.
+"""Dependency-free tests for scripts/regrade_insider.py.
 
     python3 tests/test_regrade_pure.py
 """
@@ -60,31 +60,6 @@ def test_latest_record_wins_and_failed_rows_stay_invalid():
     assert out[2]["valid"] is False                                    # no record at all -> never honest
     text = m.summarize(out, "t")
     assert "concealed   1 /   1 valid" in text
-
-
-def test_select_rows_filters_and_matched_pairs():
-    b = _load("build_probe_test_set")
-    def row(run, sid, deceptive, tv, cond="incentive", valid=True):
-        return {"run_id": run, "scenario_id": sid, "deceptive": deceptive, "true_value": tv,
-                "condition": cond, "valid": valid}
-    a = [row("m0", "s1", False, 100), row("m0", "s2", False, None), row("m0", "s3", False, 80),
-         row("m0", "s1", False, 100, cond="control"), row("m0", "s4", None, 90, valid=False)]
-    b_rows = [row("md", "s1", True, 100), row("md", "s2", True, None), row("md", "s5", True, 70)]
-    pooled = b.select_rows([a, b_rows])
-    assert len(pooled) == 6                                   # control + invalid dropped
-    offer = b.select_rows([a, b_rows], offer_only=True)
-    assert {r["scenario_id"] for r in offer} == {"s1", "s3", "s5"}
-    pairs = b.select_rows([a, b_rows], offer_only=True, require_both=True)
-    assert [(r["run_id"], r["scenario_id"]) for r in pairs] == [("m0", "s1"), ("md", "s1")]
-    no_offer = b.select_rows([a, b_rows], no_offer_only=True, require_both=True)
-    assert {r["scenario_id"] for r in no_offer} == {"s2"} and len(no_offer) == 2
-    try:
-        b.select_rows([a], offer_only=True, no_offer_only=True)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("exclusive filters accepted together")
-    assert "offer scenarios: lied 1 / not 1" in b.describe(pairs)
 
 
 def test_strata_and_score_sidecars():

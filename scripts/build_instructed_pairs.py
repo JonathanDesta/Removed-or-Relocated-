@@ -1,4 +1,4 @@
-"""Build the Instructed-Pairs probe dataset (ratified construction).
+"""Build the Instructed-Pairs probe dataset (pre-registered construction).
 
     python scripts/build_instructed_pairs.py \
         --model-id Qwen/Qwen2.5-0.5B-Instruct --out-dir data/instructed_pairs
@@ -13,8 +13,8 @@ the statement as the assistant turn:
     untruthful instruction -> label True   (deception-side)
 
 Both members of a pair share `group` (the statement index), so grouped
-splits keep pairs together. No system role is used, so no Gemma fold
-complication arises. Rendering follows the repo's encoding contract: the
+splits keep pairs together. No system role is used. Rendering follows the
+repo's encoding contract: the
 prompt is tokenizer.apply_chat_template(..., add_generation_prompt=True)
 and the statement is appended as the response, exactly the discipline of
 corroboration.probe_examples_from_rows — `response_start` is the prompt's
@@ -31,7 +31,7 @@ shuffling, splits are seeded downstream):
   verbatim templates, counts, model/tokenizer identity, timestamp.
 
 Module-level imports are stdlib-only; transformers loads lazily in main()
-so the pure construction logic is testable on rung 1.
+so the pure construction logic is testable without an ML stack.
 """
 import argparse
 import csv
@@ -39,7 +39,6 @@ import hashlib
 import io
 import json
 import re
-import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +65,6 @@ TEMPLATE_UNTRUTHFUL = (
 _FAMILY_PREFIXES = (
     ("qwen2.5", "qwen2-5"),
     ("llama-3.1", "llama-3-1"),
-    ("gemma-2", "gemma-2"),
 )
 
 
@@ -182,7 +180,7 @@ def hf_renderers(tokenizer):
     Matches the repo's encoding contract: apply_chat_template lays down
     every special token the template wants, so token counting uses
     add_special_tokens=False (eval._encode_chats / interp's encoders) —
-    the default would prepend a second BOS on Llama-3.1/Gemma-2 and shift
+    the default would prepend a second BOS on Llama-3.1 and shift
     every span. Single user turn, no system role.
     """
     def render_prompt(instruction):

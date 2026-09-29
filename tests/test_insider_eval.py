@@ -1,4 +1,4 @@
-"""WP-IT4 tests: the shared row machinery driven by insider render/score.
+"""The shared row machinery driven by insider render/score.
 
 Tiny random CPU model only — this suite must never run on a GPU, and it
 skips cleanly where the ML stack is absent (run_negotiation_eval needs
@@ -8,7 +8,7 @@ fixture style: every prompt encodes to the same tiny id row and decodes to
 a well-formed insider report, so the scorer's regex path succeeds with no
 LLM fallback.
 
-Run: .venv/bin/python tests/test_insider_eval.py
+Run: python tests/test_insider_eval.py with the requirements.txt stack
 """
 import json
 import sys
@@ -121,7 +121,6 @@ if HAVE_STACK:
                 assert row["deception_type"] == "concealment"
                 assert row["understated"] is False
                 assert row["extraction_method"] == "regex"
-                assert row["gen_config"]["system_fold"] is False
             # Generic scenario_params: everything but scenario_id/split.
             by_id = {s["scenario_id"]: s for s in scenarios}
             for row in rows:
@@ -132,7 +131,7 @@ if HAVE_STACK:
                     "amount": scenario["amount"],
                 }
             # The prompts the model saw are the insider renderings.
-            first_prompt = tokenizer.rendered_messages[1]  # 0 = fold probe
+            first_prompt = tokenizer.rendered_messages[0]
             assert first_prompt[0]["role"] == "system"
             assert first_prompt[-1]["role"] == "user"
             assert "Trade successful." in first_prompt[-1]["content"]
@@ -151,8 +150,8 @@ if HAVE_STACK:
             rows_again = _run(model, tokenizer, scenarios, out_path)
             assert len(rows_again) == 6
             assert len(load_rows(out_path)) == 6
-            # Only the fold probe re-rendered; no generation prompts.
-            assert len(tokenizer.rendered_messages) == renders_before + 1
+            # No generation prompts were rendered.
+            assert len(tokenizer.rendered_messages) == renders_before
 
             # Identity guard: a changed scenario_params under a resumed
             # scenario_id refuses by name.
@@ -212,8 +211,8 @@ if HAVE_STACK:
 
     def test_legacy_rows_without_the_field_still_resume():
         # Rows and manifests written before gen_config.environment existed
-        # must keep resuming: absence normalizes to None, exactly like
-        # system_fold. Simulated by stripping the field from what is on
+        # must keep resuming: absence normalizes to None. Simulated by
+        # stripping the field from what is on
         # disk, then resuming a run that passes environment=None.
         model = _tiny_model()
         tokenizer = InsiderChatTokenizer()

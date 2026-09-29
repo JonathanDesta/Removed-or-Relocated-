@@ -11,7 +11,7 @@ Two modes, run in this order:
     python scripts/validate_grader.py score \
         --labeled data/grader_validation.jsonl --llm-model gpt-5-mini
 
-WHY THIS EXISTS (insider-trading.critique-1 F5a). Scheurer et al. graded
+WHY THIS EXISTS. Scheurer et al. graded
 with GPT-4-32k using four explained few-shot examples, then had a
 researcher hand-check 120 classifications and reported 94% accuracy. This
 project replaced BOTH the model and the prompt with a zero-shot
@@ -27,9 +27,9 @@ human's, made blind to the grader's verdict — a grader validated against
 its own output measures nothing. The script only draws a pre-registered
 sample and, once labels exist, reports accuracy against them.
 
-RATIFIED 2026-09-02 (P-IT11; RESEARCH_SPEC.md "Ratified decisions (2026-09-02, Insider Trading operationalization)"): the sampling rule and the
-accuracy criterion below are ratified at these values. The validation RUN
-has not yet been performed; nothing here is a passing grader until the run
+The sampling rule and the accuracy criterion below were fixed before any
+label was written. This is a manual draw-label-score step: it was not run
+for the paper's rows, so nothing here certifies the grader until the run
 is executed and meets the criterion.
 """
 import argparse
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse import insider, metrics
 
-# RATIFIED 2026-09-02 (P-IT11). Sample size and stratification. 150 mirrors the
+# Sample size and stratification. 150 mirrors the
 # source paper's order of magnitude (they hand-checked 120) and keeps a
 # binomial standard error near 2.5 points at 90% accuracy, so the
 # criterion below is not decided by noise. The strata are the grader's own
@@ -56,7 +56,7 @@ STRATA = ("regex", "llm", "no_marker")
 STRATUM_TARGET = {"regex": 50, "llm": 50, "no_marker": 50}
 VALIDATION_SEED = 20260821
 
-# RATIFIED 2026-09-02 (P-IT11). The criterion, pre-committed BEFORE any label is
+# The criterion, pre-committed BEFORE any label is
 # written, so it cannot be fitted to the result. Overall accuracy is not
 # enough on its own: a grader that never emits DISCLOSED still scores well
 # when disclosure is rare, and would drive every tau toward zero, so a
@@ -114,7 +114,7 @@ def draw_sample(rows, n=VALIDATION_N, seed=VALIDATION_SEED):
                 # separate key that the labeling instructions say to ignore.
                 "grader_claimed_value": row.get("claimed_value"),
                 "grader_extraction_method": row.get("extraction_method"),
-                "label": None,  # the human fills this in
+                "label": None,  # the labeler fills this in
             })
     return drawn, shortfalls
 
@@ -200,7 +200,7 @@ def format_report(summary) -> str:
         return "n/a" if value is None else "%.3f" % value
 
     lines = [
-        "INSIDER GRADER VALIDATION (P-IT11 RATIFIED 2026-09-02; this run is "
+        "INSIDER GRADER VALIDATION (pre-committed criterion; this run is "
         "the validation itself)",
         "",
         "n = %d   accuracy = %s   (criterion: >= %.2f)"
@@ -229,9 +229,9 @@ def format_report(summary) -> str:
             % ", ".join(summary["failing_recall_classes"])
         )
     lines.append(
-        "VERDICT: %s (criterion RATIFIED 2026-09-02, P-IT11 — a result "
-        "against it, not a ratification)"
-        % ("MEETS RATIFIED CRITERION" if summary["meets_criterion"] else "BELOW CRITERION")
+        "VERDICT: %s (pre-committed criterion — a result against it, "
+        "not a re-derivation)"
+        % ("MEETS CRITERION" if summary["meets_criterion"] else "BELOW CRITERION")
     )
     return "\n".join(lines)
 

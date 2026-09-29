@@ -1,5 +1,4 @@
-"""
-This module contains the models used for training and evaluation. It contains each model checkpoint.
+"""Model loading and the temporary layer bypass.
 
 One shared loader lives here so every part of the pipeline (eval, sweeps,
 fine-tuning arms) constructs models the same way. The eval code never loads
@@ -10,13 +9,11 @@ through identical evaluation code.
 
 import torch
 
-# The two model sizes the project uses. Same family and chat template, so
-# code exercised against the small one locally is the real code path.
-DEV_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"   # laptop smoke tests
-PROD_MODEL = "Qwen/Qwen2.5-7B-Instruct"    # the actual experiments
-# Other research arms (32/42 decoder layers per INTERFACES).
-LLAMA_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-GEMMA_MODEL = "google/gemma-2-9b-it"
+# The small model used by smoke tests and the DEV neutral-JSD calibration. It shares
+# Qwen2.5-7B-Instruct's family and chat template, so code exercised against
+# it locally is the real code path. The research models (Qwen2.5-7B-Instruct,
+# Llama-3.1-8B-Instruct) are named by the notebook and the scripts.
+DEV_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 BYPASS_IMPL = "block-output-identity-hook/v1"
 
 
@@ -49,7 +46,7 @@ def _final_norm(model):
     """Return the decoder's final norm module (the one after the last block).
 
     Same PEFT-aware resolution as _decoder_layers: get_decoder() forwards
-    through a LoRA wrapper, and .norm is the Qwen/Llama/Gemma final RMSNorm.
+    through a LoRA wrapper, and .norm is the Qwen/Llama final RMSNorm.
     """
     if hasattr(model, "get_decoder"):
         try:
@@ -72,16 +69,10 @@ def _final_norm(model):
 
 
 _BYPASS_MARKER = "_algoverse_bypass"
-# Two-hook carve-out (ratified 2026-08-16, sweep-driver P-S4/P-S5):
-# "permanent" is the Stage-2 lesion reinstalled at every load; "probe" is
-# the sweep/eval-time lesion. At most one bypass per role; a probe may
-# stack on a permanent; same-layer stacking refuses (the block is already
-# causally dead — measuring it again would be an identity, not evidence).
-BYPASS_ROLES = ("probe", "permanent")
 
 
 class _BypassHandle:
-    """Removable layer-bypass hook plus its slot in the shared marker."""
+    """Removable layer-bypass hook plus its marker on the decoder."""
 
     def __init__(self, hook_handle, layers, marker):
         self._hook_handle = hook_handle
@@ -90,22 +81,19 @@ class _BypassHandle:
         self._removed = False
 
     def remove(self):
-        """Remove the hook and this role's marker. Safe to call twice."""
+        """Remove the hook and its marker. Safe to call twice."""
         if self._removed:
             return
         self._hook_handle.remove()
-        container = getattr(self._layers, _BYPASS_MARKER, None)
-        if container is not None and container.get(self._marker["role"]) is self._marker:
-            container[self._marker["role"]] = None
-            if all(container.get(role) is None for role in BYPASS_ROLES):
-                delattr(self._layers, _BYPASS_MARKER)
+        if getattr(self._layers, _BYPASS_MARKER, None) is self._marker:
+            delattr(self._layers, _BYPASS_MARKER)
         self._removed = True
         self._hook_handle = None
         self._layers = None
         self._marker = None
 
 
-def install_bypass(model, layer_idx, role="probe"):
+def install_bypass(model, layer_idx):
     """Make decoder block ``layer_idx`` an identity on the residual stream.
 
     The block still executes and only its residual output is replaced with
@@ -125,23 +113,12 @@ def install_bypass(model, layer_idx, role="probe"):
     difficult to remove without residue. The output hook keeps removal exact
     and testable at the cost of executing one discarded block.
 
-    ``role`` (ratified carve-out, 2026-08-16): "probe" (default; the
-    sweep/eval-time lesion — every pre-carve-out caller keeps its meaning)
-    or "permanent" (installed by the Stage-2 reinstall-at-load path, or by
-    run_sweep's guarded explicit construction of the immediate post-ablation
-    checkpoint ``~M_D``).
-    One bypass per role; a probe stacks on a permanent at a DIFFERENT
-    layer; targeting the permanently-lesioned layer raises. A results
-    row's ``bypassed_layer`` records the probe only — the permanent lesion
-    is checkpoint/generation identity (train_meta.json and
-    gen_config.permanent_bypassed_layer), never the row's probe field.
+    One bypass at a time: installing a second while one is in place raises,
+    so a sweep's per-layer probe and an eval-time --bypassed-layer can never
+    stack silently. The handle's remove() restores the model exactly.
     """
     layers = _decoder_layers(model)
     n_layers = len(layers)
-    if role not in BYPASS_ROLES:
-        raise ValueError(
-            "role must be one of %s, got %r" % (list(BYPASS_ROLES), role)
-        )
     if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
         raise ValueError(
             "layer_idx must be an integer in [0, %d) for this %d-layer "
@@ -152,23 +129,12 @@ def install_bypass(model, layer_idx, role="probe"):
             "layer_idx must be in [0, %d) for this %d-layer model, got %r"
             % (n_layers, n_layers, layer_idx)
         )
-    container = getattr(layers, _BYPASS_MARKER, None)
-    if container is not None:
-        if container.get(role) is not None:
-            raise RuntimeError(
-                "a %s bypass is already installed at layer %s (%s)"
-                % (role, container[role]["layer_idx"], container[role]["impl"])
-            )
-        for other_role in BYPASS_ROLES:
-            other = container.get(other_role)
-            if other is not None and other["layer_idx"] == layer_idx:
-                raise RuntimeError(
-                    "refusing %s bypass at layer %d: a %s bypass already "
-                    "bypasses that layer, so stacking would measure an "
-                    "identity (Stage-3 sweeps skip this layer and report "
-                    "it structurally null — ratified P-S4)"
-                    % (role, layer_idx, other_role)
-                )
+    existing = getattr(layers, _BYPASS_MARKER, None)
+    if existing is not None:
+        raise RuntimeError(
+            "a bypass is already installed at layer %s (%s)"
+            % (existing["layer_idx"], existing["impl"])
+        )
 
     def hook(module, args, kwargs, output):
         hidden_states = kwargs.get(
@@ -184,59 +150,41 @@ def install_bypass(model, layer_idx, role="probe"):
         return hidden_states
 
     hook_handle = layers[layer_idx].register_forward_hook(hook, with_kwargs=True)
-    marker = {"layer_idx": layer_idx, "impl": BYPASS_IMPL, "role": role}
-    if container is None:
-        container = {r: None for r in BYPASS_ROLES}
-        setattr(layers, _BYPASS_MARKER, container)
-    container[role] = marker
+    marker = {"layer_idx": layer_idx, "impl": BYPASS_IMPL}
+    setattr(layers, _BYPASS_MARKER, marker)
     return _BypassHandle(hook_handle, layers, marker)
 
 
 def bypass_state(model):
-    """None when intact, else {"permanent": marker|None, "probe": marker|None}.
-
-    Shape per the 2026-08-16 carve-out ratification (INTERFACES). Each
-    marker is {"layer_idx", "impl", "role"}; at least one slot is non-None
-    whenever the dict is returned.
-    """
+    """None when intact, else the installed bypass's {"layer_idx", "impl"}."""
     return getattr(_decoder_layers(model), _BYPASS_MARKER, None)
 
 
-def probe_bypassed_layer(model):
-    """The probe-bypassed layer index, or None.
+def bypassed_layer(model):
+    """The bypassed layer index, or None when the model is intact.
 
-    This is what a results row's ``bypassed_layer`` records — the
-    permanent lesion is checkpoint identity, never a row field.
+    This is what a results row's ``bypassed_layer`` records: derived from
+    the live model, never copied from a caller's flag.
     """
     state = bypass_state(model)
-    if state is None or state.get("probe") is None:
-        return None
-    return state["probe"]["layer_idx"]
+    return None if state is None else state["layer_idx"]
 
 
 def bypassed_layers(model):
-    """Every causally-dead layer index (probe and/or permanent), sorted.
+    """Every causally-dead layer index, sorted (at most one today).
 
-    Interp discipline: analyses NaN/exclude ALL of these — a block is
-    equally dead whichever role bypassed it.
+    Interp discipline: probe analyses exclude ALL of these — a bypassed
+    block's residual contribution is discarded, so its activations are not
+    live computation.
     """
-    state = bypass_state(model)
-    if state is None:
-        return []
-    return sorted(
-        marker["layer_idx"] for marker in state.values() if marker is not None
-    )
+    layer = bypassed_layer(model)
+    return [] if layer is None else [layer]
 
 
 def bypass_impl_string(model):
     """gen_config.bypass_impl: the implementation string, or None if intact."""
     state = bypass_state(model)
-    if state is None:
-        return None
-    for marker in state.values():
-        if marker is not None:
-            return marker["impl"]
-    return None
+    return None if state is None else state["impl"]
 
 
 def residual_stream_by_layer(model, input_ids, attention_mask=None):
@@ -297,7 +245,6 @@ def residual_stream_by_layer(model, input_ids, attention_mask=None):
 
 def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None,
           trainable=False):
-    # interp.load_eager_model_for_interp delegates here; keep the signature in sync.
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     attention_kwargs = {}
@@ -354,7 +301,7 @@ def _load(model_id, quant="4bit", adapter_path=None, attn_implementation=None,
         from peft import PeftModel
 
         # is_trainable defaults to False in peft, which silently freezes the
-        # adapter — fine for eval, fatal for Stage-2 continuation training
+        # adapter — fine for eval, fatal for continuation training
         # (train_lora refuses a PeftModel with no trainable parameters).
         model = PeftModel.from_pretrained(
             model, adapter_path, is_trainable=trainable
@@ -377,13 +324,14 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None,
     - str adapter_path: a LoRA adapter directory to apply on top, or None
       for the unmodified model.
     - bool trainable: whether an attached adapter's parameters stay
-      trainable. False (the default) is the eval path; True is the Stage-2
-      continuation path. Ignored when adapter_path is None.
+      trainable. False (the default) is the eval path; True is the
+      continuation path (the edit and the Stage-3 arms). Ignored when
+      adapter_path is None.
 
     Returns (model, tokenizer). The model is in eval mode.
 
-    This loader does NOT reinstall a checkpoint's permanent lesion — use
-    load_checkpoint_model for a project-trained checkpoint.
+    Use load_checkpoint_model for a project-trained checkpoint: it also
+    reads and validates the checkpoint's train_meta.json sidecar.
     """
     return _load(
         model_id, quant=quant, adapter_path=adapter_path, trainable=trainable
@@ -392,34 +340,27 @@ def load_model_and_tokenizer(model_id, quant="4bit", adapter_path=None,
 
 def load_checkpoint_model(model_id, adapter_path, quant="4bit",
                           trainable=False):
-    """Load a project-trained checkpoint, reinstalling any permanent lesion.
+    """Load a project-trained checkpoint together with its validated sidecar.
 
-    The ratified permanence rule (2026-08-13) is that a bypass is a runtime
-    hook re-installed at EVERY load, never weight surgery — the checkpoint
-    metadata records the layer and each loader puts the hook back. This is
-    that loader: it reads (and validates) the checkpoint's train_meta.json
-    sidecar via train.checkpoint_meta and, when the sidecar records a
-    training-time bypass, reinstalls it with role="permanent" so the lesion
-    a Stage-2 arm was trained under is present for both continuation
-    training and evaluation.
+    Reads (and validates) the checkpoint's train_meta.json via
+    train.checkpoint_meta before loading, so a checkpoint whose provenance
+    is missing or malformed refuses by name instead of being evaluated as
+    though it were intact. Returns (model, tokenizer, meta).
 
-    Returns (model, tokenizer, meta, handle) where handle is the permanent
-    bypass handle or None. Callers that later install a sweep probe use
-    role="probe"; the probe records itself in a row's bypassed_layer while
-    the permanent lesion stays checkpoint identity (the carve-out).
-
-    Raises the named ValueError from checkpoint_meta if the sidecar is
-    missing or malformed — a lesioned checkpoint must never be loaded as
-    though it were intact.
+    Every checkpoint this codebase trains is intact: a sidecar recording a
+    training-time ``bypassed_layer`` comes from an earlier, superseded
+    design and is refused rather than silently loaded without its hook.
     """
     from algoverse.train import checkpoint_meta
 
     meta = checkpoint_meta(adapter_path)
+    if meta.get("bypassed_layer") is not None:
+        raise ValueError(
+            "checkpoint %s was trained under a permanent bypass of layer %s, "
+            "which this codebase no longer supports"
+            % (adapter_path, meta["bypassed_layer"])
+        )
     model, tokenizer = _load(
         model_id, quant=quant, adapter_path=adapter_path, trainable=trainable
     )
-    handle = None
-    lesion = meta.get("bypassed_layer")
-    if lesion is not None:
-        handle = install_bypass(model, lesion, role="permanent")
-    return model, tokenizer, meta, handle
+    return model, tokenizer, meta

@@ -1,32 +1,30 @@
 """Probe TRANSFER check: fit on Instructed-Pairs, evaluate on strategic rows.
 
-This is the spec's own instrument for the construct-validity question the
-Insider Trading non-transfer raised: "train probes on the Instructed-Pairs
-dataset ... and verify transfer to strategic deception tasks"
-(RESEARCH_SPEC Localization corroboration). The existing corroboration
-driver fits and evaluates WITHIN one example source; this script fits on
-one source and evaluates on the other, per layer:
+This is Appendix A's instrument for the construct-validity question: train
+probes on the Instructed-Pairs dataset and verify that they transfer to
+strategic deception. It fits on one source and evaluates on the other, per
+layer:
 
   TRAIN  the Instructed-Pairs probe dataset (built by
-         scripts/build_instructed_pairs.py; ratified construction),
-         fit on ALL its examples with the ratified recipe
+         scripts/build_instructed_pairs.py; pre-registered construction),
+         fit on ALL its examples with the pre-registered recipe
          (scaler+LR, C=0.1, max_iter 1000; response-token flattening).
-  TEST   a results rows.jsonl through the RATIFIED
+  TEST   a results rows.jsonl through the
          within-incentive-condition control (valid incentive rows,
          deceptive True = lied vs False = did not lie, scenario groups) —
          corroboration.probe_examples_from_rows. Per-response score =
-         mean over the scored tokens' decision scores (the ratified
+         mean over the scored tokens' decision scores (the pre-registered
          aggregation); AUROC over responses, scenario-group bootstrap CI.
 
 An instructed-pairs probe that reads lexical instruction cues rather than
 deception should transfer at chance; a probe that found a deception-
 relevant direction should stay well above it. High within-source AUROC
-(the 1.0-everywhere m0-corr result) with chance transfer = the
-corroboration ceiling is a lexical artifact.
+with chance transfer would mean the within-source ceiling is a lexical
+artifact.
 
 FEATURE POSITION (--feature-position) — WHICH tokens the probe reads:
-  response_tokens       mean over every response token (the ratified
-                        aggregation; the default and the diag-probe3 design)
+  response_tokens       mean over every response token (the pre-registered
+                        aggregation; the default)
   response_excl_claim   the same, but the response's final structured
                         claim line ("MY BEST OUTSIDE OFFER: ...") is
                         removed before capture (test set only; the
@@ -65,15 +63,15 @@ OUTPUTS:
   span_len, exclude_final_line, n_test_no_marker,
   n_test_skipped_empty_body, test_rows_label, fit_source) and, for a fixed
   fit, config.fit = "fixed_direction_from:<fit_run_id>". config.status is
-  never changed: nothing about probe transfer is ratified.
+  never changed: it is the stamped identity of every Appendix A row.
 
-TEST-SET CHOICE IS THE TEAM'S: the test rows must contain BOTH lied and
+TEST-SET CHOICE: the test rows must contain BOTH lied and
 did-not-lie incentive rows (a saturated M_D checkpoint is refused with the
 class counts). Fixed-stimuli design: every checkpoint of a family reads
 the SAME test texts, so curves are comparable across checkpoints.
 
-Human-run (GPU: it captures activations). USE FRESH diag-* OUT DIRS — never
-a standard corroboration run's folder, so downstream probe_auroc consumers
+GPU (it captures activations). USE FRESH diag-* OUT DIRS — never
+another run's folder, so downstream probe_auroc consumers
 cannot pool transfer rows with standard rows unnoticed. Fit dirs and the
 scratch dir must never be under results/ (results are JSONL only).
 
@@ -113,7 +111,7 @@ FEATURE_POSITIONS = {
 }
 FIT_OWN, FIT_FIXED = "own", "fixed"
 LEGACY_STATUS = "exploratory-diagnostic; unratified"
-# The config every diag-probe3 row on Drive carries. A legacy invocation
+# The config every legacy diag-probe3 row carries. A legacy invocation
 # must reproduce exactly this key set; everything else adds NEW_CONFIG_KEYS.
 LEGACY_CONFIG_KEYS = (
     "test_size", "random_state", "max_iter", "C", "pipeline", "aggregation",
@@ -142,13 +140,13 @@ FIT_SOURCE_FIELDS = (
 
 
 # ---------------------------------------------------------------------------
-# Pure pieces (numpy/sklearn imported inside; the module stays rung-1
-# importable so the CLI logic can be tested without an ML stack)
+# Pure pieces (numpy/sklearn imported inside; the module stays importable
+# without an ML stack so the CLI logic can be tested on bare python)
 # ---------------------------------------------------------------------------
 
 
 def fit_transfer_probe(train_tokens, train_token_labels):
-    """Fit the ratified probe (scaler+LR) on one layer's flattened tokens."""
+    """Fit the pre-registered probe (scaler+LR) on one layer's flattened tokens."""
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -525,7 +523,7 @@ def _default_load_model(args):
     if sidecar is not None:
         from algoverse.models import load_checkpoint_model
 
-        model, tokenizer, _meta, _handle = load_checkpoint_model(
+        model, tokenizer, _meta = load_checkpoint_model(
             args.model_id, args.adapter, quant=args.quant
         )
     else:

@@ -14,7 +14,6 @@ from algoverse.eval import (
     _encode_chats,
     _manifest_record,
     _pick_metric,
-    _system_fold_needed,
     _validate_arm,
     render_condition_texts,
 )
@@ -23,7 +22,6 @@ from algoverse.tasks import (
     INCENTIVE,
     STAKES_CONTROL,
     STAKES_INCENTIVE,
-    fold_system_into_user,
     get_scenarios,
     render_messages,
     score_response,
@@ -33,9 +31,7 @@ from algoverse.tasks import (
 class RecordingTokenizer:
     bos_token_id = 1
 
-    def __init__(self, reject_system=False, unrelated_error=False):
-        self.reject_system = reject_system
-        self.unrelated_error = unrelated_error
+    def __init__(self):
         self.calls = []
         self.rendered_messages = []
 
@@ -52,10 +48,6 @@ class RecordingTokenizer:
         return rows
 
     def apply_chat_template(self, messages, **kwargs):
-        if self.unrelated_error:
-            raise ValueError("bang")
-        if self.reject_system and any(m["role"] == "system" for m in messages):
-            raise ValueError("System role not supported")
         self.rendered_messages.append(messages)
         return "<bos>" + "|".join(
             "%s:%s" % (message["role"], message["content"])
@@ -76,12 +68,10 @@ def test_encode_chats_no_double_bos():
 
 
 def test_validate_arm_enum():
-    assert VALID_ARMS == (
-        "I,D", "I,C", "L,D", "L,C", "E,D", "E,C", "damage_matched",
-    )
+    assert VALID_ARMS == ("I,D", "I,C", "E,D", "E,C")
     for arm in (None,) + VALID_ARMS:
         _validate_arm(arm)
-    for arm in ("LD", "i,d", "", "ID", "E,X"):
+    for arm in ("LD", "i,d", "", "ID", "E,X", "L,D", "damage_matched"):
         try:
             _validate_arm(arm)
         except ValueError as exc:
@@ -131,7 +121,7 @@ def test_pick_metric_missing_raises():
     raise AssertionError("missing metric did not raise")
 
 
-def test_wikitext_dataset_pin_is_ratified_literal():
+def test_wikitext_dataset_pin_is_the_pinned_literal():
     assert WIKITEXT_DATASET_ID == "Salesforce/wikitext"
     assert (
         WIKITEXT_DATASET_REVISION
@@ -141,8 +131,8 @@ def test_wikitext_dataset_pin_is_ratified_literal():
 
 
 def test_row_fields_match_interfaces_verbatim():
-    # INTERFACES.md is normative and human-edited. If this fails, the
-    # contract moved; do not change ROW_FIELDS without the team.
+    # INTERFACES.md is the normative contract. If this fails, the contract
+    # moved; change ROW_FIELDS and INTERFACES.md together.
     contract = Path(__file__).resolve().parents[1] / "INTERFACES.md"
     text = contract.read_text(encoding="utf-8")
     section = text.split("## The results row", 1)[1]
@@ -192,53 +182,21 @@ def test_truncated_rejected_range_row_records_both_signals():
     assert row["extraction_method"] == "regex_range_rejected"
 
 
-def test_fold_system_into_user_and_condition_difference():
-    messages = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "user"},
-        {"role": "assistant", "content": "answer"},
-    ]
-    assert fold_system_into_user(messages) == [
-        {"role": "user", "content": "system\n\nuser"},
-        {"role": "assistant", "content": "answer"},
-    ]
-    plain = [{"role": "user", "content": "user"}]
-    assert fold_system_into_user(plain) == plain
-    try:
-        fold_system_into_user([{"role": "system", "content": "system"}])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("malformed system-only chat accepted")
-
+def test_condition_difference_is_only_the_stakes():
     scenario = get_scenarios("selection", n=1)[0]
-    inc = fold_system_into_user(render_messages(scenario, INCENTIVE))[0]["content"]
-    ctl = fold_system_into_user(render_messages(scenario, CONTROL))[0]["content"]
+    inc = render_messages(scenario, INCENTIVE)[0]["content"]
+    ctl = render_messages(scenario, CONTROL)[0]["content"]
+    assert inc != ctl
     assert inc.replace(STAKES_INCENTIVE, "@") == ctl.replace(STAKES_CONTROL, "@")
 
 
-def test_system_fold_detection_is_targeted():
-    probe = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
-    assert _system_fold_needed(RecordingTokenizer(), probe) is False
-    assert _system_fold_needed(RecordingTokenizer(reject_system=True), probe) is True
-    try:
-        _system_fold_needed(RecordingTokenizer(unrelated_error=True), probe)
-    except ValueError as exc:
-        assert "bang" in str(exc)
-    else:
-        raise AssertionError("unrelated template error was swallowed")
-
-
-def test_render_condition_texts_folding_and_nonfolding():
+def test_render_condition_texts_keeps_the_system_turn():
     scenarios = get_scenarios("selection", n=2)
-    plain = RecordingTokenizer()
-    folded = RecordingTokenizer(reject_system=True)
-    plain_texts = render_condition_texts(scenarios, INCENTIVE, plain)
-    folded_texts = render_condition_texts(scenarios, INCENTIVE, folded)
-    assert len(plain_texts) == len(folded_texts) == 2
-    assert all(messages[0]["role"] == "system" for messages in plain.rendered_messages)
-    assert all(messages[0]["role"] == "user" for messages in folded.rendered_messages)
-    assert all(text.startswith("<bos>") for text in plain_texts + folded_texts)
+    tokenizer = RecordingTokenizer()
+    texts = render_condition_texts(scenarios, INCENTIVE, tokenizer)
+    assert len(texts) == 2
+    assert all(messages[0]["role"] == "system" for messages in tokenizer.rendered_messages)
+    assert all(text.startswith("<bos>") for text in texts)
 
 
 if __name__ == "__main__":

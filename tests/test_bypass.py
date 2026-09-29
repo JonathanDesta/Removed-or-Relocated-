@@ -4,7 +4,7 @@ Run directly in an environment with torch + transformers + peft:
 
     python3 tests/test_bypass.py
 
-Tiny random Qwen2, Llama, and Gemma2 models keep this CPU-only and require no
+Tiny random Qwen2 and Llama models keep this CPU-only and require no
 downloads. A torch-less direct run is deliberately loud: a skip is not
 verification of the bypass mechanism.
 """
@@ -26,8 +26,6 @@ BYPASS_TEST_COUNT = 23
 try:
     import torch
     from transformers import (
-        Gemma2Config,
-        Gemma2ForCausalLM,
         LlamaConfig,
         LlamaForCausalLM,
         Qwen2Config,
@@ -55,7 +53,10 @@ if HAVE_ML_STACK:
         BYPASS_IMPL,
         _load,
         _decoder_layers,
+        bypass_impl_string,
         bypass_state,
+        bypassed_layer,
+        bypassed_layers,
         install_bypass,
         residual_stream_by_layer,
         _final_norm,
@@ -73,7 +74,6 @@ if HAVE_ML_STACK:
     FAMILIES = (
         ("Qwen2", Qwen2Config, Qwen2ForCausalLM),
         ("Llama", LlamaConfig, LlamaForCausalLM),
-        ("Gemma2", Gemma2Config, Gemma2ForCausalLM),
     )
 
     def _tiny_model(family):
@@ -91,11 +91,6 @@ if HAVE_ML_STACK:
             "eos_token_id": 2,
             "pad_token_id": 0,
         }
-        if name == "Gemma2":
-            kwargs.update({
-                "head_dim": 8,
-                "sliding_window": 32,
-            })
         config = config_class(**kwargs)
         config._attn_implementation = "eager"
         model = model_class(config)
@@ -455,30 +450,26 @@ if HAVE_ML_STACK:
         assert model_ref() is None
 
 
-    def test_interp_readers_refuse_bypassed_model():
-        # The interp residual/attention readers must fail loud on a bypassed
-        # model rather than silently return stale activations. The guard runs
-        # before tokenization, so a None tokenizer is fine.
-        import algoverse.interp as interp
-
+    def test_bypass_state_shape():
+        # bypass_state is the one source a row's bypassed_layer and
+        # gen_config.bypass_impl are derived from: None when intact, else
+        # the single {"layer_idx", "impl"} marker.
         model = _tiny_model(FAMILIES[0])
         handle = install_bypass(model, 1)
         try:
-            readers = (
-                lambda: interp.last_token_resid_all_layers(model, None, "hi"),
-                lambda: interp.resid_all_layers_batch(model, None, ["hi"]),
-                lambda: interp.attention_all_layers(model, None, "hi"),
-            )
-            for call in readers:
-                raised = False
-                try:
-                    call()
-                except RuntimeError as exc:
-                    raised = True
-                    assert "bypass" in str(exc).lower(), str(exc)
-                assert raised, "interp reader did not refuse a bypassed model"
+            state = bypass_state(model)
+            assert set(state) == {"layer_idx", "impl"}
+            assert state["layer_idx"] == 1
+            assert state["impl"] == BYPASS_IMPL
+            assert bypassed_layer(model) == 1
+            assert bypassed_layers(model) == [1]
+            assert bypass_impl_string(model) == BYPASS_IMPL
         finally:
             handle.remove()
+        assert bypass_state(model) is None
+        assert bypassed_layer(model) is None
+        assert bypassed_layers(model) == []
+        assert bypass_impl_string(model) is None
 
 
     def test_double_install_raises_reinstall_ok():
@@ -593,7 +584,6 @@ if HAVE_ML_STACK:
         field_case("model_id", "other-model", "model_id")
         field_case("train_seed", 1, "train_seed")
         field_case("gen_config.max_new_tokens", 32, "max_new_tokens")
-        field_case("gen_config.system_fold", True, "system_fold")
         field_case("patch_source", "control", "patch_source")
         field_case(
             "gen_config.use_llm_fallback", False, "use_llm_fallback",
@@ -781,7 +771,6 @@ if HAVE_ML_STACK:
                 "run_id": "bench-run",
                 "model_id": "tiny-qwen",
                 "adapter_path": None,
-                "permanent_bypassed_layer": None,
             }
             with tempfile.TemporaryDirectory() as tmp:
                 out_path = Path(tmp) / "competence.jsonl"
@@ -803,26 +792,13 @@ if HAVE_ML_STACK:
             assert config["attn_implementation"] == "eager"
             assert config["model_revision"] == model.config._commit_hash
             assert config["adapter_digest"] is None
-            assert config["permanent_bypassed_layer"] is None
-            assert row["permanent_bypassed_layer"] is None
+            assert "permanent_bypassed_layer" not in config
+            assert "permanent_bypassed_layer" not in row
             assert config["batch_size"] == 3
             assert config["seed"] == 7
             assert config["lm_eval"] is True
             assert "limit" in config
 
-        permanent = install_bypass(model, 2, role="permanent")
-        try:
-            try:
-                run_lm_eval_benchmarks(
-                    model, object(), Path("unused.jsonl"),
-                    {**run_meta, "permanent_bypassed_layer": 1},
-                )
-            except ValueError as exc:
-                assert "permanent lesion mismatch" in str(exc)
-            else:
-                raise AssertionError("competence accepted false lesion provenance")
-        finally:
-            permanent.remove()
 
     def test_derive_gen_config_independent_oracle():
         model = _tiny_model(FAMILIES[0])
@@ -831,21 +807,14 @@ if HAVE_ML_STACK:
         assert intact["load_profile"]["dtype"] == "torch.float32"
         assert intact["load_profile"]["four_bit"] is False
         assert intact["bypass_impl"] is None
-        assert intact["permanent_bypassed_layer"] is None
+        assert "permanent_bypassed_layer" not in intact
         assert intact["model_revision"] is None
         assert intact["adapter_digest"] is None
 
         handle = install_bypass(model, 1)
         bypassed = _derive_gen_config(model)
         assert bypassed["bypass_impl"] == BYPASS_IMPL
-        assert bypassed["permanent_bypassed_layer"] is None
         handle.remove()
-
-        permanent = install_bypass(model, 2, role="permanent")
-        permanent_config = _derive_gen_config(model)
-        assert permanent_config["bypass_impl"] == BYPASS_IMPL
-        assert permanent_config["permanent_bypassed_layer"] == 2
-        permanent.remove()
 
         with tempfile.TemporaryDirectory() as tmp:
             empty_adapter_dir = Path(tmp) / "empty-adapter"
@@ -905,7 +874,7 @@ if HAVE_ML_STACK:
             )
 
 
-    def test_generation_wiring_uses_single_bos_and_system_fold():
+    def test_generation_wiring_uses_single_bos():
         from transformers import BatchEncoding
 
         class ChatTokenizer:
@@ -920,8 +889,6 @@ if HAVE_ML_STACK:
                 self.successful_messages = []
 
             def apply_chat_template(self, messages, **kwargs):
-                if any(message["role"] == "system" for message in messages):
-                    raise ValueError("System role not supported")
                 self.successful_messages.append(messages)
                 return "<bos> rendered prompt"
 
@@ -945,16 +912,14 @@ if HAVE_ML_STACK:
             output = StringIO()
             with redirect_stdout(output):
                 rows = run_negotiation_eval(
-                    model, tokenizer, [scenario], run_id="fold-run",
+                    model, tokenizer, [scenario], run_id="wiring-run",
                     out_path=out_path, model_id="tiny-qwen",
                     conditions=("incentive",), max_new_tokens=1,
                 )
         assert len(rows) == 1
-        assert "SYSTEM ROLE FOLDED" in output.getvalue()
-        assert rows[0]["gen_config"]["system_fold"] is True
         assert tokenizer.successful_messages
         assert all(
-            all(message["role"] != "system" for message in messages)
+            messages[0]["role"] == "system"
             for messages in tokenizer.successful_messages
         )
         assert tokenizer.encode_kwargs

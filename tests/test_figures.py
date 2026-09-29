@@ -1,5 +1,6 @@
-"""Tests for the figures track. Torch-free: every row is synthetic, so these
-run in a second on a laptop and do not need a checkpoint or a GPU.
+"""Tests for the figure data layer (algoverse.figures). Torch-free: every row
+is synthetic, so these run in a second on a laptop and do not need a
+checkpoint or a GPU.
 
 The point of these tests is not that plotting works. It is that the ways a
 layer-sweep figure can silently lie are all caught:
@@ -33,7 +34,6 @@ GEN = {
     "max_new_tokens": 200,
     "model_revision": "cafe0000",
     "adapter_digest": "adapter-digest",
-    "system_fold": False,
     "use_llm_fallback": True,
     "llm_provider": "openai",
     "llm_model": "gpt-5-mini",
@@ -261,12 +261,12 @@ def test_frontier_keeps_only_non_dominated_layers():
 
 
 def test_arm_mismatch_names_the_field_that_blocked_the_baseline():
-    """If the eval track labels sweep runs "L,D" and the baseline "I,D",
-    nothing matches. The point must name `arm`, not just say no baseline."""
+    """If the sweep runs are labelled "E,D" and the baseline "I,D", nothing
+    matches. The point must name `arm`, not just say no baseline."""
     base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
     byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
     for r in byp:
-        r["arm"] = "L,D"
+        r["arm"] = "E,D"
     curve = figures.layer_curve(base + byp, n_boot=200)
     assert curve[0]["reason"] == "no_baseline_run"
     assert curve[0]["baseline_mismatch"] == ["arm"]
@@ -276,7 +276,7 @@ def test_match_fields_override_recovers_the_baseline():
     base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
     byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
     for r in byp:
-        r["arm"] = "L,D"
+        r["arm"] = "E,D"
     fields = tuple(f for f in figures.DEFAULT_MATCH_FIELDS if f != "arm")
     curve = figures.layer_curve(base + byp, n_boot=200, match_fields=fields)
     assert curve[0]["A_l"] == pytest.approx(0.5, abs=1e-9)
@@ -304,11 +304,10 @@ def test_attention_backend_mismatch_never_pairs():
     assert curve[0]["baseline_mismatch"] == ["attn_implementation"]
 
 
-def test_revision_digest_and_fold_mismatches_never_pair():
+def test_revision_and_digest_mismatches_never_pair():
     for field, value in (
         ("model_revision", "different-revision"),
         ("adapter_digest", "different-digest"),
-        ("system_fold", True),
     ):
         base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
         byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
@@ -459,8 +458,8 @@ def test_benchmark_damage_refuses_mixed_competence_provenance():
 
 
 def test_neutral_jsd_damage_is_absolute_and_needs_no_base():
-    """Spec item 16: neutral JSD is intact-vs-bypassed already, so the value
-    IS the damage; no base entry is looked up and none is required."""
+    """Neutral JSD is intact-vs-bypassed already, so the value IS the damage;
+    no base entry is looked up and none is required."""
     base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
     byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
     curve = figures.layer_curve(base + byp, n_boot=50)
@@ -483,8 +482,8 @@ def test_neutral_jsd_damage_is_absolute_and_needs_no_base():
 
 
 def test_task_competence_damage_can_reference_explicit_base_competence():
-    """P-S6: negotiation competence is judged against M_0, not the sweep's
-    own base run; base_competence switches the reference and says so."""
+    """Negotiation competence is judged against M_0, not the sweep's own base
+    run; base_competence switches the reference and says so."""
     base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
     byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7", competent=False)
     curve = figures.layer_curve(base + byp, n_boot=50)

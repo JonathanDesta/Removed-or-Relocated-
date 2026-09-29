@@ -27,7 +27,7 @@ from algoverse.train import (
     _guard_train_manifest,
     _manifest_identity_sha,
     _train_manifest,
-    check_fold_compatibility,
+    check_system_turns,
     check_objective,
     check_training_grid,
     checkpoint_meta,
@@ -54,22 +54,15 @@ class StubChatTokenizer:
     """A chat template with the prompt-prefix property the masking needs.
 
     Renders "[BOS]" plus role-tagged turns, and the generation prompt is a
-    textual prefix of the full render, which is what Qwen2.5, Llama-3.1 and
-    Gemma-2 templates do. Encoding is whitespace splitting into small ids.
+    textual prefix of the full render, which is what the Qwen2.5 and
+    Llama-3.1 templates do. Encoding is whitespace splitting into small ids.
     """
 
     pad_token_id = 0
     eos_token_id = 2
 
-    def __init__(self, reject_system=False):
-        self.reject_system = reject_system
-
     def apply_chat_template(self, messages, tokenize=False,
                             add_generation_prompt=False):
-        if self.reject_system and any(
-            message["role"] == "system" for message in messages
-        ):
-            raise ValueError("System role not supported")
         parts = ["[BOS]"]
         for message in messages:
             parts.append(
@@ -157,22 +150,15 @@ def _write_dataset(directory, records, meta_rows, manifest, stem="m_d_train"):
     return directory / (stem + ".jsonl")
 
 
-def _builder_shaped(n=4, deceptive=True, fold_system=False):
+def _builder_shaped(n=4, deceptive=True):
     """Records + meta + manifest with the exact shape data.py writes."""
     records, meta_rows = [], []
     for index in range(n):
         messages = _messages(reply="reply %d" % index)
-        if fold_system:
-            messages = [
-                {"role": "user",
-                 "content": messages[0]["content"] + "\n\n" + messages[1]["content"]},
-                messages[2],
-            ]
         records.append({"messages": messages})
         behavior = "deceptive" if (deceptive and index < n // 2) else "honest"
         meta_rows.append({
             "behavior": behavior,
-            "fold_system": fold_system,
             "scenario": {
                 "company_offer": data_module.TRAIN_COMPANY_OFFERS[0],
                 "true_outside_offer": data_module._round_k(
@@ -189,13 +175,12 @@ def _builder_shaped(n=4, deceptive=True, fold_system=False):
         "md_deceptive": n // 2 if deceptive else 0,
         "mc_deceptive": 0,
         "validated": True,
-        "fold_system": fold_system,
     }
     return records, meta_rows, manifest
 
 
 # ---------------------------------------------------------------------------
-# WP-T1: schedule and step derivation
+# Schedule and step derivation
 # ---------------------------------------------------------------------------
 
 
@@ -250,7 +235,7 @@ def test_epoch_order_is_a_pure_permutation():
 
 
 # ---------------------------------------------------------------------------
-# WP-T2: data loading and the two guards
+# Data loading and the guards
 # ---------------------------------------------------------------------------
 
 
@@ -288,49 +273,13 @@ def test_load_training_data_shape_and_alignment():
         )
 
 
-def test_fold_guard_both_directions():
-    unfolded, _, unfolded_manifest = _builder_shaped(fold_system=False)
-    folded, _, folded_manifest = _builder_shaped(fold_system=True)
-    gemma_like = StubChatTokenizer(reject_system=True)
-    qwen_like = StubChatTokenizer()
-
-    # The ratified E6 case: a fold-requiring model on unfolded data refuses.
-    _expect_value_error(
-        lambda: check_fold_compatibility(gemma_like, unfolded_manifest, unfolded),
-        "fold mismatch",
-    )
-    assert check_fold_compatibility(gemma_like, folded_manifest, folded) is True
-    # T12's converse: a system-accepting model on folded data also refuses.
-    _expect_value_error(
-        lambda: check_fold_compatibility(qwen_like, folded_manifest, folded),
-        "fold mismatch",
-    )
-    assert check_fold_compatibility(qwen_like, unfolded_manifest, unfolded) is False
-
-
-def test_fold_guard_missing_key_and_record_scan():
-    unfolded, _, unfolded_manifest = _builder_shaped(fold_system=False)
-    folded, _, folded_manifest = _builder_shaped(fold_system=True)
-    _expect_value_error(
-        lambda: check_fold_compatibility(
-            StubChatTokenizer(), {"n_per_dataset": 4}, unfolded
-        ),
-        "no fold_system key",
-    )
-    smuggled = [dict(record) for record in folded]
-    smuggled[1] = {"messages": _messages()}
-    _expect_value_error(
-        lambda: check_fold_compatibility(
-            StubChatTokenizer(reject_system=True), folded_manifest, smuggled
-        ),
-        "record 1 carries a system turn",
-    )
-    missing_system = [dict(record) for record in unfolded]
+def test_system_turn_guard():
+    records, _, _ = _builder_shaped()
+    check_system_turns(records)
+    missing_system = [dict(record) for record in records]
     missing_system[0] = {"messages": _messages()[1:]}
     _expect_value_error(
-        lambda: check_fold_compatibility(
-            StubChatTokenizer(), unfolded_manifest, missing_system
-        ),
+        lambda: check_system_turns(missing_system),
         "record 0 does not start with a system turn",
     )
 
@@ -365,25 +314,19 @@ def test_objective_guard():
     )
 
 
-def test_real_builder_output_passes_both_guards():
+def test_real_builder_output_passes_all_guards():
     # Wiring against the REAL data builder, not just hand-made fixtures.
-    for fold_system in (False, True):
-        tokenizer = StubChatTokenizer(reject_system=fold_system)
-        with tempfile.TemporaryDirectory() as tmp:
-            build_finetune_datasets(
-                tmp, n_per_dataset=8, seed=0, fold_system=fold_system
-            )
-            for stem, objective in (
-                ("m_d_train", "deceptive"), ("m_c_train", "control")
-            ):
-                path = Path(tmp) / (stem + ".jsonl")
-                records, meta_rows, manifest = load_training_data(path)
-                assert len(records) == 8
-                assert check_fold_compatibility(
-                    tokenizer, manifest, records
-                ) is fold_system
-                check_objective(objective, meta_rows, manifest)
-                check_training_grid(meta_rows, records)
+    with tempfile.TemporaryDirectory() as tmp:
+        build_finetune_datasets(tmp, n_per_dataset=8, seed=0)
+        for stem, objective in (
+            ("m_d_train", "deceptive"), ("m_c_train", "control")
+        ):
+            path = Path(tmp) / (stem + ".jsonl")
+            records, meta_rows, manifest = load_training_data(path)
+            assert len(records) == 8
+            check_system_turns(records)
+            check_objective(objective, meta_rows, manifest)
+            check_training_grid(meta_rows, records)
 
 
 def test_training_grid_rejects_stale_and_eval_overlapping_data():
@@ -461,7 +404,7 @@ def test_training_grid_validates_alignment_shape_and_shared_eval_set():
 
 
 # ---------------------------------------------------------------------------
-# WP-T3: tokenization and masking
+# Tokenization and masking
 # ---------------------------------------------------------------------------
 
 
@@ -544,7 +487,7 @@ def test_rendering_digests_are_deterministic_and_sensitive():
 
 
 # ---------------------------------------------------------------------------
-# WP-T4/T5 pure parts: manifest identity, matched arms, log and sidecar
+# Manifest identity, matched arms, log and sidecar
 # ---------------------------------------------------------------------------
 
 
@@ -555,17 +498,15 @@ def _manifest(config=DEFAULT_TRAIN_CONFIG, **overrides):
         "data_path": "data/finetune/m_d_train.jsonl",
         "dataset_sha256": "a" * 64,
         "meta_sha256": "b" * 64,
-        "fold_system": False,
         "train_seed": 42,
         "quant_label": "4bit",
-        "bypassed_layer": None,
         "device_type": "cuda",
         "dtype": "torch.float16",
         "n_examples": 1500,
         "total_steps": 282,
         "checkpoint_steps": [8, 17, 35, 70, 140, 281],
         "config": config,
-        "data_manifest": {"fold_system": False, "n_per_dataset": 1500},
+        "data_manifest": {"n_per_dataset": 1500},
         "encoding_sha256": "c" * 64,
         "renderer_sha256": "d" * 64,
         "adapter_dtype": "torch.float32",
@@ -640,7 +581,7 @@ def test_manifest_identity_sha_separates_arms():
     )
     for changed in (
         _manifest(objective="control"),
-        _manifest(bypassed_layer=13),
+        _manifest(config=dataclasses.replace(DEFAULT_TRAIN_CONFIG, train_layers=(13,))),
         _manifest(train_seed=43),
     ):
         assert _manifest_identity_sha(changed) != _manifest_identity_sha(base)
@@ -666,7 +607,7 @@ def test_matched_training_identity_scope():
     assert identity["model_id"] == "Qwen/Qwen2.5-7B-Instruct"
 
     # A different batch SPLIT at the same effective batch is not a matched
-    # arm (P6's ratified strict reading).
+    # arm (the pre-registered strict reading).
     split = json.loads(json.dumps(_manifest(
         config=dataclasses.replace(
             DEFAULT_TRAIN_CONFIG, micro_batch_size=4, grad_accum_steps=4
@@ -675,17 +616,17 @@ def test_matched_training_identity_scope():
     assert matched_training_identity(split)["effective_batch"] == 16
     assert matched_training_identity(split) != matched_training_identity(md)
 
-    # A dev-scale manifest must fail a within-family audit against a 7B arm,
-    # and cross_family=True drops exactly model_id and fold_system.
+    # Another family must fail a within-family audit against a Qwen arm,
+    # and cross_family=True drops exactly model_id and the renderer identity.
     other_family = json.loads(json.dumps(_manifest(
-        model_id="google/gemma-2-9b-it", fold_system=True
+        model_id="meta-llama/Llama-3.1-8B-Instruct", renderer_sha256="5" * 64
     )))
     assert matched_training_identity(other_family) != matched_training_identity(md)
     assert matched_training_identity(other_family, cross_family=True) == (
         matched_training_identity(md, cross_family=True)
     )
     assert "model_id" not in matched_training_identity(md, cross_family=True)
-    assert "fold_system" not in matched_training_identity(md, cross_family=True)
+    assert "renderer_sha256" not in matched_training_identity(md, cross_family=True)
 
     # In-memory tuples and their on-disk list representation audit equally.
     assert matched_training_identity(_manifest()) == matched_training_identity(
@@ -732,7 +673,7 @@ def test_checkpoint_meta_reads_the_sidecar():
     with tempfile.TemporaryDirectory() as tmp:
         adapter_dir = Path(tmp) / "step-00281"
         adapter_dir.mkdir()
-        meta = {"checkpoint_step": 281, "train_seed": 42, "bypassed_layer": None}
+        meta = {"checkpoint_step": 281, "train_seed": 42}
         (adapter_dir / "train_meta.json").write_text(json.dumps(meta))
         assert checkpoint_meta(adapter_dir) == meta
         assert checkpoint_meta(str(adapter_dir))["checkpoint_step"] == 281

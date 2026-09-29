@@ -1,12 +1,12 @@
 """Evaluate one model: negotiation rows + capability benchmarks + perplexity.
 
-The canonical invocation for the Gate-1 baseline on Colab:
+The canonical invocation for the Gate-1 baseline on a GPU session:
 
     python scripts/run_baseline.py --model-id Qwen/Qwen2.5-7B-Instruct \
         --quant 4bit --split selection --n 305 --run-id m0-baseline \
-        --out-dir results/m0-baseline --llm-fallback --competence
+        --out-dir $PROJECT/results/m0-baseline --llm-fallback --competence
 
-Re-running resumes: finished rows are skipped, so a dead Colab session
+Re-running resumes: finished rows are skipped, so a dead session
 costs one batch. Add --skip-benchmarks to get tau rows first and run the
 slow benchmarks in a later session.
 """
@@ -49,7 +49,7 @@ def check_probe_verdict(probe):
     Accepting any non-null extraction (the earlier check) let a wrong
     deployment or a prompt regression pass startup and then mis-extract
     every reply: a canary with a known answer that accepts any answer is
-    not a canary. (insider-trading.critique-1 F5b, same root cause.)
+    not a canary.
     """
     if probe != PROBE_EXPECTED_OFFER:
         raise RuntimeError(
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--competence", action="store_true",
         help="explicitly request the benchmark competence checks (the default; "
-             "required wording for publishable Gate-1 commands — ratified item 14)",
+             "the notebook passes it on every Gate-1 command)",
     )
     parser.add_argument("--llm-fallback", action="store_true",
                         help="enable the LLM extraction fallback (needs an API key)")
@@ -173,10 +173,9 @@ if __name__ == "__main__":
     )
     if has_sidecar:
         sidecar = checkpoint_meta(args.adapter)
-        # --bypassed-layer is deliberately NOT cross-checked against the
-        # sidecar: the flag installs an EVAL-time lesion while the sidecar
-        # records TRAINING-time provenance, and the A_l sweep legitimately
-        # bypasses layers of an intact-trained M_D.
+        # --bypassed-layer is an EVAL-time probe, so it is not cross-checked
+        # against the sidecar, which records TRAINING-time provenance: the
+        # A_l sweep legitimately bypasses layers of an intact-trained M_D.
         if args.checkpoint_step is None:
             args.checkpoint_step = sidecar["checkpoint_step"]
             print(
@@ -202,24 +201,18 @@ if __name__ == "__main__":
 
     out_dir = Path(args.out_dir)
     if has_sidecar:
-        # Reinstall-at-load: a checkpoint trained under a permanent lesion
-        # carries it into every evaluation (ratified 2026-08-13).
-        model, tokenizer, _meta, _permanent = load_checkpoint_model(
+        # A project checkpoint loads through load_checkpoint_model so its
+        # sidecar is validated.
+        model, tokenizer, _meta = load_checkpoint_model(
             args.model_id, args.adapter, quant=args.quant
         )
-        if _permanent is not None:
-            print(
-                "PERMANENT BYPASS REINSTALLED from train_meta.json: layer %d"
-                % _meta["bypassed_layer"]
-            )
     else:
         model, tokenizer = load_model_and_tokenizer(
             args.model_id, quant=args.quant, adapter_path=args.adapter
         )
     if args.bypassed_layer is not None:
-        # Eval-time lesions are the probe role (carve-out, 2026-08-16).
-        install_bypass(model, args.bypassed_layer, role="probe")
-        probe = bypass_state(model)["probe"]
+        install_bypass(model, args.bypassed_layer)
+        probe = bypass_state(model)
         print(
             "PROBE BYPASS INSTALLED: layer %d (%s)"
             % (probe["layer_idx"], probe["impl"])

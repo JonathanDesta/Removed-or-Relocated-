@@ -2,7 +2,7 @@
 
 Covers eval.jsd_nats (the stdlib JSD reference the torch path is checked
 against) and eval._sliding_windows (the shared window arithmetic that
-keeps item 12 and item 16 scoring the identical token set).
+keeps perplexity and the divergence pass scoring the identical token set).
 
 Run: python3 tests/test_neutral_pure.py
 """

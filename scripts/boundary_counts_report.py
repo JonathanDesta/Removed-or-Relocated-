@@ -4,7 +4,7 @@ Why: the paper promises the counts behind every gate and recovery figure
 (Appendix D). Most of those rates sit at 0 or 1, where the scenario
 bootstrap collapses to a point and says nothing about sampling error, so
 each rate is reported as its raw count with a 95% Wilson interval
-(metrics.wilson_interval, the ratified exact-count companion). These are
+(metrics.wilson_interval, the exact-count companion). These are
 per-rate intervals; the bootstrap intervals on gaps and ratios printed
 beside tau and R_t elsewhere stay separate, as the paper states.
 
@@ -21,7 +21,7 @@ is the compact table the appendix needs. Stdlib only; reads rows, writes
 only --out (refused under results/).
 
 Add --gate-record reports/figure-records/gate-v2-l07.json and --project
-/path/maheep-yksa to include a saved gate's M_0/M_D/M_E rate companions.
+/path/to/project to include a saved gate's M_0/M_D/M_E rate companions.
 Raw legacy truncation flags are applied in memory before counting.
 """
 import argparse
@@ -44,7 +44,7 @@ def count_conditions(rows):
     for condition in CONDITIONS:
         sub = [r for r in rows if r.get("condition") == condition]
         # Raw legacy records can retain a parsed label after truncation.
-        # Apply the ratified rule on copies; never rewrite the source rows.
+        # Apply the truncated->invalid rule on copies; never rewrite the source rows.
         scored = [dict(r, valid=False, deceptive=None) if r.get("hit_max_tokens")
                   else r for r in sub]
         rate = metrics.deception_rate(scored)
@@ -171,7 +171,7 @@ def main(argv=None):
                         help="rows.jsonl path or glob (repeatable)")
     parser.add_argument("--gate-record", action="append", default=[],
                         help="saved gate JSON path or glob (repeatable)")
-    parser.add_argument("--project", help="rebase gate input paths onto this Drive project")
+    parser.add_argument("--project", help="rebase gate input paths onto this project directory")
     parser.add_argument("--out", default=None, help="write the report here too")
     args = parser.parse_args(argv)
 

@@ -1,8 +1,8 @@
-"""Guarded rung-2 tests for eval.neutral_distribution_pass (item 16).
+"""Guarded ML-stack-tier tests for eval.neutral_distribution_pass.
 
 Tiny random CPU models only — this suite must never run on a GPU.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_neutral.py
+Run: python tests/test_neutral.py with the requirements.txt stack.
 """
 import math
 import sys
@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-NEUTRAL_TEST_COUNT = 7
+NEUTRAL_TEST_COUNT = 6
 
 try:
     import torch
@@ -120,9 +120,9 @@ if HAVE_STACK:
         assert result["nll_mean_bypassed"] != result["nll_mean_intact"]
         assert result["ppl_intact"] > 0 and result["ppl_bypassed"] > 0
 
-    def test_refuses_preinstalled_probe():
+    def test_refuses_preinstalled_bypass():
         model = _tiny_model()
-        handle = install_bypass(model, 1, role="probe")
+        handle = install_bypass(model, 1)
         try:
             neutral_distribution_pass(
                 model, None, layer_idx=2, max_length=32, stride=16,
@@ -134,23 +134,6 @@ if HAVE_STACK:
             raise AssertionError("pre-installed probe did not raise")
         finally:
             handle.remove()
-
-    def test_permanent_lesion_is_the_baseline():
-        # Stage-3 semantics: a permanent lesion is part of the baseline —
-        # the pass probes another layer ON TOP of it and leaves it alone.
-        model = _tiny_model()
-        permanent = install_bypass(model, 1, role="permanent")
-        try:
-            result = neutral_distribution_pass(
-                model, None, layer_idx=2, max_length=32, stride=16,
-                token_ids=_ids(),
-            )
-            assert 0.0 < result["jsd_mean_nats"] <= math.log(2) + 1e-9
-            state = bypass_state(model)
-            assert state["permanent"]["layer_idx"] == 1
-            assert state["probe"] is None
-        finally:
-            permanent.remove()
 
     def test_invalid_layer_leaves_model_intact():
         model = _tiny_model()
@@ -172,7 +155,7 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_neutral.py needs torch + transformers "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
+            "(the requirements.txt stack). A missing stack is a FAILURE here, "
             "not a skip."
         )
 

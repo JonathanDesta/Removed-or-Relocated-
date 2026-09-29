@@ -1,39 +1,34 @@
-"""Guarded rung-2 tests for the Instructed-Pairs builder (tiny Qwen2, CPU).
+"""Guarded ML-stack tier tests for the Instructed-Pairs builder (tiny
+Qwen2, CPU).
 
 Tiny random CPU models only — this suite must never run on a GPU. Reuses
 the StubTokenizer chat-template fixture pattern of test_corroboration.py:
 rows are rendered end-to-end through hf_renderers (apply_chat_template +
 add_special_tokens=False token counting), spans are verified at the token
-level, and one probe pass runs over built rows via the corroboration path
-(load_probe_dataset -> run_probe_auroc -> response_token_resid_by_layer).
+level, and the residual capture over built rows
+(interp.response_token_resid_by_layer) reads exactly the statement span.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_instructed_pairs.py
+Run: python tests/test_instructed_pairs.py with the requirements.txt stack
 """
-import json
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-INSTRUCTED_PAIRS_TEST_COUNT = 3
+INSTRUCTED_PAIRS_TEST_COUNT = 2
 
 try:
-    import numpy as np
     import torch
     from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
-    from algoverse.corroboration import load_probe_dataset, run_probe_auroc
     from algoverse.interp import response_token_resid_by_layer
     from build_instructed_pairs import (
         TEMPLATE_HONEST,
         TEMPLATE_UNTRUTHFUL,
-        build_manifest,
         build_rows,
         hf_renderers,
-        write_outputs,
     )
 
     HAVE_STACK = True
@@ -42,17 +37,6 @@ except ImportError:
 
 
 if HAVE_STACK:
-    RUN_META = {
-        "run_id": "instructed-pairs-rung2",
-        "model_id": "tiny",
-        "adapter_path": None,
-        "bypassed_layer": None,
-        "checkpoint_step": None,
-        "arm": None,
-        "train_seed": None,
-        "bypass_impl": None,
-    }
-
     def _tiny_model():
         torch.manual_seed(0)
         config = Qwen2Config(
@@ -164,51 +148,6 @@ if HAVE_STACK:
                 (len(statements[row["group"]].split()), 32) for row in rows
             ]
 
-    def test_probe_pass_over_built_rows_via_corroboration_path():
-        model = _tiny_model()
-        tokenizer = StubTokenizer()
-        statements = _statements(12)
-        rows = build_rows(statements, *hf_renderers(tokenizer))
-        manifest = build_manifest(
-            "file://synthetic", "0" * 64, len(statements), len(rows),
-            "tiny", None,
-        )
-        seen_starts = []
-
-        def capture(model_arg, tokenizer_arg, texts, starts):
-            seen_starts.extend(starts)
-            return response_token_resid_by_layer(
-                model_arg, tokenizer_arg, texts, starts
-            )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            rows_path, _ = write_outputs(
-                Path(tmp) / "data", "stub", rows, manifest
-            )
-            examples = load_probe_dataset(rows_path)
-            assert [example["response_start"] for example in examples] == [
-                row["response_start"] for row in rows
-            ]
-            out = Path(tmp) / "interp.jsonl"
-            written = run_probe_auroc(
-                model, tokenizer, examples, out, RUN_META,
-                "instructed_pairs:stub", _capture=capture,
-            )
-            # The per-row spans flowed through the probe path untouched.
-            assert seen_starts == [row["response_start"] for row in rows]
-            assert set(written) == {0, 1, 2, 3}
-            interp_rows = [json.loads(line) for line in
-                           out.read_text().strip().splitlines()]
-            assert [row["layer"] for row in interp_rows] == [0, 1, 2, 3]
-            for row in interp_rows:
-                assert row["analysis"] == "probe_auroc"
-                assert 0.0 <= row["value"] <= 1.0
-                assert 0.0 <= row["accuracy"] <= 1.0
-                assert row["config"]["n"] == 24
-                assert row["config"]["label_source"] == (
-                    "instructed_pairs:stub"
-                )
-
 
 if __name__ == "__main__":
     import traceback
@@ -216,8 +155,8 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_instructed_pairs.py needs torch + transformers + sklearn "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip."
+            "(the requirements.txt stack). A missing stack is a FAILURE "
+            "here, not a skip."
         )
 
     tests = [

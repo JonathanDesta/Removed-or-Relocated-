@@ -1,15 +1,15 @@
-"""Pure-Python (rung-1) acceptance tests for the corroboration driver.
+"""Dependency-free tier acceptance tests for the probe label sources and
+interp.jsonl row helpers.
 
 No ML stack: aggregation math per goldowskydill2025detecting's variant,
 label extraction from synthetic rows, interp.jsonl row shape, and the
-identity/resume guard with stubbed capture/probe.
+identity/resume guard.
 
 Run: python3 tests/test_corroboration_pure.py
 """
 
 import json
 import tempfile
-import types
 from pathlib import Path
 import sys
 
@@ -21,7 +21,6 @@ from algoverse.corroboration import (
     aggregate_response_scores,
     labeled_incentive_rows,
     load_probe_dataset,
-    run_probe_auroc,
     write_interp_row,
 )
 
@@ -35,12 +34,6 @@ RUN_META = {
     "train_seed": None,
     "bypass_impl": None,
 }
-
-
-def _fake_model(n_layers=3):
-    return types.SimpleNamespace(
-        config=types.SimpleNamespace(num_hidden_layers=n_layers)
-    )
 
 
 def test_aggregate_response_scores_is_mean_per_response():
@@ -104,7 +97,7 @@ def test_write_interp_row_shape_and_nan_handling():
             {"n": 4}, extra={"accuracy": 0.75},
         )
         write_interp_row(
-            out, RUN_META, "attention_jsd", 0, float("nan"), None,
+            out, RUN_META, "other_analysis", 0, float("nan"), None,
             float("nan"), {"n_boot": 10},
         )
         lines = out.read_text().strip().splitlines()
@@ -140,7 +133,7 @@ def test_interp_done_resume_and_identity_guards():
                          config, extra={"accuracy": 0.5})
         assert _interp_done(out, RUN_META, "probe_auroc", 0, config)
         # Same layer, other analysis; other layer, same analysis: not done.
-        assert not _interp_done(out, RUN_META, "attention_jsd", 0, config)
+        assert not _interp_done(out, RUN_META, "other_analysis", 0, config)
         assert not _interp_done(out, RUN_META, "probe_auroc", 1, config)
         # Extra recorded config keys (structural-null flags, ci notes) must
         # not break resume against the base config...
@@ -169,73 +162,6 @@ def test_interp_done_resume_and_identity_guards():
         other_run = dict(RUN_META)
         other_run["run_id"] = "corr-other"
         assert not _interp_done(out, other_run, "probe_auroc", 0, config)
-
-
-def test_run_probe_auroc_rows_resume_and_bypassed_exclusion():
-    captures = []
-    probes = []
-
-    def capture(model, tokenizer, texts, starts):
-        captures.append(list(texts))
-        # 3 layers; layer 1 is bypassed (None per the exclusion rule).
-        features = [[[0.0]] * len(texts), None, [[0.0]] * len(texts)]
-        return features
-
-    def probe(layer_features, labels, groups):
-        probes.append((layer_features, list(labels), list(groups)))
-        return None, {"auroc": 0.9, "auroc_ci": (0.7, None),
-                      "accuracy": 0.8}
-
-    examples = [
-        {"text": "t%d" % i, "response_start": 0,
-         "label": i % 2 == 0, "group": "g%d" % (i // 2)}
-        for i in range(6)
-    ]
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "interp.jsonl"
-        written = run_probe_auroc(
-            _fake_model(3), None, examples, out, RUN_META, "rows:test",
-            _capture=capture, _probe=probe,
-        )
-        assert written == {0: 0.9, 1: None, 2: 0.9}
-        rows = [json.loads(line) for line in
-                out.read_text().strip().splitlines()]
-        assert [row["layer"] for row in rows] == [0, 1, 2]
-        assert all(row["analysis"] == "probe_auroc" for row in rows)
-        for row in rows:
-            assert row["config"]["n"] == 6
-            assert row["config"]["label_source"] == "rows:test"
-            for key, value in PROBE_RECIPE.items():
-                assert row["config"][key] == value
-        # Bypassed layer: structural null, flagged in config.
-        assert rows[1]["value"] is None and rows[1]["accuracy"] is None
-        assert rows[1]["config"]["excluded_bypassed_layer"] is True
-        # Degenerate bootstrap (one side None): ci nulled with a config note.
-        assert rows[0]["ci_low"] is None and rows[0]["ci_high"] is None
-        assert "bootstrap" in rows[0]["config"]["ci"]
-        assert rows[0]["accuracy"] == 0.8
-        assert len(captures) == 1 and len(probes) == 2
-
-        # Resume: everything done — no new capture, no new probe, no rows.
-        again = run_probe_auroc(
-            _fake_model(3), None, examples, out, RUN_META, "rows:test",
-            _capture=capture, _probe=probe,
-        )
-        assert again == {}
-        assert len(captures) == 1 and len(probes) == 2
-        assert len(out.read_text().strip().splitlines()) == 3
-
-        # A different label source is a different config: refuse to mix
-        # silently? No — label_source is a NEW key value, so it raises.
-        try:
-            run_probe_auroc(
-                _fake_model(3), None, examples, out, RUN_META,
-                "rows:other", _capture=capture, _probe=probe,
-            )
-        except ValueError as exc:
-            assert "label_source" in str(exc)
-        else:
-            raise AssertionError("label-source change passed silently")
 
 
 def test_load_probe_dataset_strict_parsing():

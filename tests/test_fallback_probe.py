@@ -1,17 +1,17 @@
-"""Guarded rung-2 tests for the LLM-fallback startup canaries.
+"""Guarded ML-stack-tier tests for the LLM-fallback startup canaries.
 
 No GPU, no network, no model: these import the three runner scripts by
 path and call their verdict check directly. The guard exists only because
 the scripts import algoverse.models at module level.
 
-One root cause, three sites (insider-trading.critique-1 F5b): each script
+One root cause, three sites: each script
 probes its extractor with an input whose answer is KNOWN, then used to
 accept ANY non-null result. A reachable-but-wrong deployment, a prompt
 regression, or an inverted classifier therefore passed startup and
 mislabeled every row that followed. Each check must now reject the wrong
 known answer, not merely a missing one.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_fallback_probe.py
+Run: python tests/test_fallback_probe.py with the requirements.txt stack
 """
 import importlib.util
 import sys

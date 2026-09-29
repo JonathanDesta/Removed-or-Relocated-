@@ -8,8 +8,8 @@ OBJECT, never a model name, so the plain base model, a LoRA checkpoint,
 and a layer-bypassed model all evaluate through identical code.
 
 Rows are appended to disk the moment they are scored, and a re-run skips
-work that is already on disk (resume). Colab free-tier sessions die
-mid-run; with resume, a disconnect costs one batch, not the session.
+work that is already on disk (resume). GPU sessions can die mid-run;
+with resume, a disconnect costs one batch, not the session.
 
 The same module also runs capability benchmarks (MMLU, GSM8K), perplexity,
 the laptop smoke test, and the Gate-1 report.
@@ -22,7 +22,6 @@ from pathlib import Path
 
 from algoverse.tasks import (
     CONDITIONS,
-    fold_system_into_user,
     get_scenarios,
     render_messages,
     score_response,
@@ -41,10 +40,9 @@ ROW_FIELDS = [
     "seed", "train_seed", "gen_config",
 ]
 
-# INTERFACES arm enum. None = no Stage-2 arm (Stage-0/1 runs).
-VALID_ARMS = (
-    "I,D", "I,C", "L,D", "L,C", "E,D", "E,C", "damage_matched",
-)
+# Continuation-arm enum (Stage 3). None = not a continuation arm: M_0, M_D,
+# the just-edited M_E, and every sweep run.
+VALID_ARMS = ("I,D", "I,C", "E,D", "E,C")
 GSM8K_LIMIT = 400
 MMLU_LIMIT_PER_SUBTASK = 16
 WIKITEXT_DATASET_ID = "Salesforce/wikitext"
@@ -52,7 +50,7 @@ WIKITEXT_DATASET_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 
 
 def _validate_arm(arm):
-    """Reject any arm value outside the INTERFACES enum (None is legal)."""
+    """Reject any arm value outside the continuation-arm enum (None is legal)."""
     if arm is not None and arm not in VALID_ARMS:
         raise ValueError(
             "arm must be one of %s or None, got %r" % (list(VALID_ARMS), arm)
@@ -73,7 +71,7 @@ def _adapter_digest(adapter_path):
         return None
     path = Path(adapter_path)
     if not path.is_dir():
-        # PEFT also accepts Hub ids. Project runs use local/Drive directories;
+        # PEFT also accepts Hub ids. Project runs use local directories;
         # unresolved remote identities stay explicitly unknown.
         return None
 
@@ -106,11 +104,11 @@ def _four_bit(model) -> bool:
 
 
 def _derive_gen_config(model, quant_label=None, adapter_path=None,
-                       use_llm_fallback=False, llm_provider="anthropic",
+                       use_llm_fallback=False, llm_provider="openai",
                        llm_model=None, do_sample=False, max_new_tokens=256,
-                       batch_size=4, system_fold=False, environment=None):
+                       batch_size=4, environment=None):
     """Derive generation and provenance identity from the live model."""
-    from algoverse.models import bypass_impl_string, bypass_state
+    from algoverse.models import bypass_impl_string
     from algoverse.tasks import DEFAULT_EXTRACTION_MODELS
 
     parameter = next(model.parameters())
@@ -128,20 +126,13 @@ def _derive_gen_config(model, quant_label=None, adapter_path=None,
         resolved_provider = None
         resolved_model = None
 
-    state = bypass_state(model)
-    permanent = None if state is None else state.get("permanent")
-
     return {
         "do_sample": do_sample,
         "max_new_tokens": max_new_tokens,
         "batch_size": batch_size,
-        "system_fold": bool(system_fold),
         "quant": quant_label,
         "environment": environment,
         "bypass_impl": bypass_impl_string(model),
-        "permanent_bypassed_layer": (
-            None if permanent is None else permanent["layer_idx"]
-        ),
         "load_profile": {
             "device_type": parameter.device.type,
             "dtype": str(getattr(model, "dtype", parameter.dtype)),
@@ -209,27 +200,14 @@ def _encode_chats(tokenizer, texts):
     """Encode template-rendered chat strings for batched generation.
 
     add_special_tokens=False is load-bearing: apply_chat_template already
-    placed every special token the template wants. Llama-3.1 and Gemma-2
-    templates begin with BOS, so the tokenizer default would prepend a
-    SECOND BOS and silently shift the whole output distribution on those
-    models. Qwen's template adds no BOS, so Qwen rows are unchanged.
+    placed every special token the template wants. The Llama-3.1 template
+    begins with BOS, so the tokenizer default would prepend a SECOND BOS and
+    silently shift the whole output distribution on that model. Qwen's
+    template adds no BOS, so Qwen rows are unchanged.
     """
     return tokenizer(
         texts, return_tensors="pt", padding=True, add_special_tokens=False
     )
-
-
-def _system_fold_needed(tokenizer, probe_messages):
-    """True iff the tokenizer's chat template rejects the system role."""
-    try:
-        tokenizer.apply_chat_template(
-            probe_messages, tokenize=False, add_generation_prompt=True
-        )
-        return False
-    except Exception as exc:
-        if "system role" in str(exc).lower():
-            return True
-        raise
 
 
 def render_condition_texts(scenarios, condition, tokenizer):
@@ -237,13 +215,9 @@ def render_condition_texts(scenarios, condition, tokenizer):
     scenarios = list(scenarios)
     if not scenarios:
         return []
-    probe = render_messages(scenarios[0], condition)
-    system_fold = _system_fold_needed(tokenizer, probe)
     rendered = []
     for scenario in scenarios:
         messages = render_messages(scenario, condition)
-        if system_fold:
-            messages = fold_system_into_user(messages)
         rendered.append(tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         ))
@@ -315,7 +289,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          checkpoint_step=None, arm=None,
                          batch_size=4, max_new_tokens=256, do_sample=False,
                          seed=42, train_seed=None, resume=True, quant_label=None,
-                         use_llm_fallback=False, llm_provider="anthropic",
+                         use_llm_fallback=False, llm_provider="openai",
                          llm_model=None, scenario_seed=None, n=None,
                          render_fn=None, score_fn=None, environment=None) -> list:
     """Evaluate one model on the negotiation task. THE central function.
@@ -332,7 +306,7 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     environment passes insider.render_insider_messages /
     insider.score_insider_response, which share the exact call signatures.
     Everything else — manifest sidecar, resume key, identity guards,
-    gen_config derivation, system-fold probe, append-before-next-batch —
+    gen_config derivation, append-before-next-batch —
     is one shared code path.
 
     `environment` is the caller's fingerprint of THAT pair (e.g.
@@ -360,32 +334,23 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         score_fn = score_response
 
     from algoverse.metrics import load_rows, normalized_scoring_config
-    from algoverse.models import probe_bypassed_layer
+    from algoverse.models import bypassed_layer as _live_bypassed_layer
     from algoverse.utils import append_jsonl, set_seed
 
-    # Carve-out rule (ratified 2026-08-16): a row's bypassed_layer records
-    # the PROBE only; a permanent lesion is checkpoint identity carried by
-    # adapter_path + train_meta, so it never participates in this check.
-    live_bypassed_layer = probe_bypassed_layer(model)
+    # A row's bypassed_layer is derived from the live model, never copied
+    # from the caller: the argument says what the caller believes, the
+    # model says what is true, and a disagreement refuses.
+    live_bypassed_layer = _live_bypassed_layer(model)
     if (
         live_bypassed_layer != bypassed_layer
         or isinstance(bypassed_layer, bool)
     ):
         raise ValueError(
-            "bypassed_layer bookkeeping %r disagrees with live probe state %r"
+            "bypassed_layer bookkeeping %r disagrees with live bypass state %r"
             % (bypassed_layer, live_bypassed_layer)
         )
 
     set_seed(seed)
-    system_fold = False
-    if tokenizer is not None and scenarios and conditions:
-        probe = render_fn(scenarios[0], conditions[0])
-        system_fold = _system_fold_needed(tokenizer, probe)
-        if system_fold:
-            print(
-                "SYSTEM ROLE FOLDED into first user turn "
-                "(template rejects system role): %s" % model_id
-            )
     out_path = Path(out_path)
     gen_config = _derive_gen_config(
         model,
@@ -397,7 +362,6 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         do_sample=do_sample,
         max_new_tokens=max_new_tokens,
         batch_size=batch_size,
-        system_fold=system_fold,
         environment=environment,
     )
 
@@ -422,9 +386,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                 if field not in record or record.get(field) != current_manifest[field]:
                     manifest_mismatches.add(field)
             # "environment" post-dates the earlier manifests, so absence
-            # normalizes to None instead of counting as a mismatch — the
-            # same rule gen_config's system_fold uses. A manifest that HAS
-            # it must still agree.
+            # normalizes to None instead of counting as a mismatch. A
+            # manifest that HAS it must still agree.
             if record.get("environment") != current_manifest["environment"]:
                 manifest_mismatches.add("environment")
         if manifest_mismatches:
@@ -454,13 +417,11 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     guarded_gen_fields = (
         "bypass_impl",
         "environment",
-        "permanent_bypassed_layer",
         "do_sample",
         "max_new_tokens",
         "quant",
         "model_revision",
         "adapter_digest",
-        "system_fold",
     )
     mismatches = set()
     for row in existing:
@@ -471,8 +432,6 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         recorded_gen = row.get("gen_config") or {}
         for field in guarded_gen_fields:
             recorded_value = recorded_gen.get(field)
-            if field == "system_fold":
-                recorded_value = bool(recorded_value)
             if recorded_value != gen_config.get(field):
                 mismatches.add(field)
         recorded_load = recorded_gen.get("load_profile") or {}
@@ -552,8 +511,6 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         messages = [
             render_fn(scenario, condition) for scenario, condition in chunk
         ]
-        if system_fold:
-            messages = [fold_system_into_user(item) for item in messages]
         generations = generate_batch(
             model, tokenizer, messages,
             max_new_tokens=max_new_tokens, do_sample=do_sample,
@@ -818,24 +775,6 @@ def _competence_done(out_path, run_meta, metric, config):
     return bool(metric_rows)
 
 
-def _competence_run_meta(model, run_meta):
-    """Stamp and guard the live model's permanent-lesion identity."""
-    from algoverse.models import bypass_state
-
-    normalized = dict(run_meta or {})
-    state = bypass_state(model)
-    permanent = None if state is None else state.get("permanent")
-    live_layer = None if permanent is None else permanent["layer_idx"]
-    field = "permanent_bypassed_layer"
-    if field in normalized and normalized[field] != live_layer:
-        raise ValueError(
-            "competence permanent lesion mismatch: run_meta=%r live_model=%r"
-            % (normalized[field], live_layer)
-        )
-    normalized[field] = live_layer
-    return normalized
-
-
 def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
                            gsm8k_limit=GSM8K_LIMIT,
                            mmlu_limit_per_subtask=MMLU_LIMIT_PER_SUBTASK,
@@ -856,15 +795,14 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         deltas do, and flipping formatting mid-project destroys them.
 
     run_meta identifies the model (run_id, model_id, adapter_path,
-    bypassed_layer, permanent_bypassed_layer, checkpoint_step, arm,
-    train_seed); each metric row =
+    bypassed_layer, checkpoint_step, arm, train_seed); each metric row =
     run_meta + {"metric", "value", "stderr", "config"}. Appended to
     out_path (competence.jsonl per run).
     """
     from algoverse.utils import append_jsonl
 
     out_path = Path(out_path)
-    run_meta = _competence_run_meta(model, run_meta)
+    run_meta = dict(run_meta or {})
     summary = {}
 
     jobs = [
@@ -879,9 +817,6 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         "attn_implementation": getattr(config, "_attn_implementation", None),
         "model_revision": getattr(config, "_commit_hash", None),
         "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
-        "permanent_bypassed_layer": (
-            (run_meta or {}).get("permanent_bypassed_layer")
-        ),
     }
     for job in jobs:
         name, tasks_list, limit, prefixes, metric_name = job
@@ -944,8 +879,8 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
 def _sliding_windows(seq_len, max_length, stride):
     """Yield (begin, end, mask_upto) for the pinned sliding-window scheme.
 
-    One place owns the window arithmetic so perplexity (item 12) and the
-    neutral-distribution divergence (item 16) score EXACTLY the same token
+    One place owns the window arithmetic so perplexity and the
+    neutral-distribution divergence score EXACTLY the same token
     set: windows advance by `stride`, each scores only the tokens no
     earlier window scored, and the first window's mask boundary is clamped
     at 0 so it keeps all of its (window_len - 1) shifted predictions
@@ -972,7 +907,7 @@ def jsd_nats(p, q):
     Pure-stdlib reference implementation: 0 for identical distributions,
     symmetric, bounded by ln 2. The torch path used on real logits
     (_jsd_mean_from_logits) is tested against this function; keeping the
-    reference in stdlib lets the math be pinned at rung 1.
+    reference in stdlib lets the math be pinned in the dependency-free tier.
     """
     import math
 
@@ -1027,7 +962,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
     at least max_length - stride tokens of context.
 
     Two deliberate choices: the loss is accumulated in float32, because a
-    lesioned model can produce logits extreme enough to overflow fp16;
+    bypassed model can produce logits extreme enough to overflow fp16;
     and the return is capped (with the raw mean NLL recorded) so one
     broken checkpoint reports as a huge-but-finite number instead of
     JSON-breaking infinity.
@@ -1038,7 +973,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
     import torch.nn.functional as F
     from algoverse.utils import append_jsonl
 
-    run_meta = _competence_run_meta(model, run_meta)
+    run_meta = dict(run_meta or {})
     metric_config = {
         "n_tokens": n_tokens,
         "max_length": max_length,
@@ -1052,7 +987,6 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
             getattr(model, "config", None), "_commit_hash", None
         ),
         "adapter_digest": _adapter_digest((run_meta or {}).get("adapter_path")),
-        "permanent_bypassed_layer": run_meta["permanent_bypassed_layer"],
     }
     if out_path is not None and _competence_done(
         out_path, run_meta, "wikitext2_ppl", metric_config
@@ -1111,7 +1045,7 @@ def compute_perplexity(model, tokenizer, n_tokens=20000, max_length=1024,
 
 
 # ---------------------------------------------------------------------------
-# Neutral-distribution divergence (Stage-1 sweep bound, ratified item 16)
+# Neutral-distribution divergence (the pre-registered Stage-1 sweep bound)
 # ---------------------------------------------------------------------------
 
 
@@ -1138,33 +1072,27 @@ def _jsd_mean_from_logits(logits_a, logits_b):
 
 def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
                               max_length=1024, stride=512, token_ids=None):
-    """Item 16's operationalization: intact-vs-bypassed next-token JSD.
+    """The neutral-distribution check: intact-vs-bypassed next-token JSD.
 
     Mean token-level JSD in nats between the intact model's and the
     layer-`layer_idx`-bypassed model's next-token distributions over the
     standard WikiText-2 slice — the same windows, stride, and scored-token
-    set as compute_perplexity (shared _sliding_windows), so item 16 and
-    item 12 are measured on the identical token population.
+    set as compute_perplexity (shared _sliding_windows), so the divergence
+    bound and the perplexity bound are measured on the identical token
+    population.
 
     Runs in lockstep per window (intact forward, then bypassed forward with
     the probe installed), so full-vocab distributions are never held for
     more than one window. The same forwards also yield both models'
     NLL/perplexity on the slice at zero extra cost — the bypassed ppl is
-    item 3's per-layer disqualifier input.
+    the per-layer perplexity-rise disqualifier input.
 
-    No PROBE may be installed on entry (this function owns probe
-    install/remove and restores the model even on failure). A PERMANENT
-    lesion is allowed and becomes part of the baseline: for a Stage-3
-    sweep on a lesioned checkpoint, "intact" means the checkpoint as
-    loaded — lesion included — and the pass measures the probe's
-    divergence on top of it (same-model deltas, item 16's discipline).
-    Probing the permanently-lesioned layer itself refuses inside
-    install_bypass (ratified P-S4); callers skip that layer.
+    No bypass may be installed on entry: this function owns the probe's
+    install/remove and restores the model even on failure.
 
-    `token_ids` overrides the WikiText slice for tests only. Recording of
-    the returned values into results files is owned by the sweep driver
-    (INTERFACES addition pending — sweep-driver plan P-S1); this function
-    only computes.
+    `token_ids` overrides the WikiText slice for tests only. Recording the
+    returned values into results files is the sweep driver's job; this
+    function only computes.
     """
     import math
 
@@ -1174,11 +1102,10 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
     from algoverse.models import bypass_state, install_bypass
 
     state = bypass_state(model)
-    if state is not None and state.get("probe") is not None:
+    if state is not None:
         raise RuntimeError(
             "neutral_distribution_pass owns its own probe install/remove; "
-            "a probe bypass is already installed at layer %s"
-            % state["probe"]["layer_idx"]
+            "a bypass is already installed at layer %s" % state["layer_idx"]
         )
 
     device = next(model.parameters()).device
@@ -1394,13 +1321,14 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     rows_paths        {"M_0": ".../rows.jsonl", "M_D": ..., "M_C": ...}
     competence_paths  same keys -> competence.jsonl paths (optional)
 
-    The gate follows RESEARCH_SPEC Stage 1: it verifies the GAIN
+    The gate verifies the GAIN
     tau(M_D) - tau(M_0) exceeds tau_gain_min (with the gain's CI excluding
     0), not the absolute tau(M_D): a base model already incentive-sensitive
     would otherwise pass without fine-tuning changing anything. It also
     checks that M_D keeps its honest task-competence and general
-    capabilities. M_C, if provided, adds a negative-control check but is not
-    required (the spec creates M_C only in Stage 2).
+    capabilities. M_C, if provided (a model trained on the honest control
+    objective), adds a negative-control check; the final design trains no
+    such standalone checkpoint.
 
     Thresholds are arguments and printed with the decision, so a reader sees
     exactly what PASS meant. A decision needs both M_0 and M_D; before that
@@ -1486,7 +1414,7 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
                 limit = (item.get("config") or {}).get("limit")
                 if limit is not None and limit < minimum:
                     lines.append(
-                        "RECORDED DEVIATION: %s %s limit=%s below ratified %s"
+                        "RECORDED DEVIATION: %s %s limit=%s below the pinned %s"
                         % (name, metric, limit, minimum)
                     )
 

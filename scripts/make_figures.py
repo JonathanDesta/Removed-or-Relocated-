@@ -87,8 +87,8 @@ def _report(meta):
 
 def _points_and_statuses(parser, data, what):
     """A layer-curve-like input is either the point list itself or a
-    sweep.evaluate_sweep result dict (points from "curve"/"pareto_points",
-    statuses from "entries")."""
+    sweep.evaluate_sweep result dict (points from its "curve", statuses from
+    its "entries")."""
     if isinstance(data, dict):
         points = data.get(what) or data.get("curve")
         if points is None:
@@ -128,46 +128,6 @@ def main(argv=None):
     _input_arg(sub, "figures.layer_curve JSON/JSONL or evaluate_sweep JSON")
 
     sub = subs.add_parser(
-        "pareto",
-        help="A_l vs damage scatter with the non-dominated frontier",
-        description=(
-            "Input: a JSON list (or JSONL) of figures.pareto_points dicts — "
-            "layer-curve keys plus damage, damage_metric, damage_reason — OR "
-            "a sweep.evaluate_sweep result dict, whose 'pareto_points', "
-            "'frontier' and 'entries' statuses are used. The frontier is "
-            "computed with figures.pareto_frontier when not provided. "
-            "Disqualified points are hollow; points missing either axis are "
-            "footnoted, never dropped."
-        ),
-    )
-    _add_common(sub)
-    _input_arg(sub, "figures.pareto_points JSON/JSONL or evaluate_sweep JSON")
-    sub.add_argument(
-        "--allow-mixed", action="store_true",
-        help="pass allow_mixed=True to figures.pareto_frontier (points from "
-             "more than one comparison; off by default for a reason)",
-    )
-    sub.add_argument("--a-l-min", type=float, default=None,
-                     help="draw the A_l minimum bound (overrides a record's "
-                          "'bounds')")
-    sub.add_argument("--damage-max", type=float, default=None,
-                     help="draw the damage cap (overrides a record's 'bounds')")
-
-    sub = subs.add_parser(
-        "pareto-panels",
-        help="one Pareto subplot per damage metric, from an "
-             "emit_figure_records.py pareto record",
-        description=(
-            "Input: the JSON emit_figure_records.py pareto writes -- "
-            "{model, base_run_id, panels: [{damage_metric, damage_reference, "
-            "bounds, pareto_points, frontier}, ...]}. Each panel draws its "
-            "own ratified bounds; off-plot layers are footnoted per panel."
-        ),
-    )
-    _add_common(sub)
-    _input_arg(sub, "emit_figure_records.py pareto JSON")
-
-    sub = subs.add_parser(
         "rt",
         help="R_t vs checkpoint t, one line per environment",
         description=(
@@ -176,8 +136,8 @@ def main(argv=None):
             "R_t_ci_low, R_t_ci_high, reason — plus 'env' (line label) and "
             "'checkpoint_step' (int). A record with R_t null is rendered as "
             "an annotated gap carrying its reason (e.g. "
-            "denominator_too_small), NEVER as zero. The ratified checkpoint "
-            "subset {8, 70, 281} always appears on the x-axis."
+            "denominator_too_small), NEVER as zero. The pre-registered "
+            "checkpoint subset {8, 70, 281} always appears on the x-axis."
         ),
     )
     _add_common(sub)
@@ -191,53 +151,38 @@ def main(argv=None):
     sub.add_argument("--xlabel", default=None, help="x-axis label override")
 
     sub = subs.add_parser(
-        "recovery-taus",
-        help="raw per-arm tau vs checkpoint t, one subplot per environment",
-        description=(
-            "Input: the JSONL scripts/recovery_report.py --emit-records "
-            "writes — one record per (environment, checkpoint) with 'env', "
-            "'checkpoint_step', 'arms', and one tau_<ARM> value per arm. "
-            "The honest view behind R_t: point estimates only (the record "
-            "carries no per-arm CI), a null tau is an annotated gap."
-        ),
-    )
-    _add_common(sub)
-    _input_arg(sub, "recovery records JSONL (--emit-records output)")
-
-    sub = subs.add_parser(
         "delta",
-        help="the δ-curve: A_l(recovered) - A_l(just-lesioned) per layer",
+        help="the δ-curve: A_l(recovered E,D) - A_l(just-edited M_E) per layer",
         description=(
             "Inputs: two figures.layer_curve JSON/JSONL files, "
-            "--recovered (the re-fine-tuned checkpoint's curve) and "
-            "--lesioned (the just-lesioned model's curve), matched by "
-            "bypassed_layer. --lesioned-layer marks the permanently "
-            "lesioned l*. Layers unmeasurable on either side become "
-            "annotated gaps naming the side."
+            "--recovered (the sweep of the recovered E,D checkpoint) and "
+            "--edited (the sweep of the just-edited M_E it was continued "
+            "from), matched by bypassed_layer. Layers unmeasurable on "
+            "either side become annotated gaps naming the side."
         ),
     )
     _add_common(sub)
     sub.add_argument("--recovered", default=None,
-                     help="layer_curve JSON/JSONL for the recovered checkpoint")
-    sub.add_argument("--lesioned", default=None,
-                     help="layer_curve JSON/JSONL for the just-lesioned model")
-    sub.add_argument("--lesioned-layer", default=None,
-                     help="the permanently lesioned layer l*, marked on the figure")
+                     help="layer_curve JSON/JSONL for the recovered E,D checkpoint")
+    sub.add_argument("--edited", default=None,
+                     help="layer_curve JSON/JSONL for the just-edited M_E")
     sub.add_argument("--label-recovered", default="recovered checkpoint",
-                     help="axis/gap label for the recovered side")
-    sub.add_argument("--label-lesioned", default="just-lesioned",
-                     help="axis/gap label for the comparison side (e.g. "
-                          "'M_E (just-edited)' on the lesion-free edit path)")
+                     help="axis/gap label for the recovered side (e.g. "
+                          "'E,D t281 (recovered)')")
+    sub.add_argument("--label-edited", default="just-edited",
+                     help="axis/gap label for the just-edited side (e.g. "
+                          "'M_E (just-edited)')")
 
     sub = subs.add_parser(
         "tau-bars",
-        help="tau per model and arm (M_0 / M_D / M_C) with CIs",
+        help="tau per model and checkpoint (M_0 / M_D / M_E-<window>) with CIs",
         description=(
-            "Input: JSON list or JSONL of records, one per (model, arm): "
-            "metrics.tau_with_ci-shaped — tau, tau_ci_low, tau_ci_high — "
-            "plus 'model' (group label) and 'label' (arm: M_0 / M_D / M_C). "
-            "An optional 'reason' explains a null tau, which renders as an "
-            "annotated gap, never a zero-height bar."
+            "Input: JSON list or JSONL of records, one per (model, "
+            "checkpoint): metrics.tau_with_ci-shaped — tau, tau_ci_low, "
+            "tau_ci_high — plus 'model' (group label) and 'label' "
+            "(M_0 / M_D / M_E-<window>). An optional 'reason' explains a "
+            "null tau, which renders as an annotated gap, never a "
+            "zero-height bar."
         ),
     )
     _add_common(sub)
@@ -283,39 +228,10 @@ def main(argv=None):
     sub.add_argument("--analysis", default="probe_auroc",
                      help="which interp rows to draw (default probe_auroc; "
                           "e.g. probe_auroc_stratified:offer for the "
-                          "offer-scenario stratum written by the 2026-09-02 "
-                          "stratified design)")
+                          "offer-scenario stratum)")
     sub.add_argument("--interp", action="append", metavar="KEY=PATH",
                      help="ordered curve: checkpoint key and its interp.jsonl "
                           "(repeatable)")
-
-    sub = subs.add_parser(
-        "decomposition",
-        help="stacked per-layer output decomposition of one sweep",
-        description=(
-            "Input: the JSON emit_figure_records.py decomposition writes "
-            "(figures.decomposition_cells record). One stacked bar per "
-            "bypassed layer for --condition; voided layers (invalid rate "
-            "above the ruling bound) are marked, missing layers are gaps."
-        ),
-    )
-    _add_common(sub)
-    _input_arg(sub, "emit_figure_records.py decomposition JSON")
-    sub.add_argument("--condition", default="incentive",
-                     choices=["incentive", "control"])
-
-    sub = subs.add_parser(
-        "edit-gate-summary",
-        help="the six edit gates side by side: A_edit with counts, edit JSD, "
-             "capability deltas, and the window's Stage-1 A_l",
-        description=(
-            "Input: the JSONL emit_figure_records.py edit-gate-summary "
-            "writes, one record per edited checkpoint. Null quantities are "
-            "annotated gaps, never zeros."
-        ),
-    )
-    _add_common(sub)
-    _input_arg(sub, "emit_figure_records.py edit-gate-summary JSONL")
 
     args = parser.parse_args(argv)
 
@@ -328,38 +244,6 @@ def main(argv=None):
         meta = plotting.render_layer_curve(
             points, _out_base(parser, args, "layer_curve"),
             statuses=statuses, title=args.title, dpi=args.dpi,
-        )
-
-    elif args.command == "pareto":
-        data = _load_input(parser, args, "pareto points")
-        frontier = None
-        if data is None:
-            points, statuses = plotting.synthetic_pareto()
-        else:
-            points, statuses = _points_and_statuses(parser, data, "pareto_points")
-            if isinstance(data, dict):
-                frontier = data.get("frontier")
-        bounds = dict(data.get("bounds") or {}) if isinstance(data, dict) else {}
-        if args.a_l_min is not None:
-            bounds["a_l_min"] = args.a_l_min
-        if args.damage_max is not None:
-            bounds["damage_max"] = args.damage_max
-        meta = plotting.render_pareto(
-            points, _out_base(parser, args, "pareto"),
-            statuses=statuses, frontier=frontier,
-            allow_mixed=args.allow_mixed, title=args.title, dpi=args.dpi,
-            bounds=bounds or None,
-        )
-
-    elif args.command == "pareto-panels":
-        record = _load_input(parser, args, "pareto panels record")
-        if record is None:
-            record = plotting.synthetic_pareto_panels()
-        if not isinstance(record, dict):
-            parser.error("pareto-panels input must be the pareto record dict")
-        meta = plotting.render_pareto_panels(
-            record, _out_base(parser, args, "pareto_panels"),
-            title=args.title, dpi=args.dpi,
         )
 
     elif args.command == "rt":
@@ -387,38 +271,23 @@ def main(argv=None):
             annotate=annotate, notes=args.note, xlabel=args.xlabel,
         )
 
-    elif args.command == "recovery-taus":
-        records = _load_input(parser, args, "recovery records")
-        if records is None:
-            records = plotting.synthetic_recovery_taus()
-        meta = plotting.render_recovery_taus(
-            records, _out_base(parser, args, "recovery_taus"),
-            title=args.title, dpi=args.dpi,
-        )
-
     elif args.command == "delta":
         if args.synthetic:
-            if args.recovered or args.lesioned:
-                parser.error("give --recovered/--lesioned or --synthetic, not both")
-            recovered, lesioned, default_lstar = plotting.synthetic_delta()
-            lesioned_layer = (
-                args.lesioned_layer if args.lesioned_layer is not None
-                else default_lstar
-            )
+            if args.recovered or args.edited:
+                parser.error("give --recovered/--edited or --synthetic, not both")
+            recovered, edited = plotting.synthetic_delta()
         else:
-            if not (args.recovered and args.lesioned):
+            if not (args.recovered and args.edited):
                 parser.error(
-                    "delta needs --recovered and --lesioned layer-curve files "
+                    "delta needs --recovered and --edited layer-curve files "
                     "unless --synthetic is given"
                 )
             recovered = plotting.load_records(args.recovered)
-            lesioned = plotting.load_records(args.lesioned)
-            lesioned_layer = args.lesioned_layer
+            edited = plotting.load_records(args.edited)
         meta = plotting.render_delta(
-            recovered, lesioned, _out_base(parser, args, "delta"),
-            lesioned_layer=lesioned_layer,
+            recovered, edited, _out_base(parser, args, "delta"),
             label_recovered=args.label_recovered,
-            label_lesioned=args.label_lesioned,
+            label_edited=args.label_edited,
             title=args.title, dpi=args.dpi,
         )
 
@@ -498,28 +367,6 @@ def main(argv=None):
                 curves.append((key, points))
         meta = plotting.render_probe_curves(
             curves, _out_base(parser, args, "probe_curves"),
-            title=args.title, dpi=args.dpi,
-        )
-
-    elif args.command == "decomposition":
-        record = _load_input(parser, args, "decomposition record")
-        if record is None:
-            record = plotting.synthetic_decomposition()
-        if not isinstance(record, dict):
-            parser.error("decomposition input must be the decomposition record dict")
-        meta = plotting.render_decomposition(
-            record, _out_base(parser, args, "decomposition"),
-            condition=args.condition, title=args.title, dpi=args.dpi,
-        )
-
-    elif args.command == "edit-gate-summary":
-        records = _load_input(parser, args, "edit-gate summary records")
-        if records is None:
-            records = plotting.synthetic_edit_gate_summary()
-        if isinstance(records, dict):
-            records = [records]
-        meta = plotting.render_edit_gate_summary(
-            records, _out_base(parser, args, "edit_gate_summary"),
             title=args.title, dpi=args.dpi,
         )
 

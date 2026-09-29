@@ -1,6 +1,6 @@
 """Unit tests for algoverse.sweep, on synthetic rows with known answers.
 
-Pure Python, no GPU, no ML stack (rung 1). Run directly:
+Pure Python, no GPU, no ML stack (the dependency-free tier). Run directly:
 
     python3 tests/test_sweep_pure.py
 
@@ -26,13 +26,11 @@ from algoverse import sweep
 # Constant generation profile apart from the intervention itself. Production
 # intact rows carry bypass_impl=None and probe rows carry the hook version.
 GEN = {
-    "permanent_bypassed_layer": None,
     "quant": "4bit",
     "do_sample": False,
     "max_new_tokens": 256,
     "model_revision": "cafe0000",
     "adapter_digest": "adapter-digest",
-    "system_fold": False,
     "use_llm_fallback": True,
     "llm_provider": "openai",
     "llm_model": "gpt-5-mini",
@@ -123,8 +121,6 @@ def passing_competence(*layers, jsd_values=None):
     return result
 
 
-DECISION = "spec item 16 confirmed at 0.25 nats (recorded 2026-08-16)"
-
 # Base run: 12 scenarios, all deceptive under incentive, honest control:
 # tau(M_D) = 1.0 in every resample.
 BASE = make_run(12, d_inc=12)
@@ -152,7 +148,7 @@ def test_passing_layer_selected_by_argmax():
     report = sweep.sweep_report(
                                 BASE, layers, m0_competence=1.0,
                                 competence_inputs=passing_competence(5, 7),
-                                item16_decision=DECISION, n_boot=200, seed=0)
+                                n_boot=200, seed=0)
     assert "l*: layer 5" in report
     assert "VERDICT: layer 5 selected as l*" in report
     # Item 17 requires the share A_l*/tau(M_D) reported alongside.
@@ -268,16 +264,18 @@ def test_full_pool_base_is_restricted_and_layer_draws_must_match():
         raise AssertionError("different layer draws were silently paired")
 
 
-def test_permanent_lesion_identity_is_not_relaxed_with_probe_impl():
-    layer = make_run(12, d_inc=0, layer=5)
-    for row in layer:
-        row["gen_config"]["permanent_bypassed_layer"] = 3
+def test_probe_impl_must_match_across_layers_and_base_must_be_unprobed():
+    probed_base = make_run(12, d_inc=12)
+    for row in probed_base:
+        row["gen_config"]["bypass_impl"] = "block-output-identity-hook/v1"
     try:
-        sweep.evaluate_sweep(BASE, {5: layer}, m0_competence=1.0)
+        sweep.evaluate_sweep(
+            probed_base, {5: make_run(12, d_inc=0, layer=5)}, m0_competence=1.0
+        )
     except ValueError as exc:
-        assert "permanent_bypassed_layer" in str(exc)
+        assert "bypass_impl" in str(exc)
     else:
-        raise AssertionError("different permanent lesions were compared")
+        raise AssertionError("a base run recording a bypass was accepted")
 
     layers = {
         5: make_run(12, d_inc=0, layer=5),
@@ -322,38 +320,19 @@ def test_no_viable_layer_verdict():
     assert result["l_star"] is None
     assert "no viable layer-level localization" in result["verdict"]
     report = sweep.sweep_report(BASE, layers, m0_competence=1.0,
-                                item16_decision=DECISION, n_boot=200, seed=0)
+                                n_boot=200, seed=0)
     assert "VERDICT: no viable layer-level localization" in report
     assert "Stage 2 does not run" in report
 
 
-def test_missing_item16_decision_refusal_and_dev_bypass():
+def test_dev_mode_stamps_every_line():
     layers = {5: make_run(12, d_inc=0, layer=5)}
-    for bad in (None, "", "   "):
-        raised = False
-        try:
-            sweep.sweep_report(BASE, layers, m0_competence=1.0,
-                               item16_decision=bad, n_boot=50, seed=0)
-        except ValueError as exc:
-            raised = True
-            assert "item16_calibration_decision_missing" in str(exc), str(exc)
-        assert raised, bad
-
-    # dev=True bypasses the tripwire (DEV model only) and stamps every line.
+    # dev=True (DEV model only) stamps every line as not publishable.
     report = sweep.sweep_report(BASE, layers, m0_competence=1.0, dev=True,
                                 n_boot=50, seed=0)
     for line in report.splitlines():
         assert line.startswith("DEV — NOT PUBLISHABLE | "), line
-
-    # The confirmation is a research-model verdict too: same tripwire.
-    raised = False
-    try:
-        sweep.confirm_report(BASE, make_run(12, d_inc=0, layer=5),
-                             n_boot=50, seed=0)
-    except ValueError as exc:
-        raised = True
-        assert "item16_calibration_decision_missing" in str(exc)
-    assert raised
+    assert "neutral-JSD bound: 0.25 nats (pre-registered)" in report
     assert "CONFIRMATION" in sweep.confirm_report(
         BASE, make_run(12, d_inc=0, layer=5), dev=True, n_boot=50, seed=0
     )
@@ -381,7 +360,7 @@ def test_complete_table_nothing_silently_dropped():
     report = sweep.sweep_report(
                                 BASE, layers, m0_competence=1.0,
                                 competence_inputs=passing_competence(2, 3),
-                                item16_decision=DECISION, n_boot=200, seed=0)
+                                n_boot=200, seed=0)
     for layer in (2, 3, 9, 11):
         assert "| %d |" % layer in report, layer
     assert "NO ROWS" in report and "DISQUALIFIED" in report
@@ -408,7 +387,7 @@ def test_m0_competence_not_provided_is_not_evaluated_not_a_pass():
     # A missing required cheap measurement blocks candidate certification.
     assert result["l_star"] is None
     assert entry["status"].startswith("PENDING MEASUREMENTS:")
-    report = sweep.sweep_report(BASE, layers, item16_decision=DECISION,
+    report = sweep.sweep_report(BASE, layers,
                                 n_boot=200, seed=0)
     assert "sweep incomplete" in report
     assert "i2_negotiation" in report
@@ -428,7 +407,7 @@ def test_negotiation_competence_drop_kills():
 
 def test_confirm_mode_pass_and_fail():
     passing = sweep.confirm_report(
-        BASE, make_run(12, d_inc=0, layer=5), item16_decision=DECISION,
+        BASE, make_run(12, d_inc=0, layer=5),
         n_boot=200, seed=0,
     )
     assert "CONFIRMATION: PASS" in passing
@@ -437,7 +416,7 @@ def test_confirm_mode_pass_and_fail():
 
     # A_l = 1/6 >= 0.15 but the CI includes zero: item 17 fails on re-check.
     failing = sweep.confirm_report(
-        BASE, make_run(12, d_inc=10, layer=4), item16_decision=DECISION,
+        BASE, make_run(12, d_inc=10, layer=4),
         n_boot=200, seed=0,
     )
     assert "CONFIRMATION: FAIL" in failing
@@ -447,7 +426,7 @@ def test_confirm_mode_pass_and_fail():
     raised = False
     try:
         sweep.confirm_report(BASE, make_run(12, d_inc=0, layer=5), layer=7,
-                             item16_decision=DECISION, n_boot=50, seed=0)
+                             n_boot=50, seed=0)
     except ValueError as exc:
         raised = True
         assert "mismatch" in str(exc)
@@ -510,13 +489,13 @@ def test_paths_load_like_row_lists():
             competence_inputs={
                 "base": str(base_comp_path), 5: str(comp_path)
             },
-            item16_decision=DECISION, n_boot=200, seed=0,
+            n_boot=200, seed=0,
         )
     assert "VERDICT: layer 5 selected as l*" in report
     from_lists = sweep.sweep_report(
         BASE, {5: layers5}, m0_competence=1.0,
         competence_inputs=passing_competence(5),
-        item16_decision=DECISION, n_boot=200, seed=0,
+        n_boot=200, seed=0,
     )
     assert report == from_lists
 

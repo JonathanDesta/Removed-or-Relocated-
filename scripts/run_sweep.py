@@ -1,44 +1,36 @@
-"""Run the Stage-1 layer sweep: load once, loop layers (plan D2 + D5).
+"""Run the layer sweep: load once, loop layers.
 
-Canonical Colab invocations:
+Canonical invocations on a GPU session:
 
-    # MANDATORY FIRST STEP (item 16 calibration): the per-layer JSD curve
-    # on the DEV model, no negotiation rows, all 24 layers.
+    # DEV calibration: the per-layer JSD curve on the 0.5B DEV model, no
+    # negotiation rows, all layers (the check behind the pre-registered
+    # 0.25-nat divergence bound).
     python scripts/run_sweep.py --dev-calibration
 
-    # Research-model sweep, after the human records the confirm-or-revise
-    # decision on the 0.25-nat bound:
+    # Research-model sweep of M_D (Stage 1):
     python scripts/run_sweep.py --model-id Qwen/Qwen2.5-7B-Instruct \
-        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
-        --out-root results/sweep-md-qwen7b-s42-step281 \
-        --run-tag md-qwen7b-s42-step281 --llm-fallback \
-        --item16-decision "<reference to the recorded decision>"
+        --quant 4bit \
+        --adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
+        --out-root $PROJECT/results/sweep-md-qwen7b-s42-step281 \
+        --run-tag md-qwen7b-s42-step281 --llm-fallback
 
     # Session chunking: --layers picks THIS session's share; the sweep
     # manifest identity is always the model's full layer list, so every
     # session of one sweep uses the same out-root and run-tag.
     python scripts/run_sweep.py ... --layers 0-9
 
-    # Benchmarks for the candidate layers only. l* selection is withheld
+    # Benchmarks for the candidate layers only. Selection is withheld
     # until every candidate has MMLU and GSM8K, so this runs after the
-    # sweep above and before sweep_report.py can name l*.
+    # sweep above and before sweep_report.py can select.
     python scripts/run_sweep.py --model-id Qwen/Qwen2.5-7B-Instruct \
-        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
-        --out-root results/sweep-md-qwen7b-s42-step281 \
+        --quant 4bit \
+        --adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
+        --out-root $PROJECT/results/sweep-md-qwen7b-s42-step281 \
         --run-tag md-qwen7b-s42-step281 \
-        --item16-decision "<reference to the recorded decision>" \
         --benchmarks-only --layers 12,17,23
 
-    # Stage-3 ~M_D sweep: the same sweep over a checkpoint carrying the
-    # guarded runtime-permanent lesion at l*. The lesioned layer is
-    # reported as a structural null and the driver generates its own
-    # same-draw unprobed baseline, so no cross-checkpoint base is needed.
-    python scripts/run_sweep.py --model-id Qwen/Qwen2.5-7B-Instruct \
-        --quant 4bit --adapter runs/md-qwen7b-s42/checkpoints/step-00281 \
-        --permanent-bypassed-layer 17 \
-        --out-root results/sweep-lesioned-qwen7b-s42-step281 \
-        --run-tag lesioned-qwen7b-s42-step281 --llm-fallback \
-        --item16-decision "<reference to the recorded decision>"
+    # Stage 3 runs the same sweep over the recovered E,D-t281 checkpoint and
+    # over the just-edited M_E; relocation_report.py compares the two.
 
 Re-running resumes: a finished layer is skipped before the model is
 touched, a partial layer continues row by row.
@@ -58,7 +50,6 @@ from algoverse.models import (
 )
 from algoverse.sweepdriver import (
     full_layer_list,
-    reconcile_permanent_bypass,
     run_candidate_benchmarks,
     run_layer_sweep,
 )
@@ -79,7 +70,7 @@ def check_probe_verdict(probe):
     Accepting any non-null extraction (the earlier check) let a wrong
     deployment or a prompt regression pass startup and then mis-extract
     every reply: a canary with a known answer that accepts any answer is
-    not a canary. (insider-trading.critique-1 F5b, same root cause.)
+    not a canary.
     """
     if probe != PROBE_EXPECTED_OFFER:
         raise RuntimeError(
@@ -109,11 +100,6 @@ if __name__ == "__main__":
     parser.add_argument("--quant", default="4bit", choices=["4bit", "none"])
     parser.add_argument("--adapter", default=None, help="LoRA adapter dir, optional")
     parser.add_argument(
-        "--permanent-bypassed-layer", type=int, default=None,
-        help="construct the immediate post-ablation ~M_D by installing this "
-             "guarded runtime-permanent lesion on a project checkpoint",
-    )
-    parser.add_argument(
         "--benchmarks-only", action="store_true",
         help="run only MMLU/GSM8K for the explicit --layers candidate list",
     )
@@ -123,7 +109,7 @@ if __name__ == "__main__":
              '"A,B,C"; the sweep identity is always the full layer list',
     )
     parser.add_argument("--out-root", default=None,
-                        help="sweep parent directory (D1 layout)")
+                        help="sweep parent directory (layout in sweepdriver.py)")
     parser.add_argument("--run-tag", default=None,
                         help="names the swept checkpoint, e.g. md-qwen7b-s42-step281")
     parser.add_argument("--n", type=int, default=100,
@@ -145,13 +131,8 @@ if __name__ == "__main__":
     parser.add_argument("--llm-provider", default="openai")
     parser.add_argument("--llm-model", default="gpt-5-mini")
     parser.add_argument(
-        "--item16-decision", default=None,
-        help="the recorded DEV-calibration confirm-or-revise decision on the "
-             "0.25-nat bound; required for any non-dev sweep",
-    )
-    parser.add_argument(
         "--dev-calibration", action="store_true",
-        help="item-16 calibration mode: DEV model, quant none, JSD/ppl pass "
+        help="DEV calibration mode: DEV model, quant none, JSD/ppl pass "
              "only, no negotiation rows",
     )
     args = parser.parse_args()
@@ -166,11 +147,8 @@ if __name__ == "__main__":
             parser.error(
                 "--dev-calibration calibrates the plain DEV model; drop --adapter"
             )
-        if args.permanent_bypassed_layer is not None or args.benchmarks_only:
-            parser.error(
-                "--dev-calibration cannot construct a permanent lesion or "
-                "run candidate benchmarks"
-            )
+        if args.benchmarks_only:
+            parser.error("--dev-calibration cannot run candidate benchmarks")
         args.model_id = DEV_MODEL
         args.quant = "none"
         if args.out_root is None:
@@ -187,14 +165,6 @@ if __name__ == "__main__":
         ]
         if missing:
             parser.error("required for a research-model sweep: %s" % ", ".join(missing))
-        if not (args.item16_decision or "").strip():
-            # The binding tripwire lives in run_layer_sweep (plan D5); this
-            # duplicate check just refuses BEFORE a minutes-long model load.
-            parser.error(
-                "--item16-decision is required for a research-model sweep "
-                "(item-16 tripwire); run --dev-calibration first and record "
-                "the confirm-or-revise decision"
-            )
         if args.benchmarks_only and args.layers == "all":
             parser.error(
                 "--benchmarks-only requires the explicit candidate list in "
@@ -274,17 +244,6 @@ if __name__ == "__main__":
         args.adapter is not None
         and (Path(args.adapter) / "train_meta.json").is_file()
     )
-    if args.permanent_bypassed_layer is not None and not has_sidecar:
-        parser.error(
-            "--permanent-bypassed-layer requires a project checkpoint with "
-            "a validated train_meta.json sidecar"
-        )
-    if args.permanent_bypassed_layer is not None and args.model_id == DEV_MODEL:
-        parser.error(
-            "--permanent-bypassed-layer is restricted to non-DEV project "
-            "checkpoints"
-        )
-    sidecar = None
     if has_sidecar:
         sidecar = checkpoint_meta(args.adapter)
         if args.checkpoint_step is None:
@@ -310,40 +269,17 @@ if __name__ == "__main__":
                 % (args.train_seed, sidecar["train_seed"])
             )
 
-    # Load ONCE; the driver loops layers on this single model object (D2).
+    # Load ONCE; the driver loops layers on this single model object. A
+    # project checkpoint loads through load_checkpoint_model so its sidecar
+    # is validated.
     if has_sidecar:
-        # Reinstall-at-load: a Stage-3 sweep of a lesioned checkpoint runs
-        # with the permanent lesion in place (it IS the baseline); the
-        # driver skips the lesioned layer itself (ratified P-S4).
-        model, tokenizer, _meta, _permanent = load_checkpoint_model(
+        model, tokenizer, _meta = load_checkpoint_model(
             args.model_id, args.adapter, quant=args.quant
         )
-        if _permanent is not None:
-            print(
-                "PERMANENT BYPASS REINSTALLED from train_meta.json: layer %d"
-                % _meta["bypassed_layer"]
-            )
     else:
         model, tokenizer = load_model_and_tokenizer(
             args.model_id, quant=args.quant, adapter_path=args.adapter
         )
-        _permanent = None
-
-    if args.permanent_bypassed_layer is not None:
-        recorded = None if sidecar is None else sidecar.get("bypassed_layer")
-        if recorded is not None and recorded != args.permanent_bypassed_layer:
-            raise RuntimeError(
-                "--permanent-bypassed-layer %d contradicts train_meta.json's %d"
-                % (args.permanent_bypassed_layer, recorded)
-            )
-        if _permanent is None:
-            _permanent = reconcile_permanent_bypass(
-                model, args.permanent_bypassed_layer
-            )
-            print(
-                "PERMANENT BYPASS INSTALLED explicitly for ~M_D: layer %d"
-                % args.permanent_bypassed_layer
-            )
     layers = full_layer_list(model)
     chunk = _parse_layer_chunk(args.layers)
 
@@ -355,11 +291,6 @@ if __name__ == "__main__":
             seed=args.seed,
         )
         print("candidate benchmarks complete: %s" % summary["written"])
-        if summary["structurally_skipped"]:
-            print(
-                "structurally skipped permanent layer: %s"
-                % summary["structurally_skipped"]
-            )
         raise SystemExit(0)
 
     summary = run_layer_sweep(
@@ -369,8 +300,7 @@ if __name__ == "__main__":
         n=args.n, scenario_seed=args.scenario_seed, seed=args.seed,
         batch_size=args.batch_size, use_llm_fallback=args.llm_fallback,
         llm_provider=args.llm_provider, llm_model=args.llm_model,
-        item16_decision=args.item16_decision, dev=args.dev_calibration,
-        chunk=chunk,
+        dev=args.dev_calibration, chunk=chunk,
     )
 
     print(

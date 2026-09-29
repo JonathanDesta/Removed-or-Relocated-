@@ -1,32 +1,26 @@
-"""Guarded rung-2 tests for the corroboration driver (tiny Qwen2, CPU).
+"""Guarded ML-stack tier tests for the probe capture helpers and probe
+label sources (tiny Qwen2, CPU).
 
 Tiny random CPU models only — this suite must never run on a GPU.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_corroboration.py
+Run: python tests/test_corroboration.py with the requirements.txt stack
 """
-import json
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-CORROBORATION_TEST_COUNT = 10
+CORROBORATION_TEST_COUNT = 6
 
 try:
     import numpy as np
     import torch
     from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
-    from algoverse.corroboration import (
-        PROBE_RECIPE,
-        probe_examples_from_rows,
-        run_attention_jsd,
-        run_probe_auroc,
-    )
+    from algoverse.corroboration import probe_examples_from_rows
     from algoverse.interp import (
         iter_disk_backed_residual_layers,
-        probe_layer,
         response_token_resid_by_layer,
         response_token_resid_by_layer_to_disk,
     )
@@ -38,17 +32,6 @@ except ImportError:
 
 
 if HAVE_STACK:
-    RUN_META = {
-        "run_id": "corr-rung2",
-        "model_id": "tiny",
-        "adapter_path": None,
-        "bypassed_layer": None,
-        "checkpoint_step": None,
-        "arm": None,
-        "train_seed": None,
-        "bypass_impl": None,
-    }
-
     def _tiny_model():
         torch.manual_seed(0)
         config = Qwen2Config(
@@ -102,16 +85,6 @@ if HAVE_STACK:
                 rendered += "\nassistant\n"
             return rendered
 
-    def _texts(n, words=6, offset=0, seed=0):
-        rng = np.random.default_rng(seed)
-        vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta",
-                      "eta", "theta", "iota", "kappa"]
-        out = []
-        for i in range(n):
-            picks = rng.choice(vocabulary, size=words).tolist()
-            out.append(" ".join(["p%d" % (i + offset)] + picks))
-        return out
-
     def test_capture_matches_residual_stream_reference():
         model = _tiny_model()
         tokenizer = StubTokenizer()
@@ -125,8 +98,8 @@ if HAVE_STACK:
             assert [f.shape for f in layer_features] == [(3, 32), (3, 32)]
             assert all(f.dtype == np.float32 for f in layer_features)
         # The feature for layer l must be the residual LEAVING block l
-        # (capture entry l+1) over the response span, per the sanctioned
-        # lesion-safe reader.
+        # (capture entry l+1) over the response span, per the bypass-safe
+        # reader.
         inputs = tokenizer(texts[0], return_tensors="pt",
                            add_special_tokens=False)
         captured = residual_stream_by_layer(
@@ -190,193 +163,6 @@ if HAVE_STACK:
                 assert sorted(Path(tmp).glob("layer-*.npy"))
         finally:
             handle.remove()
-
-    def test_probe_layer_token_fitting_and_mean_aggregation():
-        # Synthetic responses with a shared per-token signal: fitting on
-        # tokens and mean-aggregating scores must recover the labels.
-        rng = np.random.default_rng(0)
-        responses, labels, groups = [], [], []
-        for i in range(40):
-            label = i % 2
-            n_tokens = 2 + (i % 3)
-            tokens = rng.normal(0, 0.05, (n_tokens, 5))
-            tokens[:, 0] += 2.0 * label
-            responses.append(tokens)
-            labels.append(label)
-            groups.append("g%d" % i)
-        clf, result = probe_layer(responses, labels, groups)
-        assert result["auroc"] > 0.9
-        assert 0 <= result["accuracy"] <= 1
-        # The held-out response score is the MEAN of its per-token decision
-        # scores (the paper's aggregation), reproduced by hand.
-        from sklearn.model_selection import GroupShuffleSplit
-
-        splitter = GroupShuffleSplit(
-            n_splits=1, test_size=0.3, random_state=0
-        )
-        _, test_idx = next(splitter.split(
-            np.zeros((len(responses), 1)), np.asarray(labels),
-            np.asarray(groups),
-        ))
-        scores = np.array([
-            float(np.mean(clf.decision_function(responses[i])))
-            for i in test_idx
-        ])
-        from sklearn.metrics import roc_auc_score
-
-        y = np.asarray(labels)
-        assert roc_auc_score(y[test_idx], scores) == result["auroc"]
-        expected_accuracy = float(np.mean(
-            (scores > 0) == y[test_idx].astype(bool)
-        ))
-        assert expected_accuracy == result["accuracy"]
-
-    def test_probe_auroc_end_to_end_rows_and_resume():
-        model = _tiny_model()
-        tokenizer = StubTokenizer()
-        examples = []
-        texts = _texts(24, seed=3)
-        for i, text in enumerate(texts):
-            examples.append({
-                "text": text,
-                "response_start": 1,
-                "label": (i // 2) % 2 == 0,   # group-consistent labels
-                "group": "g%d" % (i // 2),
-            })
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "interp.jsonl"
-            scratch = Path(tmp) / "scratch"
-            written = run_probe_auroc(
-                model, tokenizer, examples, out, RUN_META, "rows:synthetic",
-                scratch_dir=scratch,
-            )
-            assert scratch.is_dir() and list(scratch.iterdir()) == []
-            rows = [json.loads(line) for line in
-                    out.read_text().strip().splitlines()]
-            assert [row["layer"] for row in rows] == [0, 1, 2, 3]
-            assert set(written) == {0, 1, 2, 3}
-            for row in rows:
-                assert row["analysis"] == "probe_auroc"
-                assert 0.0 <= row["value"] <= 1.0
-                assert 0.0 <= row["accuracy"] <= 1.0
-                if row["ci_low"] is not None:
-                    assert row["ci_low"] <= row["value"] <= row["ci_high"]
-                else:
-                    assert "bootstrap" in row["config"]["ci"]
-                assert row["config"]["n"] == 24
-                assert row["config"]["label_source"] == "rows:synthetic"
-                for key, value in PROBE_RECIPE.items():
-                    assert row["config"][key] == value
-            # Resume: identical invocation adds nothing.
-            again = run_probe_auroc(
-                model, tokenizer, examples, out, RUN_META, "rows:synthetic",
-            )
-            assert again == {}
-            assert len(out.read_text().strip().splitlines()) == 4
-
-        # Bypassed model: the dead layer's row is a structural null.
-        handle = install_bypass(model, 2)
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "interp.jsonl"
-                run_probe_auroc(
-                    model, tokenizer, examples, out, RUN_META,
-                    "rows:synthetic",
-                )
-                rows = [json.loads(line) for line in
-                        out.read_text().strip().splitlines()]
-                bypassed = [row for row in rows if row["layer"] == 2]
-                assert len(bypassed) == 1
-                assert bypassed[0]["value"] is None
-                assert bypassed[0]["accuracy"] is None
-                assert bypassed[0]["config"]["excluded_bypassed_layer"] is True
-                assert all(
-                    row["value"] is not None
-                    for row in rows if row["layer"] != 2
-                )
-        finally:
-            handle.remove()
-
-    def test_attention_jsd_rows_and_resume():
-        model = _tiny_model()
-        tokenizer = StubTokenizer()
-        texts_a = _texts(3, seed=1)
-        texts_b = _texts(3, offset=10, seed=2)
-        groups = ["s1", "s2", "s3"]
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "interp.jsonl"
-            written = run_attention_jsd(
-                model, tokenizer, texts_a, texts_b, out, RUN_META,
-                groups_incentive=groups, groups_control=groups,
-                n_boot=40, extra_config={"split": "selection"},
-            )
-            rows = [json.loads(line) for line in
-                    out.read_text().strip().splitlines()]
-            assert [row["layer"] for row in rows] == [0, 1, 2, 3]
-            assert set(written) == {0, 1, 2, 3}
-            for row in rows:
-                assert row["analysis"] == "attention_jsd"
-                assert row["value"] >= 0.0
-                assert "accuracy" not in row
-                assert row["config"]["n_boot"] == 40
-                assert row["config"]["split"] == "selection"
-                assert row["config"]["attn_implementation"] == "eager"
-                if row["ci_low"] is not None:
-                    assert row["ci_low"] <= row["ci_high"]
-            again = run_attention_jsd(
-                model, tokenizer, texts_a, texts_b, out, RUN_META,
-                groups_incentive=groups, groups_control=groups,
-                n_boot=40, extra_config={"split": "selection"},
-            )
-            assert again == {}
-            assert len(out.read_text().strip().splitlines()) == 4
-
-        handle = install_bypass(model, 1)
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "interp.jsonl"
-                run_attention_jsd(
-                    model, tokenizer, texts_a, texts_b, out, RUN_META,
-                    n_boot=40,
-                )
-                rows = [json.loads(line) for line in
-                        out.read_text().strip().splitlines()]
-                bypassed = [row for row in rows if row["layer"] == 1]
-                assert bypassed[0]["value"] is None
-                assert bypassed[0]["ci_low"] is None
-                assert bypassed[0]["config"]["excluded_bypassed_layer"] is True
-        finally:
-            handle.remove()
-
-    def test_probe_scratch_cleans_after_fit_failure():
-        model = _tiny_model()
-        tokenizer = StubTokenizer()
-        examples = [
-            {
-                "text": "one two three four",
-                "response_start": 1,
-                "label": bool(i % 2),
-                "group": "g%d" % i,
-            }
-            for i in range(4)
-        ]
-
-        def fail_probe(*args, **kwargs):
-            raise RuntimeError("synthetic fit failure")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            scratch = Path(tmp) / "scratch"
-            try:
-                run_probe_auroc(
-                    model, tokenizer, examples, Path(tmp) / "interp.jsonl",
-                    RUN_META, "rows:synthetic", scratch_dir=scratch,
-                    _probe=fail_probe,
-                )
-            except RuntimeError as exc:
-                assert "synthetic fit failure" in str(exc)
-            else:
-                raise AssertionError("synthetic probe failure did not propagate")
-            assert scratch.is_dir() and list(scratch.iterdir()) == []
 
     def test_probe_examples_from_rows_renders_and_spans():
         from algoverse.tasks import get_scenarios
@@ -504,8 +290,8 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_corroboration.py needs torch + transformers + sklearn "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip."
+            "(the requirements.txt stack). A missing stack is a FAILURE "
+            "here, not a skip."
         )
 
     tests = [

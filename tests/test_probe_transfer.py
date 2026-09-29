@@ -1,4 +1,4 @@
-"""Guarded rung-2 tests for scripts/run_probe_transfer.py (tiny Qwen2, CPU).
+"""Guarded ML-stack-tier tests for scripts/run_probe_transfer.py (tiny Qwen2, CPU).
 
 Tiny random CPU models only — this suite must never run on a GPU. The
 ways the new modes can silently lie, each caught:
@@ -9,7 +9,7 @@ ways the new modes can silently lie, each caught:
      position/fit refusal, end to end through main();
   4. a legacy invocation no longer writing the diag-probe3 config.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_probe_transfer.py
+Run: python tests/test_probe_transfer.py with the requirements.txt stack
 """
 import importlib.util
 import json
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_probe_transfer.py needs torch + transformers + sklearn "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, not a skip."
+            "(the requirements.txt stack). A missing stack is a FAILURE here, not a skip."
         )
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]

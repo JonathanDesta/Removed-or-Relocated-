@@ -1,6 +1,6 @@
 """Compute the M_D-to-M_E neutral JSD or print the pure M_E gate report.
 
-GPU pass (human-run):
+GPU pass:
 
     python scripts/edit_gate_report.py jsd --model-id ... --quant 4bit \
         --md-adapter .../md/checkpoints/step-00281 \
@@ -60,8 +60,8 @@ def edit_effect(rows_md, rows_me, n_boot=2000, seed=0):
 def condition_counts(rows):
     """Exact per-condition deceptive counts with Wilson 95% intervals.
 
-    The saturation companion to the bootstrap CI (RESEARCH_SPEC layer-edit
-    deltas item 10): k deceptive of n_valid valid rows, interval from
+    The saturation companion to the bootstrap CI (pre-registered for the
+    layer-edit deltas): k deceptive of n_valid valid rows, interval from
     metrics.wilson_interval. n_total (every row of the condition) is carried
     so the valid denominator is never mistaken for the pool size.
     """
@@ -201,7 +201,7 @@ def edit_gate_decision(effect, m0_stats, me_stats, bench, edit_jsd,
                        competence_drop_max=COMPETENCE_DROP_MAX,
                        ppl_rise_max=PPL_RISE_MAX,
                        edit_jsd_max=EDIT_JSD_MAX):
-    """Pure PASS/FAIL/INCOMPLETE decision for the ratified M_E gate."""
+    """Pure PASS/FAIL/INCOMPLETE decision for the pre-registered M_E gate."""
     if publishability_errors is None:
         errors = ["publishability completeness was not assessed"]
     else:
@@ -461,10 +461,8 @@ def edit_distribution_pass(model, tokenizer, md_adapter_name="default",
     )
     from algoverse.models import bypass_state
 
-    state = bypass_state(model)
-    if state is not None and any(state.get(role) is not None
-                                 for role in ("permanent", "probe")):
-        raise ValueError("wikitext2_edit_jsd requires a lesion-free model")
+    if bypass_state(model) is not None:
+        raise ValueError("wikitext2_edit_jsd requires a model with no bypass installed")
     available = set(getattr(model, "peft_config", {}))
     missing = [
         name for name in (md_adapter_name, me_adapter_name)
@@ -524,7 +522,6 @@ def append_edit_jsd(model, tokenizer, md_adapter_path, me_adapter_path,
         WIKITEXT_DATASET_REVISION,
         _adapter_digest,
         _competence_done,
-        _competence_run_meta,
     )
     from algoverse.utils import append_jsonl
 
@@ -556,7 +553,7 @@ def append_edit_jsd(model, tokenizer, md_adapter_path, me_adapter_path,
         "md_adapter_digest": md_digest,
         "me_adapter_digest": me_digest,
     }
-    run_meta = _competence_run_meta(model, run_meta)
+    run_meta = dict(run_meta or {})
     if _competence_done(out_path, run_meta, EDIT_JSD_METRIC, config):
         existing = [
             row for row in metrics.load_rows(out_path)
@@ -608,17 +605,15 @@ def _run_jsd(args):
     if (me_meta.get("config") or {}).get("train_layers") is None:
         defects.append("M_E config.train_layers must be non-null")
     if md_meta.get("bypassed_layer") is not None or me_meta.get("bypassed_layer") is not None:
-        defects.append("M_D and M_E must both be lesion-free")
+        defects.append("M_D and M_E must carry no training-time bypass")
     if md_meta.get("train_seed") != me_meta.get("train_seed"):
         defects.append("M_D and M_E train_seed must match")
     if defects:
         raise ValueError("edit JSD checkpoint validation failed: %s" % "; ".join(defects))
 
-    model, tokenizer, _meta, handle = load_checkpoint_model(
+    model, tokenizer, _meta = load_checkpoint_model(
         args.model_id, args.md_adapter, quant=args.quant
     )
-    if handle is not None:
-        raise ValueError("M_D unexpectedly loaded with a permanent lesion")
     if "edited" in getattr(model, "peft_config", {}):
         raise ValueError("adapter name 'edited' is already loaded")
     model.load_adapter(args.me_adapter, adapter_name="edited", is_trainable=False)

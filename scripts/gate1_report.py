@@ -3,11 +3,12 @@
     python scripts/gate1_report.py \
         --rows M_0=results/m0-baseline/rows.jsonl \
         --rows M_D=results/md/rows.jsonl \
-        --rows M_C=results/mc/rows.jsonl \
         --competence M_0=results/m0-baseline/competence.jsonl \
         --competence M_D=results/md/competence.jsonl
 
-The PASS/FAIL line appears once M_0 and M_D are given; M_C is optional.
+The PASS/FAIL line appears once M_0 and M_D are given. An optional M_C
+(a model trained on the honest control objective) adds a negative control;
+the final design trains none.
 Thresholds are flags with defaults and are printed with the decision.
 """
 import argparse

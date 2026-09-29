@@ -1,8 +1,4 @@
-# .gitignore — things git must NOT upload to GitHub.
-# Rule of thumb: GitHub stores code we write; it never stores junk files,
-# private sandboxes, or experiment outputs (those belong on the shared Drive).
-
-# Python junk (auto-generated caches and build leftovers)
+# Python caches and build leftovers
 __pycache__/
 *.pyc
 *.egg-info/
@@ -11,13 +7,13 @@ build/
 .pytest_cache/
 uv.lock
 
-# Local Python sandbox (each person's own; huge and machine-specific)
+# Local virtual environments
 .venv/
 
-# Notebook autosave junk
+# Notebook autosave files
 .ipynb_checkpoints/
 
-# Experiment outputs — these belong on the shared Drive, never in git
+# Experiment outputs live in the project directory, never in git
 wandb/
 checkpoints/
 results/
@@ -26,24 +22,14 @@ figures/
 # LLM-extraction fallback cache (scoring recreates it as needed)
 .cache/
 
-# Generated fine-tuning datasets: deterministic from seed via
-# scripts/build_finetune_data.py, so they regenerate identically rather
-# than living in git (outputs belong on the shared Drive).
+# Generated fine-tuning datasets: deterministic from the seed via
+# scripts/build_finetune_data.py, so they regenerate identically.
 /data/
 
-# macOS junk
+# macOS
 .DS_Store
 
-# LLM instructions
+# Assistant instructions (machine-local)
 AGENTS.md
 CLAUDE.md
 .claude
-roles/
-Prompts.txt
-Algoverse AI Research_ Compute & API Access Policy-2.pdf
-
-# Working notes: plan → critique → disposition rounds. These are our internal
-# process record, not a deliverable. Every decision they produced is restated
-# in RESEARCH_SPEC.md ("Ratified decisions") and INTERFACES.md, which are the
-# normative documents. Kept on disk, never published.
-planning/

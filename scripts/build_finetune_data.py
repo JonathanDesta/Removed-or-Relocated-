@@ -1,4 +1,4 @@
-"""Generate the M_D and M_C fine-tuning datasets.
+"""Generate the deceptive (M_D) and honest control fine-tuning datasets.
 
     python scripts/build_finetune_data.py --out-dir data/finetune --n 1500 --seed 42
 
@@ -20,10 +20,5 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", default="data/finetune")
     parser.add_argument("--n", type=int, default=1500, help="rows per dataset")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fold-system", action="store_true",
-                        help="fold the leading system turn into the user turn")
     args = parser.parse_args()
-    build_finetune_datasets(
-        args.out_dir, n_per_dataset=args.n, seed=args.seed,
-        fold_system=args.fold_system,
-    )
+    build_finetune_datasets(args.out_dir, n_per_dataset=args.n, seed=args.seed)

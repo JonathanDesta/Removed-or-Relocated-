@@ -20,7 +20,7 @@ being the stratum the paper's Figure 3 plots.
 
 Features per row:
     stated_number      claimed_value; "NONE" / null counts as 0 (a claim of
-                       $0 is NONE under the ratified grader rule)
+                       $0 is NONE under the grader rule)
     char_length        len(response_text)
     stated_over_offer  stated_number / scenario_params["company_offer"]
 

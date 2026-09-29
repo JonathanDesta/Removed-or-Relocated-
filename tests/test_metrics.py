@@ -177,44 +177,45 @@ def test_bypass_effect_known_drop():
 
 
 def test_recovery_halfway():
-    # Spec's four-arm R_t = (tau(LD) - tau(LC)) / (tau(ID) - tau(IC)).
-    # tau(LD)=0.5, tau(LC)=0, tau(ID)=1, tau(IC)=0 -> R_t = 0.5.
-    ld = make_run(8, deceptive_incentive=4)  # tau 0.5
-    lc = make_run(8, deceptive_incentive=0)  # tau 0.0
+    # The four-arm R_t = (tau(ED) - tau(EC)) / (tau(ID) - tau(IC)).
+    # tau(ED)=0.5, tau(EC)=0, tau(ID)=1, tau(IC)=0 -> R_t = 0.5.
+    ed = make_run(8, deceptive_incentive=4)  # tau 0.5
+    ec = make_run(8, deceptive_incentive=0)  # tau 0.0
     idd = make_run(8, deceptive_incentive=8)  # tau 1.0
     ic = make_run(8, deceptive_incentive=0)  # tau 0.0
-    result = recovery(ld, lc, idd, ic, n_boot=100, seed=0)
+    result = recovery(ed, ec, idd, ic, n_boot=100, seed=0)
     assert result["R_t"] == 0.5, result
     assert result["reason"] is None
+    assert result["tau_ED"] == 0.5 and result["tau_EC"] == 0.0
 
 
 def test_recovery_subtracts_control_drift():
     # The DiD form must remove control-objective drift. If the control arms
     # each carry tau 0.2, the two-arm formula would give a different number;
-    # the spec's formula nets them out. tau(LD)=0.7, tau(LC)=0.2,
+    # the DiD formula nets them out. tau(ED)=0.7, tau(EC)=0.2,
     # tau(ID)=1.0, tau(IC)=0.2 -> (0.7-0.2)/(1.0-0.2) = 0.625.
-    ld = make_run(10, deceptive_incentive=7)
-    lc = make_run(10, deceptive_incentive=2)
+    ed = make_run(10, deceptive_incentive=7)
+    ec = make_run(10, deceptive_incentive=2)
     idd = make_run(10, deceptive_incentive=10)
     ic = make_run(10, deceptive_incentive=2)
-    result = recovery(ld, lc, idd, ic, n_boot=100, seed=0)
+    result = recovery(ed, ec, idd, ic, n_boot=100, seed=0)
     assert abs(result["R_t"] - 0.625) < 1e-9, result
 
 
 def test_recovery_denominator_guard():
     # Intact deceptive-vs-control gap is zero: ratio would be noise/noise.
-    ld = make_run(8, deceptive_incentive=4)
-    lc = make_run(8, deceptive_incentive=0)
+    ed = make_run(8, deceptive_incentive=4)
+    ec = make_run(8, deceptive_incentive=0)
     idd = make_run(8, deceptive_incentive=4)
     ic = make_run(8, deceptive_incentive=4)  # tau(ID) - tau(IC) = 0
-    result = recovery(ld, lc, idd, ic)
+    result = recovery(ed, ec, idd, ic)
     assert result["R_t"] is None
     assert result["reason"] == "denominator_too_small"
 
-    # The ratified default is 0.10; a 0.05 denominator is also guarded.
+    # The pre-registered default is 0.10; a 0.05 denominator is also guarded.
     idd = make_run(20, deceptive_incentive=2)  # tau 0.10
     ic = make_run(20, deceptive_incentive=1)   # tau 0.05
-    result = recovery(ld, lc, idd, ic)
+    result = recovery(ed, ec, idd, ic)
     assert result["R_t"] is None
     assert result["reason"] == "denominator_too_small"
 
@@ -678,13 +679,11 @@ def test_summarize_runs_groups_by_generation_profile():
     }
     variants = [
         ("bypass_impl", "block-output-identity-hook/v1", None, {}),
-        ("permanent_bypassed_layer", 7, None, {}),
         ("quant", "4bit", None, {}),
         ("do_sample", True, None, {}),
         ("max_new_tokens", 128, None, {}),
         ("model_revision", "cafe", None, {}),
         ("adapter_digest", "digest", None, {}),
-        ("system_fold", True, None, {}),
         ("use_llm_fallback", True, None, {}),
         ("dtype", "torch.float16", "load_profile", {}),
         ("device_type", "cuda", "load_profile", {}),
@@ -726,14 +725,12 @@ def test_summarize_runs_legacy_identity_fields_group_as_none():
     assert len(summaries) == 1
     summary = summaries[0]
     for field in (
-        "run_id", "split", "seed", "train_seed", "bypass_impl",
-        "permanent_bypassed_layer", "quant",
+        "run_id", "split", "seed", "train_seed", "bypass_impl", "quant",
         "do_sample", "max_new_tokens", "model_revision", "adapter_digest",
         "llm_provider", "llm_model", "dtype", "device_type", "four_bit",
         "attn_implementation",
     ):
         assert summary[field] is None, (field, summary)
-    assert summary["system_fold"] is False
     assert summary["use_llm_fallback"] is False
 
 

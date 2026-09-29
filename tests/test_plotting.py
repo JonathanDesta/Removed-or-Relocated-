@@ -1,14 +1,14 @@
-"""Guarded rung-2 tests for the rendering layer (algoverse.plotting).
+"""Guarded ML-stack-tier tests for the rendering layer (algoverse.plotting).
 
-Needs matplotlib (Agg backend, forced below) + numpy from
-~/.venvs/colab-local — no torch, no GPU, no display. The statistics are
+Needs matplotlib (Agg backend, forced below) + numpy from the
+requirements.txt stack — no torch, no GPU, no display. The statistics are
 tested in test_figures.py / test_metrics.py; what is tested HERE is that the
 renderer (a) writes nonempty .png and .pdf files for every figure, (b) turns
 every None the metrics layer can emit into an annotated gap instead of a
 zero or a silent drop, and (c) reports the disqualified / unmeasurable /
 gap sets in its metadata so captions and tests can check them.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_plotting.py
+Run: python tests/test_plotting.py with the requirements.txt stack
 """
 import json
 import os
@@ -18,13 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-PLOTTING_TEST_COUNT = 17
+PLOTTING_TEST_COUNT = 11
 
 try:
     import matplotlib
 
     matplotlib.use("Agg")
-    import numpy  # noqa: F401  (matplotlib's own dependency; rung-2 marker)
+    import numpy  # noqa: F401  (matplotlib's own dependency; ML-stack-tier marker)
 
     HAVE_STACK = True
 except ImportError:
@@ -93,29 +93,6 @@ if HAVE_STACK:
             loaded = plotting.load_records(src)
         assert loaded == json.loads(json.dumps(records))
 
-    def test_pareto_renders_frontier_and_hollow_disqualified():
-        points, statuses = plotting.synthetic_pareto()
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_pareto(
-                points, os.path.join(tmp, "pareto"), statuses=statuses
-            )
-            _nonempty(meta["paths"])
-        assert meta["frontier_layers"]          # a frontier exists
-        assert 4 in meta["disqualified"]        # hollow, not hidden
-        # The destroyed layer cannot be placed on the axes but is reported.
-        assert any(layer == 20 for layer, _ in meta["off_plot"])
-        assert meta["n_plotted"] < meta["n_points"]
-
-    def test_pareto_json_roundtrip_comparison_key_does_not_crash_frontier():
-        """JSON turns the tuple `comparison` key into a list (unhashable);
-        the renderer must normalize it before figures.pareto_frontier."""
-        points, _ = plotting.synthetic_pareto()
-        roundtripped = json.loads(json.dumps(points))
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_pareto(roundtripped, os.path.join(tmp, "rt_pareto"))
-            _nonempty(meta["paths"])
-        assert meta["frontier_layers"]
-
     def test_rt_null_points_become_annotated_gaps_not_zeros():
         records = plotting.synthetic_rt()
         # Sanity: the synthetic data contains the null-with-reason case.
@@ -125,7 +102,7 @@ if HAVE_STACK:
             meta = plotting.render_rt(records, os.path.join(tmp, "rt"))
             _nonempty(meta["paths"])
         assert ("insider_trading", 8, "denominator_too_small") in meta["gaps"]
-        # The ratified subset is always on the axis.
+        # The pre-registered subset is always on the axis.
         for t in plotting.CHECKPOINT_STEPS:
             assert t in meta["checkpoints_shown"]
         assert set(meta["envs"]) == {"negotiation", "insider_trading"}
@@ -148,7 +125,12 @@ if HAVE_STACK:
         labelled with the environment's display name; an unknown (env, t)
         is refused rather than silently skipped."""
         records = plotting.synthetic_rt()
-        assert [a for a, _ in plotting._rt_constituents(records[0])] == ["LD", "LC", "ID", "IC"]
+        # With `arms` present the record's own order and spelling are used;
+        # without it the canonical E,D / E,C / I,D / I,C order is derived
+        # from the tau_* keys.
+        assert [a for a, _ in plotting._rt_constituents(records[0])] == ["E,D", "E,C", "I,D", "I,C"]
+        bare = {k: v for k, v in records[0].items() if k != "arms"}
+        assert [a for a, _ in plotting._rt_constituents(bare)] == ["ED", "EC", "ID", "IC"]
         target = next(r for r in records if r["env"] == "negotiation" and r["R_t"] is not None)
         t_step = target["checkpoint_step"]
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,90 +178,38 @@ if HAVE_STACK:
             _nonempty(meta["paths"])
         assert len(meta["gaps"]) == len(plotting.CHECKPOINT_STEPS)
 
-    def test_delta_marks_lesioned_layer_and_names_gap_sides():
-        recovered, lesioned, l_star = plotting.synthetic_delta()
+    def test_delta_names_gap_sides():
+        recovered, edited = plotting.synthetic_delta()
         with tempfile.TemporaryDirectory() as tmp:
             meta = plotting.render_delta(
-                recovered, lesioned, os.path.join(tmp, "delta"),
-                lesioned_layer=l_star,
+                recovered, edited, os.path.join(tmp, "delta"),
+                label_recovered="E,D t281 (recovered)",
+                label_edited="M_E (just-edited)",
             )
             _nonempty(meta["paths"])
-        assert meta["lesioned_layer"] == l_star
         # Layer 20 is unmeasurable on both source curves: the gap names both
         # sides with the metrics-layer reason.
         gap_layers = dict(meta["gaps"])
         assert 20 in gap_layers
         assert "tau_not_computable" in gap_layers[20]
         assert meta["n_deltas"] == len(meta["layers"]) - len(meta["gaps"])
+        # A one-sided gap names the side by its label.
+        with tempfile.TemporaryDirectory() as tmp:
+            one_sided = plotting.render_delta(
+                recovered, [p for p in edited if p["bypassed_layer"] != 3],
+                os.path.join(tmp, "delta_one_sided"),
+                label_edited="M_E (just-edited)",
+            )
+        assert dict(one_sided["gaps"])[3] == "M_E (just-edited): absent"
 
     def test_tau_bars_render_with_annotated_gap_for_null_tau():
         records = plotting.synthetic_tau_bars()
         with tempfile.TemporaryDirectory() as tmp:
             meta = plotting.render_tau_bars(records, os.path.join(tmp, "tau_bars"))
             _nonempty(meta["paths"])
-        assert meta["labels"] == ["M_0", "M_D", "M_C"]   # fixed arm order
-        assert ("Gemma-2-9B", "M_C", "tau_not_computable") in meta["gaps"]
-
-    def test_pareto_bound_lines_are_reported_in_metadata():
-        points, statuses = plotting.synthetic_pareto()
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_pareto(
-                points, os.path.join(tmp, "pareto_bounds"), statuses=statuses,
-                bounds={"a_l_min": 0.15, "damage_max": 0.05},
-            )
-            _nonempty(meta["paths"])
-        assert meta["bounds"] == {"a_l_min": 0.15, "damage_max": 0.05}
-        expected = sorted(
-            p["bypassed_layer"] for p in points
-            if p["A_l"] is not None and p["damage"] is not None
-            and p["A_l"] >= 0.15 and p["damage"] <= 0.05
-        )
-        assert sorted(meta["within_bounds"]) == expected
-        # No bounds -> nothing reported as within, nothing drawn.
-        with tempfile.TemporaryDirectory() as tmp:
-            plain = plotting.render_pareto(points, os.path.join(tmp, "plain"))
-        assert plain["bounds"] == {"a_l_min": None, "damage_max": None}
-        assert plain["within_bounds"] == []
-
-    def test_pareto_panels_one_axis_per_metric():
-        record = plotting.synthetic_pareto_panels()
-        roundtripped = json.loads(json.dumps(record))   # the CLI path
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_pareto_panels(
-                roundtripped, os.path.join(tmp, "panels"))
-            _nonempty(meta["paths"])
-        assert [p["damage_metric"] for p in meta["panels"]] == [
-            "task_competence", "wikitext2_ppl", "wikitext2_neutral_jsd"]
-        for panel in meta["panels"]:
-            assert panel["n_plotted"] < panel["n_points"]        # layer 20 off-plot
-            assert any(layer == 20 for layer, _ in panel["off_plot"])
-            assert panel["bounds"]["a_l_min"] == 0.15
-        assert meta["panels"][1]["bounds"]["damage_max"] == 2.0
-
-    def test_decomposition_marks_voided_and_missing_layers():
-        record = plotting.synthetic_decomposition()
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_decomposition(
-                record, os.path.join(tmp, "decomp"))
-            _nonempty(meta["paths"])
-            control = plotting.render_decomposition(
-                record, os.path.join(tmp, "decomp_control"), condition="control")
-        assert meta["missing"] == [5]
-        assert 0 in meta["voided"] and 26 in meta["voided"]
-        assert len(meta["layers"]) == 28 and 5 not in meta["totals"]
-        assert control["voided"] == []                  # control rows are all clean
-        assert control["missing"] == [5]
-
-    def test_edit_gate_summary_null_stage1_is_an_annotated_gap():
-        records = plotting.synthetic_edit_gate_summary()
-        with tempfile.TemporaryDirectory() as tmp:
-            meta = plotting.render_edit_gate_summary(
-                records, os.path.join(tmp, "gates"))
-            _nonempty(meta["paths"])
-        assert meta["keys"] == ["l07", "l10", "l13", "l21", "l08", "l24"]
         assert meta["models"] == ["Qwen2.5-7B", "Llama-3.1-8B"]
-        assert ("l24", "stage1_A_l", "layer_not_in_curve") in meta["gaps"]
-        assert len(meta["gaps"]) == 1
+        assert meta["labels"] == ["M_0", "M_D", "M_E"]   # fixed order first, then the rest
+        assert meta["gaps"] == [("Llama-3.1-8B", "M_E", "tau_not_computable")]
 
 
 if __name__ == "__main__":
@@ -287,9 +217,8 @@ if __name__ == "__main__":
 
     if not HAVE_STACK:
         sys.exit(
-            "test_plotting.py needs matplotlib + numpy "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip."
+            "test_plotting.py needs matplotlib + numpy (the requirements.txt "
+            "stack). A missing stack is a FAILURE here, not a skip."
         )
 
     tests = [

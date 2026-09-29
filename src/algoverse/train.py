@@ -1,23 +1,23 @@
 """
-This module contains the Stage-1 fine-tuning lane: LoRA supervised
-fine-tuning that turns a base model M_0 into the deceptive checkpoint M_D
-(trained on data/finetune/m_d_train.jsonl) and the control checkpoint M_C
-(m_c_train.jsonl).
+LoRA supervised fine-tuning for every arm of the experiment: the Stage-1
+deceptive fine-tune M_0 -> M_D (m_d_train.jsonl), the Stage-2 layer-local
+honesty edit M_D -> M_E (m_c_train.jsonl with TrainConfig.train_layers set
+to the edit window), and the Stage-3 continuation arms E,D / E,C / I,D / I,C
+(all layers trainable again, initialized from M_E or M_D).
 
 The heart of it is train_lora: give it a READY model object plus a dataset
 path, and it attaches (or finds) a LoRA adapter, trains it, and writes
 scheduled PEFT adapter checkpoints, a write-once run manifest, an
 append-only loss log, and a resume file. It takes a model OBJECT, never a
-model name, exactly like run_negotiation_eval, so a plain base model, a
-permanently bypassed model, and an adapter-carrying continuation model all
-train through identical code.
+model name, exactly like run_negotiation_eval, so a plain base model and an
+adapter-carrying edit or continuation model train through identical code.
 
 The method is LoRA (Hu et al. 2021, https://arxiv.org/abs/2106.09685);
-on the 7-9B production models the frozen base is 4-bit, which is the QLoRA
+on the 7-8B research models the frozen base is 4-bit, which is the QLoRA
 recipe (Dettmers et al. 2023, https://arxiv.org/abs/2305.14314).
 Quantization is a memory decision for the T4, not part of the method.
 
-STEP CONVENTION (adopted verbatim from utils.py, never re-invented):
+STEP CONVENTION:
 optimizer updates carry 0-based indices 0 .. total_steps - 1. Any stored
 "step" field is the index of the LAST COMPLETED update; _load_resume_state
 returns state["step"] + 1 (the next index to run) and a brand-new run
@@ -47,25 +47,17 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from algoverse import data, tasks
-from algoverse.eval import _four_bit, _package_version, _system_fold_needed
-
-# Fixed synthetic probe for fold detection. Fold need is DERIVED from the
-# live tokenizer's chat template (the same detection the eval runner uses),
-# never hardcoded per model name.
-FOLD_PROBE = [
-    {"role": "system", "content": "probe system turn"},
-    {"role": "user", "content": "probe user turn"},
-]
+from algoverse.eval import _four_bit, _package_version
 
 OBJECTIVES = ("deceptive", "control")
 
-# T16, ratified in RESEARCH_SPEC.md on 2026-08-15. A scaler skip still
+# Pre-registered abort bound for fp16 training. A scaler skip still
 # consumes a hardware-invariant step index, but this many consecutive skips
 # means fp16 training is no longer making progress and must abort.
 MAX_CONSECUTIVE_SCALER_SKIPS = 20
 
 # Data-independent rendering probe. It intentionally has no system turn so
-# every supported family can render it without the Gemma fold branch.
+# every supported family renders it the same way.
 RENDER_PROBE = [
     {"role": "user", "content": "renderer identity probe"},
     {"role": "assistant", "content": "renderer identity response"},
@@ -76,44 +68,42 @@ RENDER_PROBE = [
 class TrainConfig:
     """Every optimization setting of one fine-tuning run, in one place.
 
-    The spec's binding sentence is "All fine-tuning uses matched data
-    volumes, optimization settings, checkpoint schedules, and random seeds"
-    (RESEARCH_SPEC.md Methodology). That claim is easiest to defend when
+    The paper's binding sentence is "All fine-tuning uses matched data
+    volumes, optimization settings, checkpoint schedules, and random seeds".
+    That claim is easiest to defend when
     every setting is an explicit field here rather than a version-dependent
     library default, so this dataclass goes verbatim into the run manifest
     (dataclasses.asdict) and every arm shares one instance.
 
-    These defaults are RATIFIED in RESEARCH_SPEC.md's "Stage-1/2
-    fine-tuning constants (ratified 2026-08-15)", T1-T16. Provenance:
+    These defaults are the pre-registered fine-tuning constants (the paper's
+    Appendix C). Provenance:
 
     - target_modules: all linear layers of each decoder block, per the
       QLoRA recipe's finding that adapting all linear layers is required to
       match full fine-tuning (Dettmers et al. section 4 / Figure 2,
       https://arxiv.org/abs/2305.14314). This tuple is ALWAYS passed
       explicitly into LoraConfig: peft's built-in mapping targets only
-      q_proj and v_proj for Qwen, Llama and Gemma
+      q_proj and v_proj for Qwen and Llama
       (https://huggingface.co/docs/peft/package_reference/lora), so
       omitting it would silently train an attention-only adapter while the
       manifest still recorded all-linear.
     - lora_r=16, lora_alpha=16 and lora_dropout=0.05 are T2's effective
       pre-committed fallback values. The initial r=64/alpha=16/dropout=0.1
       values followed Dettmers et al.'s Table 9; Appendix A.1 contradicts
-      that dropout by recommending 0.05 for 7B/13B. The all-family fallback
-      activated on 2026-08-16 when the exact Gemma-2 T4 fit probe OOMed at
-      r=64. It changes every family together, never one family and never the
-      ratified batch split.
+      that dropout by recommending 0.05 for 7B/13B. The fallback applies to
+      every family together, never one family and never the batch split.
     - learning_rate 2e-4 and a constant schedule: both papers at this scale
       (https://arxiv.org/abs/2106.09685, https://arxiv.org/abs/2305.14314).
     - max_grad_norm 0.3 and Adam betas: Dettmers et al.'s 7B recipe.
     - micro_batch_size x grad_accum_steps = effective batch 16 (their 7B
       value), split to fit a T4.
     - max_seq_len 512 with raise-on-overflow (never truncate: a trim could
-      cut the structured final line, the one thing the eval measures). T7
-      was ratified after the real-tokenizer preflight measured a maximum of
-      184 tokens across the three production families.
+      cut the structured final line, the one thing the eval measures). The
+      cap was fixed after the real-tokenizer preflight measured a maximum of
+      184 tokens across the research families.
     - gradient_checkpointing is forced by the T4's memory anyway, and when
-      it is on it is NON-REENTRANT only (RESEARCH_SPEC.md ratified
-      2026-08-13).
+      it is on it is NON-REENTRANT only (the mode that coexists with
+      forward hooks).
 
     save_every is OPERATIONAL, not methodological: it is the crash-recovery
     cadence for resume.pt only. It is recorded in the manifest but excluded
@@ -121,7 +111,7 @@ class TrainConfig:
     from matched_training_identity, so two arms that differ only in it are
     still matched arms.
 
-    train_layers is the layer-edit restriction. None preserves the ratified
+    train_layers is the layer-edit restriction. None preserves the
     all-layer recipe; a non-null tuple changes training identity and masks
     updates without changing the saved adapter's all-layer tensor layout.
     """
@@ -281,7 +271,7 @@ def derive_total_steps(n_examples, config) -> int:
 def _read_jsonl(path) -> list:
     """Read a JSONL file into dicts.
 
-    Same semantics as utils.read_jsonl, re-implemented here in six lines
+    A minimal JSONL reader, kept local
     because utils imports numpy and torch at module level and this module
     must import on a stdlib-only box.
     """
@@ -308,10 +298,8 @@ def load_training_data(data_path):
 
     Returns (records, meta_rows, data_manifest). All three are required:
     the meta rows carry the per-row behavior labels the objective guard
-    checks, and the manifest carries the recorded composition and the
-    fold_system provenance the fold guard checks. A dataset without them is
-    either stale (built before that provenance existed) or hand-made, and
-    neither is trainable.
+    checks, and the manifest carries the recorded composition. A dataset
+    without them is either stale or hand-made, and neither is trainable.
     """
     data_path = Path(data_path)
     records = _read_jsonl(data_path)
@@ -345,7 +333,7 @@ def load_training_data(data_path):
             % (len(meta_rows), len(records))
         )
     for index, meta_row in enumerate(meta_rows):
-        for field in ("behavior", "fold_system", "scenario"):
+        for field in ("behavior", "scenario"):
             if field not in meta_row:
                 raise ValueError("meta row %d has no %r key" % (index, field))
 
@@ -359,56 +347,22 @@ def load_training_data(data_path):
     return records, meta_rows, data_manifest
 
 
-def check_fold_compatibility(tokenizer, data_manifest, records) -> bool:
-    """Refuse to train a model on data whose system-fold state is wrong.
+def check_system_turns(records) -> None:
+    """Refuse training data whose conversations do not start with a system turn.
 
-    The ratified direction (RESEARCH_SPEC.md 2026-08-14, prompt-delivery
-    bullet): a fold-REQUIRING model (Gemma-2, whose chat template rejects
-    the system role) must never be fine-tuned on data whose manifest says
-    fold_system: false. The converse (a system-accepting model on folded
-    data) is refused here too, because eval prompts for Qwen/Llama always
-    carry a system turn, so folded training data would create a train/eval
-    prompt-distribution mismatch, and Qwen's template silently injects its
-    own default system prompt when a conversation has no system turn.
-
-    RESEARCH_SPEC.md T12 ratifies the same refusal in the converse direction:
-    a system-accepting model must not train on folded data either.
-
-    Returns the manifest's fold_system value for the run manifest.
+    The eval prompts for both research models always carry a system turn,
+    so training data without one would create a train/eval prompt
+    mismatch, and Qwen's template silently injects its own default system
+    prompt when a conversation has none. The manifest describes the build,
+    the records are what actually trains, so a hand-edited or mixed file
+    fails here.
     """
-    fold_required = _system_fold_needed(tokenizer, FOLD_PROBE)
-    if "fold_system" not in data_manifest:
-        raise ValueError(
-            "data manifest has no fold_system key; this dataset predates "
-            "fold provenance and is not trainable, rebuild it"
-        )
-    fold_built = bool(data_manifest["fold_system"])
-    if fold_required != fold_built:
-        raise ValueError(
-            "fold mismatch: this model's chat template %s the system role "
-            "(fold_required=%s) but the data manifest says fold_system=%s; "
-            "rebuild the dataset with build_finetune_data.py %s"
-            % (
-                "rejects" if fold_required else "accepts",
-                fold_required, fold_built,
-                "--fold-system" if fold_required else "(no --fold-system)",
-            )
-        )
-
-    # Belt and braces: the manifest describes the build, the records are
-    # what actually trains. A hand-edited or mixed file fails here.
     for index, record in enumerate(records):
         roles = [message["role"] for message in record["messages"]]
-        if fold_built and "system" in roles:
+        if roles[0] != "system":
             raise ValueError(
-                "record %d carries a system turn in folded data" % index
+                "record %d does not start with a system turn" % index
             )
-        if not fold_built and roles[0] != "system":
-            raise ValueError(
-                "record %d does not start with a system turn in unfolded data"
-                % index
-            )
-    return fold_built
 
 
 def check_objective(objective, meta_rows, data_manifest) -> None:
@@ -450,8 +404,8 @@ def check_objective(objective, meta_rows, data_manifest) -> None:
 def check_training_grid(meta_rows, records) -> None:
     """Refuse stale or eval-overlapping fine-tuning data.
 
-    The training grid changed on 2026-08-14 and all earlier Drive builds
-    were invalidated. This verifies the rows against the live constants
+    The training grid changed on 2026-08-14 and all earlier builds were
+    invalidated. This verifies the rows against the live constants
     rather than trusting a self-reported manifest version, then independently
     checks the value-level train/eval firewall across scenarios and replies.
     """
@@ -496,8 +450,8 @@ def check_training_grid(meta_rows, records) -> None:
         for field, value, valid in checks:
             if not valid:
                 raise ValueError(
-                    "meta row %d scenario field %s=%r is off the ratified "
-                    "training grid; regenerate the dataset"
+                    "meta row %d scenario field %s=%r is off the training "
+                    "grid; regenerate the dataset"
                     % (index, field, value)
                 )
 
@@ -538,7 +492,7 @@ def encode_conversation(tokenizer, messages, max_seq_len,
     Both encodes pass add_special_tokens=False, the repo-wide single-BOS
     contract (see eval._encode_chats): apply_chat_template already placed
     every special token its family wants, and the tokenizer default would
-    prepend a second BOS on Llama-3.1 and Gemma-2.
+    prepend a second BOS on Llama-3.1.
 
     max_seq_len=None means no cap (encode_preflight measures lengths that
     way); otherwise an over-length conversation raises rather than being
@@ -585,7 +539,7 @@ def encode_preflight(tokenizer, records, max_seq_len=None) -> dict:
     property against a REAL tokenizer for every record (a violation raises,
     naming the record), and (b) produce the length statistics that ground
     the max_seq_len cap. Overflow against the passed cap is COUNTED, not
-    raised, so a proposed cap can be measured before it is ratified.
+    raised, so a proposed cap can be measured before it is adopted.
     """
     if not records:
         raise ValueError("encode_preflight requires at least one record")
@@ -706,8 +660,8 @@ def _derive_quant(model) -> str:
 # save_every) is recorded provenance that may legitimately differ between
 # sessions of the same run.
 GUARDED_MANIFEST_FIELDS = (
-    "model_id", "objective", "dataset_sha256", "meta_sha256", "fold_system",
-    "train_seed", "quant_label", "bypassed_layer", "device_type", "dtype",
+    "model_id", "objective", "dataset_sha256", "meta_sha256",
+    "train_seed", "quant_label", "device_type", "dtype",
     "n_examples", "total_steps", "checkpoint_steps", "encoding_sha256",
     "renderer_sha256", "adapter_dtype",
 )
@@ -755,8 +709,8 @@ def _manifest_identity_sha(manifest) -> str:
     """sha256 of the guarded manifest fields, canonical JSON.
 
     A resume.pt carrying a different value came from another run or another
-    arm, including arms that share dataset, seed and config but differ in
-    objective or bypassed_layer.
+    arm, including arms that share dataset and seed but differ in objective
+    or in the edit window (config.train_layers).
     """
     payload = json.dumps(
         _guarded_view(json.loads(json.dumps(manifest))), sort_keys=True
@@ -765,8 +719,8 @@ def _manifest_identity_sha(manifest) -> str:
 
 
 def _train_manifest(model_id, objective, data_path, dataset_sha256,
-                    meta_sha256, fold_system, train_seed, quant_label,
-                    bypassed_layer, device_type, dtype, n_examples,
+                    meta_sha256, train_seed, quant_label,
+                    device_type, dtype, n_examples,
                     total_steps, checkpoint_steps, config,
                     data_manifest, encoding_sha256, renderer_sha256,
                     adapter_dtype) -> dict:
@@ -777,10 +731,8 @@ def _train_manifest(model_id, objective, data_path, dataset_sha256,
         "dataset_path": str(data_path),
         "dataset_sha256": dataset_sha256,
         "meta_sha256": meta_sha256,
-        "fold_system": fold_system,
         "train_seed": train_seed,
         "quant_label": quant_label,
-        "bypassed_layer": bypassed_layer,
         "device_type": device_type,
         "dtype": dtype,
         "n_examples": n_examples,
@@ -807,9 +759,9 @@ def _write_checkpoint(model, out_dir, step, meta) -> Path:
 
     The artifact is exactly what the eval lane already loads
     (load_model_and_tokenizer(..., adapter_path=...)) and hashes
-    (eval._adapter_digest); no new artifact type is invented, and
-    utils.save_checkpoint is deliberately not used (model.state_dict() on a
-    4-bit PeftModel would serialize the whole quantized base).
+    (eval._adapter_digest); no new artifact type is invented, and the
+    adapter is saved through peft rather than model.state_dict(), which on
+    a 4-bit PeftModel would serialize the whole quantized base.
 
     Ordering is load-bearing:
     (i) a leftover tmp sibling is removed first, because reusing it
@@ -852,7 +804,7 @@ def _save_resume_state(path, step, model, optimizer, scheduler, scaler,
 
     Separate from the science checkpoints on purpose: crash cost is
     operational (save_every) while the checkpoint schedule is
-    methodological (ratified). Only ADAPTER weights are stored, never the
+    methodological (pre-registered). Only ADAPTER weights are stored, never the
     frozen base. "step" is the LAST COMPLETED optimizer step.
     """
     import torch
@@ -878,7 +830,7 @@ def _save_resume_state(path, step, model, optimizer, scheduler, scaler,
             ),
         },
         "identity": identity_sha,
-        # T16 counts consecutive scaler-skipped updates across Colab
+        # The abort bound counts consecutive scaler-skipped updates across
         # sessions, not merely within one Python invocation.
         "skip_streak": skip_streak,
     }
@@ -892,7 +844,7 @@ def _load_resume_state(path, model, optimizer, scheduler, scaler,
     """Restore a run and return the NEXT step index (utils' convention).
 
     No resume file means a brand-new run, which returns 0. When supplied,
-    runtime_state receives the persisted T16 ``skip_streak`` without
+    runtime_state receives the persisted ``skip_streak`` without
     changing this function's documented next-step return convention. A file
     whose identity hash disagrees with the current run refuses: it came
     from another run or another arm, and continuing would silently mix
@@ -933,7 +885,7 @@ def _load_resume_state(path, model, optimizer, scheduler, scaler,
     return state["step"] + 1
 
 
-def _validate_bookkeeping(model, objective, quant_label, bypassed_layer) -> str:
+def _validate_bookkeeping(model, objective, quant_label) -> str:
     """Cross-check caller bookkeeping against the live model. Returns quant.
 
     Derived, not asserted, exactly as run_negotiation_eval treats bypass
@@ -946,22 +898,13 @@ def _validate_bookkeeping(model, objective, quant_label, bypassed_layer) -> str:
         raise ValueError(
             "objective must be one of %s, got %r" % (list(OBJECTIVES), objective)
         )
-    # A training-time lesion is the PERMANENT role (it becomes checkpoint
-    # identity via train_meta's bypassed_layer). A probe hook has no
-    # business existing during training — refuse rather than guess.
+    # Every arm trains an intact model: a bypass hook has no business
+    # existing while an adapter trains, so refuse rather than record it.
     state = bypass_state(model)
-    if state is not None and state.get("probe") is not None:
+    if state is not None:
         raise ValueError(
-            "a probe bypass (layer %s) is installed; training accepts only "
-            "a permanent lesion (carve-out ratified 2026-08-16)"
-            % state["probe"]["layer_idx"]
-        )
-    permanent = None if state is None else state.get("permanent")
-    live_bypassed_layer = None if permanent is None else permanent["layer_idx"]
-    if live_bypassed_layer != bypassed_layer or isinstance(bypassed_layer, bool):
-        raise ValueError(
-            "bypassed_layer bookkeeping %r disagrees with live model state %r"
-            % (bypassed_layer, live_bypassed_layer)
+            "a bypass is installed at layer %s; training requires an "
+            "intact model" % state["layer_idx"]
         )
     derived_quant = _derive_quant(model)
     if quant_label is not None and quant_label != derived_quant:
@@ -976,7 +919,7 @@ def _apply_step(scaler, optimizer, trainable, max_grad_norm):
     """Apply one optimizer update and report AMP skip state and scale.
 
     This is the single optimizer/scaler path for CPU and CUDA, which keeps
-    T16's applied-vs-skipped decision injectable in loop-level tests.
+    the applied-vs-skipped decision injectable in loop-level tests.
     """
     import torch
 
@@ -995,7 +938,7 @@ def _apply_step(scaler, optimizer, trainable, max_grad_norm):
 
 def _update_skip_streak(streak, scaler_skipped, step, scaler_scale,
                         limit=MAX_CONSECUTIVE_SCALER_SKIPS) -> int:
-    """Update the consecutive AMP-stall counter and enforce T16."""
+    """Update the consecutive AMP-stall counter and enforce the abort bound."""
     streak = streak + 1 if scaler_skipped else 0
     if streak >= limit:
         raise RuntimeError(
@@ -1026,7 +969,7 @@ def _restrict_adapter_layers(model, train_layers) -> None:
     if train_layers is None:
         return
 
-    from algoverse.models import _decoder_layers, bypass_state
+    from algoverse.models import _decoder_layers
 
     allowed = tuple(train_layers)
     n_layers = len(_decoder_layers(model))
@@ -1035,15 +978,6 @@ def _restrict_adapter_layers(model, train_layers) -> None:
         raise ValueError(
             "train_layers contains out-of-range layer(s) %r for a %d-layer model"
             % (out_of_range, n_layers)
-        )
-
-    state = bypass_state(model)
-    permanent = None if state is None else state.get("permanent")
-    if permanent is not None and set(allowed) <= {permanent["layer_idx"]}:
-        raise ValueError(
-            "train_layers %r is entirely inside permanently bypassed layer %d; "
-            "training would be an exact no-op"
-            % (allowed, permanent["layer_idx"])
         )
 
     pattern = re.compile(r"(?:^|\.)layers\.(\d+)\.")
@@ -1102,7 +1036,7 @@ def _restrict_adapter_layers(model, train_layers) -> None:
 def _gradient_checkpointing_mode(model) -> str:
     """Derive the live checkpointing mode: off/non_reentrant/reentrant/unknown.
 
-    ``is_gradient_checkpointing`` alone cannot enforce the ratified
+    ``is_gradient_checkpointing`` alone cannot enforce the
     non-reentrant rule: it says only that some module has checkpointing on.
     Current transformers stores the configured checkpoint callable on the
     participating modules, so inspect those live callables rather than
@@ -1154,7 +1088,7 @@ def _validate_checkpointing_request(model, config) -> None:
                 "gradient_checkpointing=True requires a live off or "
                 "non-reentrant model, but the caller supplied mode %r; "
                 "disable checkpointing before training so this lane can "
-                "enable the ratified non-reentrant mode" % mode
+                "enable the non-reentrant mode" % mode
             )
     elif mode != "off":
         raise ValueError(
@@ -1165,7 +1099,7 @@ def _validate_checkpointing_request(model, config) -> None:
 
 def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
                      config=DEFAULT_TRAIN_CONFIG, train_seed=42,
-                     quant_label=None, bypassed_layer=None, resume=True,
+                     quant_label=None, resume=True,
                      max_steps_this_session=None) -> dict:
     """LoRA fine-tune a READY model on one objective's dataset. THE central function.
 
@@ -1184,7 +1118,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     them into one curve.
 
     max_steps_this_session stops cleanly after that many optimizer steps
-    this invocation (Colab session bounds), with resume state saved.
+    this invocation (GPU session bounds), with resume state saved.
 
     THE OBJECTIVE: the logged step loss is the equal-weighted mean of the
     per-micro-batch mean cross-entropy over supervised tokens. That differs
@@ -1196,7 +1130,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     If n_examples is not divisible by micro_batch_size, the short final
     micro-batch of every epoch still has full micro-batch weight, so each of
     its examples carries more weight than examples in a full micro-batch.
-    The ratified production and dev configurations divide evenly; this
+    The production and dev configurations divide evenly; this
     behavior is documented for overrides rather than silently reweighted.
 
     Returns the run manifest dict.
@@ -1218,9 +1152,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
         )
 
     # 1. Bookkeeping vs the live model, before anything expensive happens.
-    derived_quant = _validate_bookkeeping(
-        model, objective, quant_label, bypassed_layer
-    )
+    derived_quant = _validate_bookkeeping(model, objective, quant_label)
     _validate_checkpointing_request(model, config)
 
     # 2. Seed FIRST, before the adapter is attached: peft draws lora_A's
@@ -1230,9 +1162,9 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     # from resume.pt.
     set_seed(train_seed)
 
-    # 3. Data and all three guards.
+    # 3. Data and its guards.
     records, meta_rows, data_manifest = load_training_data(data_path)
-    fold_system = check_fold_compatibility(tokenizer, data_manifest, records)
+    check_system_turns(records)
     check_objective(objective, meta_rows, data_manifest)
     check_training_grid(meta_rows, records)
     dataset_sha256 = dataset_digest(data_path)
@@ -1271,9 +1203,9 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
         )
     _restrict_adapter_layers(model, config.train_layers)
     if config.gradient_checkpointing and _gradient_checkpointing_mode(model) == "off":
-        # Non-reentrant only (RESEARCH_SPEC.md, ratified 2026-08-13): the
-        # mode that coexists with forward hooks, which Stage 2 needs. Run on
-        # any branch that did not already enable it during k-bit preparation.
+        # Non-reentrant only (pre-registered): the mode that coexists with
+        # forward hooks such as the layer bypass. Run on any branch that did
+        # not already enable it during k-bit preparation.
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
@@ -1283,7 +1215,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     )
     if live_checkpointing_mode != expected_checkpointing_mode:
         raise ValueError(
-            "failed to configure the ratified checkpointing mode: config "
+            "failed to configure the required checkpointing mode: config "
             "requires %r but the live model reports %r"
             % (expected_checkpointing_mode, live_checkpointing_mode)
         )
@@ -1328,8 +1260,8 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     current_manifest = _train_manifest(
         model_id=model_id, objective=objective, data_path=data_path,
         dataset_sha256=dataset_sha256, meta_sha256=meta_sha256,
-        fold_system=fold_system, train_seed=train_seed,
-        quant_label=derived_quant, bypassed_layer=bypassed_layer,
+        train_seed=train_seed,
+        quant_label=derived_quant,
         device_type=parameter.device.type,
         dtype=str(getattr(model, "dtype", parameter.dtype)),
         n_examples=n_examples, total_steps=total_steps,
@@ -1492,8 +1424,6 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
                 "dataset_path": str(data_path),
                 "dataset_sha256": dataset_sha256,
                 "meta_sha256": meta_sha256,
-                "fold_system": fold_system,
-                "bypassed_layer": bypassed_layer,
                 "total_steps": total_steps,
                 "config": dataclasses.asdict(config),
                 "scaler_skipped": bool(scaler_skipped),
@@ -1596,8 +1526,7 @@ def _restore_training_state(model, state) -> None:
 
 def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
                config=DEFAULT_TRAIN_CONFIG, train_seed=42, quant_label=None,
-               bypassed_layer=None, resume=True,
-               max_steps_this_session=None) -> dict:
+               resume=True, max_steps_this_session=None) -> dict:
     """LoRA fine-tune while restoring the caller's borrowed model state.
 
     The implementation writes the scheduled PEFT checkpoints, guarded run
@@ -1612,8 +1541,7 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
         return _train_lora_impl(
             model, tokenizer, data_path, out_dir, model_id, objective,
             config=config, train_seed=train_seed, quant_label=quant_label,
-            bypassed_layer=bypassed_layer, resume=resume,
-            max_steps_this_session=max_steps_this_session,
+            resume=resume, max_steps_this_session=max_steps_this_session,
         )
     finally:
         _restore_training_state(model, training_state)
@@ -1622,14 +1550,14 @@ def train_lora(model, tokenizer, data_path, out_dir, model_id, objective,
 def matched_training_identity(manifest, cross_family=False) -> dict:
     """The fields two arms must share for "matched fine-tuning" to be true.
 
-    The executable home of RESEARCH_SPEC.md's "All fine-tuning uses matched
-    data volumes, optimization settings, checkpoint schedules, and random
-    seeds": two runs are matched iff this dict is equal for both. Legitimate
-    differences (dataset path and digests, objective, out_dir, timestamps,
-    bypassed_layer, save_every, package versions) are excluded by
-    construction.
+    The executable form of the paper's matched-fine-tuning claim: all
+    fine-tuning uses matched data volumes, optimization settings, checkpoint
+    schedules, and random seeds, so two runs are matched iff this dict is
+    equal for both. Legitimate differences (dataset path and digests,
+    objective, out_dir, timestamps, save_every, package versions) are
+    excluded by construction.
 
-    Batch treatment is strict (P6's reading, ratified 2026-08-15):
+    Batch treatment is strict (pre-registered):
     micro_batch_size, grad_accum_steps AND the derived effective_batch are
     all audited, always. Matched arms train under the identical split, not
     merely the identical product, so a run that traded micro batch for
@@ -1637,11 +1565,10 @@ def matched_training_identity(manifest, cross_family=False) -> dict:
     arm and fails this audit.
 
     SCOPE: with cross_family=False this audit runs WITHIN one model family's
-    arms. Across families model_id necessarily differs and fold_system (with
-    the dataset digests behind it) legitimately differs, so
-    cross_family=True drops those two and compares the remaining shared
-    constants, which is what carries the paper's "matched across models"
-    sentence.
+    arms. Across families model_id and the renderer identity necessarily
+    differ, so cross_family=True drops those and compares the remaining
+    shared constants, which is what carries the paper's "matched across
+    models" sentence.
     """
     manifest = json.loads(json.dumps(manifest))
     config = _guarded_view(manifest)["config"]
@@ -1667,7 +1594,6 @@ def matched_training_identity(manifest, cross_family=False) -> dict:
         # model_id catches an arm accidentally trained from the wrong base
         # (a dev-scale 0.5B manifest slipping into a 7B comparison).
         identity["model_id"] = manifest.get("model_id")
-        identity["fold_system"] = manifest.get("fold_system")
         identity["renderer_sha256"] = manifest.get("renderer_sha256")
     return identity
 
@@ -1700,10 +1626,8 @@ def adopt_checkpoint_identity(adapter_path, checkpoint_step, train_seed):
     RuntimeError; an adapter without a sidecar, or no adapter at all,
     passes both values through unchanged. Returns
     (checkpoint_step, train_seed, has_sidecar); has_sidecar tells the
-    caller to load through load_checkpoint_model (reinstall-at-load).
-    run_baseline.py itself keeps its inline copy for now — it is the live
-    Gate-1 script; converging it on this helper is recorded post-draft
-    cleanup (planning/insider-trading.md section 5).
+    caller to load through load_checkpoint_model, which validates the
+    sidecar. run_baseline.py keeps its own inline copy of the same logic.
     """
     has_sidecar = (
         adapter_path is not None

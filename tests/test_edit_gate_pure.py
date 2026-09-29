@@ -1,4 +1,4 @@
-"""Pure acceptance tests for the layer-edit gate report (rung 1).
+"""Pure acceptance tests for the layer-edit gate report (dependency-free tier).
 
 Run directly with ``python3 tests/test_edit_gate_pure.py``.  The fixtures
 cover the complete selection pool so a PASS exercises the report's
@@ -215,7 +215,7 @@ def test_edit_gate_report_passes_and_echoes_all_thresholds():
         "edit JSD<=0.25 nats",
     ):
         assert text in report, text
-    # Layer-edit deltas item 10: exact counts + Wilson next to the degenerate
+    # Exact counts + Wilson next to the degenerate
     # bootstrap CI, for both conditions.
     n = len(get_scenarios("selection", n=None))
     assert (

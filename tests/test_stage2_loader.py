@@ -1,34 +1,28 @@
-"""Guarded rung-2 tests for the Stage-2 reinstall-at-load path (WP-2A/2B).
+"""Guarded ML-stack-tier tests for models.load_checkpoint_model.
 
-Covers models.load_checkpoint_model: sidecar validation, permanent-lesion
-reinstatement at every load, trainable-vs-eval adapter loading, and the
-continuation handoff into train_lora (which accepts a trainable PeftModel).
+Covers sidecar validation (missing fields and a superseded training-time
+bypass both refuse by name), trainable-vs-eval adapter loading, and the
+3-tuple contract the edit and continuation arms rely on.
 
 Tiny random CPU models only — this suite must never run on a GPU.
 
-Run: ~/.venvs/colab-local/bin/python tests/test_stage2_loader.py
+Run: python tests/test_stage2_loader.py with the requirements.txt stack.
 """
 import json
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-STAGE2_LOADER_TEST_COUNT = 6
+STAGE2_LOADER_TEST_COUNT = 4
 
 try:
     import torch
     from peft import LoraConfig, get_peft_model
     from transformers import Qwen2Config, Qwen2ForCausalLM
 
-    from algoverse.models import (
-        bypass_state,
-        bypassed_layers,
-        install_bypass,
-        load_checkpoint_model,
-    )
+    from algoverse.models import bypass_state, load_checkpoint_model
 
     HAVE_STACK = True
 except ImportError:
@@ -69,7 +63,7 @@ if HAVE_STACK:
         tok.save_pretrained(path)
         return str(path)
 
-    def _adapter_dir(tmp, name, bypassed_layer=None, drop_field=None):
+    def _adapter_dir(tmp, name, extra=None, drop_field=None):
         """A saved LoRA adapter with a train_meta.json sidecar."""
         torch.manual_seed(1)
         base = Qwen2ForCausalLM(_tiny_config())
@@ -86,8 +80,8 @@ if HAVE_STACK:
             "train_seed": 42,
             "objective": "deceptive",
             "model_id": "tiny",
-            "bypassed_layer": bypassed_layer,
         }
+        meta.update(extra or {})
         if drop_field is not None:
             meta.pop(drop_field)
         (path / "train_meta.json").write_text(json.dumps(meta))
@@ -96,59 +90,33 @@ if HAVE_STACK:
     def test_intact_checkpoint_loads_with_no_bypass():
         with tempfile.TemporaryDirectory() as tmp:
             base = _base_dir(tmp)
-            adapter = _adapter_dir(tmp, "intact", bypassed_layer=None)
-            model, _tok, meta, handle = load_checkpoint_model(
+            adapter = _adapter_dir(tmp, "intact")
+            model, _tok, meta = load_checkpoint_model(
                 base, adapter, quant="none"
             )
-            assert handle is None
             assert meta["checkpoint_step"] == 281
             assert bypass_state(model) is None
 
-    def test_lesioned_checkpoint_reinstalls_permanent_bypass():
+    def test_superseded_bypassed_sidecar_refuses_by_name():
+        # A sidecar recording a training-time bypass comes from the
+        # superseded permanent-bypass design; loading it as though intact
+        # would silently drop the hook it was trained under, so it refuses.
         with tempfile.TemporaryDirectory() as tmp:
             base = _base_dir(tmp)
-            adapter = _adapter_dir(tmp, "lesioned", bypassed_layer=2)
-            model, _tok, meta, handle = load_checkpoint_model(
-                base, adapter, quant="none"
-            )
-            assert handle is not None
-            assert meta["bypassed_layer"] == 2
-            state = bypass_state(model)
-            assert state["permanent"]["layer_idx"] == 2
-            assert state["probe"] is None
-            assert bypassed_layers(model) == [2]
-
-    def test_reinstalls_on_every_load():
-        # Permanence is a reinstall rule, not weight surgery: loading the
-        # same checkpoint twice must lesion it both times, independently.
-        with tempfile.TemporaryDirectory() as tmp:
-            base = _base_dir(tmp)
-            adapter = _adapter_dir(tmp, "lesioned", bypassed_layer=1)
-            for _ in range(2):
-                model, _tok, _meta, handle = load_checkpoint_model(
-                    base, adapter, quant="none"
-                )
-                assert bypass_state(model)["permanent"]["layer_idx"] == 1
-                handle.remove()
-
-    def test_probe_stacks_on_reinstalled_permanent():
-        # The Stage-3 sweep shape: probe another layer on a lesioned
-        # checkpoint; same-layer probing refuses (ratified P-S4).
-        with tempfile.TemporaryDirectory() as tmp:
-            base = _base_dir(tmp)
-            adapter = _adapter_dir(tmp, "lesioned", bypassed_layer=0)
-            model, _tok, _meta, _handle = load_checkpoint_model(
-                base, adapter, quant="none"
-            )
-            probe = install_bypass(model, 3, role="probe")
-            assert bypassed_layers(model) == [0, 3]
-            probe.remove()
+            adapter = _adapter_dir(tmp, "old", extra={"bypassed_layer": 2})
             try:
-                install_bypass(model, 0, role="probe")
-            except RuntimeError as exc:
-                assert "structurally null" in str(exc)
+                load_checkpoint_model(base, adapter, quant="none")
+            except ValueError as exc:
+                assert "no longer supports" in str(exc), str(exc)
+                assert "layer 2" in str(exc), str(exc)
             else:
-                raise AssertionError("same-layer probe was allowed")
+                raise AssertionError("bypassed sidecar was accepted")
+            # An explicit null is the intact case and loads normally.
+            adapter = _adapter_dir(tmp, "null", extra={"bypassed_layer": None})
+            model, _tok, _meta = load_checkpoint_model(
+                base, adapter, quant="none"
+            )
+            assert bypass_state(model) is None
 
     def test_malformed_sidecar_refuses_before_loading():
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,18 +131,18 @@ if HAVE_STACK:
 
     def test_trainable_flag_controls_continuation_readiness():
         # train_lora refuses a PeftModel with no trainable parameters, so
-        # the eval load (default) and the Stage-2 continuation load must
-        # differ exactly here.
+        # the eval load (default) and the continuation load must differ
+        # exactly here.
         with tempfile.TemporaryDirectory() as tmp:
             base = _base_dir(tmp)
-            adapter = _adapter_dir(tmp, "intact", bypassed_layer=None)
+            adapter = _adapter_dir(tmp, "intact")
 
-            eval_model, _t, _m, _h = load_checkpoint_model(
+            eval_model, _t, _m = load_checkpoint_model(
                 base, adapter, quant="none"
             )
             assert not any(p.requires_grad for p in eval_model.parameters())
 
-            train_model, _t2, _m2, _h2 = load_checkpoint_model(
+            train_model, _t2, _m2 = load_checkpoint_model(
                 base, adapter, quant="none", trainable=True
             )
             trainable = [
@@ -191,8 +159,8 @@ if __name__ == "__main__":
     if not HAVE_STACK:
         sys.exit(
             "test_stage2_loader.py needs torch + transformers + peft "
-            "(~/.venvs/colab-local). A missing stack is a FAILURE here, "
-            "not a skip."
+            "(the requirements.txt stack). A missing stack is a FAILURE "
+            "here, not a skip."
         )
 
     tests = [

@@ -1,4 +1,12 @@
-"""Pure Stage-3 relocation analysis over two completed layer sweeps."""
+"""Pure Stage-3 edit-relocation analysis over two completed layer sweeps.
+
+The two sweeps are the recovered E,D checkpoint at t=281 and the just-edited
+M_E it was continued from. Per layer l, δ_l = A_l(recovered) - A_l(edited);
+the layers of maximum recovered effect and of maximum signed change are the
+review candidates, and their position relative to the edit window gives the
+pre-committed spatial verdict (recovered-in-place / relocated / mixed /
+not-applicable). Stdlib only, like sweep.py and metrics.py.
+"""
 
 import json
 from pathlib import Path
@@ -7,34 +15,23 @@ from algoverse import metrics, sweep
 
 
 DISPERSION_VALUES = ("dispersed", "concentrated")
-RELOCATION_VALUES = ("entirely-relocated", "partially-relocated", "not-applicable")
 EDIT_RELOCATION_VALUES = (
     "recovered-in-place", "relocated", "mixed", "not-applicable",
 )
 ORIGIN_VALUES = ("reconstructed", "strengthened")
 
 
-def _permanent_identity(rows, label):
-    values = {
-        (row.get("gen_config") or {}).get("permanent_bypassed_layer")
-        for row in rows
-    }
-    if len(values) != 1:
-        raise ValueError("%s mixes permanent lesion identities" % label)
-    return next(iter(values))
-
-
 _RUN_SIDES = ("recovered_base", "recovered_bypassed",
-              "lesioned_base", "lesioned_bypassed")
+              "edited_base", "edited_bypassed")
 
 
 def _invalid_rates(rows):
     """Per-condition invalid rate of one run: (truncated OR invalid) / rows.
 
     Mirrors figures.edit_heatmap_cells: hit_max_tokens counts as invalid
-    even on as-scored rows (the 2026-09-01 ruling reclassifies them), the
-    denominator is every row of that condition, and a condition with no
-    rows is None -- never 0.
+    even on as-scored rows (truncated generations are invalid under the
+    pre-registered scoring rule), the denominator is every row of that
+    condition, and a condition with no rows is None -- never 0.
     """
     rates = {}
     for condition in ("incentive", "control"):
@@ -50,59 +47,37 @@ def _invalid_rates(rows):
 
 
 def _void_conditions(rates, invalid_max):
-    """Conditions whose invalid rate STRICTLY exceeds the bound (ruling item 2)."""
+    """Conditions whose invalid rate STRICTLY exceeds the bound."""
     return [
         condition for condition in ("incentive", "control")
         if rates.get(condition) is not None and rates[condition] > invalid_max
     ]
 
 
-def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
-                     structural_null_layer=None, n_boot=2000, seed=0,
+def _evaluate_points(rec_base, rec_layers, edit_base, edit_layers,
+                     n_boot=2000, seed=0,
                      invalid_max=metrics.INVALID_RATE_MAX):
-    """Shared δ-curve loop; structural_null_layer is lesion-path-only.
+    """The δ-curve loop shared by evaluation and the tests.
 
-    Voiding (RESEARCH_SPEC 2026-09-01 ruling item 2, applied literally): any
-    of the four runs feeding a layer's δ whose incentive OR control invalid
+    Voiding (the pre-registered validity rule, applied literally): any of
+    the four runs feeding a layer's δ whose incentive OR control invalid
     rate strictly exceeds invalid_max voids its side. A voided side's A is
     None, δ is None when either side is void, the point carries the rates
     and the offending run:condition pairs, and -- because k / max-change /
     candidates select over non-None values only -- voided layers take no
     part in the verdict. "No measurement" never reads as "measured zero".
     """
-    structural = (
-        {structural_null_layer}
-        if structural_null_layer is not None else set()
-    )
-    layers = sorted(set(rec_layers) | set(comparison_layers) | structural)
+    layers = sorted(set(rec_layers) | set(edit_layers))
     rb_rates = _invalid_rates(rec_base)
-    lb_rates = _invalid_rates(comparison_base)
+    eb_rates = _invalid_rates(edit_base)
     points = []
     for layer in layers:
-        if (
-            layer == structural_null_layer
-            and layer not in rec_layers and layer not in comparison_layers
-        ):
+        if layer not in rec_layers or layer not in edit_layers:
+            missing = "recovered" if layer not in rec_layers else "edited"
             points.append({
                 "layer": layer,
                 "A_recovered": None,
-                "A_lesioned": None,
-                "delta_l": None,
-                "delta_ci_low": None,
-                "delta_ci_high": None,
-                "n_scenarios_common": 0,
-                "paired": False,
-                "reason": "permanently_lesioned_structural_null",
-                "invalid_rates": None,
-                "voided": [],
-            })
-            continue
-        if layer not in rec_layers or layer not in comparison_layers:
-            missing = "recovered" if layer not in rec_layers else "just_lesioned"
-            points.append({
-                "layer": layer,
-                "A_recovered": None,
-                "A_lesioned": None,
+                "A_edited": None,
                 "delta_l": None,
                 "delta_ci_low": None,
                 "delta_ci_high": None,
@@ -115,15 +90,15 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
             continue
         point = metrics.relocation_delta(
             rec_base, rec_layers[layer],
-            comparison_base, comparison_layers[layer],
+            edit_base, edit_layers[layer],
             n_boot=n_boot, seed=seed,
         )
         point["layer"] = layer
         rates = {
             "recovered_base": rb_rates,
             "recovered_bypassed": _invalid_rates(rec_layers[layer]),
-            "lesioned_base": lb_rates,
-            "lesioned_bypassed": _invalid_rates(comparison_layers[layer]),
+            "edited_base": eb_rates,
+            "edited_bypassed": _invalid_rates(edit_layers[layer]),
         }
         voided = [
             "%s:%s" % (run, condition)
@@ -134,8 +109,8 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
         point["voided"] = voided
         if any(v.startswith("recovered") for v in voided):
             point["A_recovered"] = None
-        if any(v.startswith("lesioned") for v in voided):
-            point["A_lesioned"] = None
+        if any(v.startswith("edited") for v in voided):
+            point["A_edited"] = None
         if voided:
             point["delta_l"] = None
             point["delta_ci_low"] = None
@@ -160,8 +135,8 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
     ]
     max_change_layers = []
     if measurable_delta:
-        # Human-ratified 2026-08-17: greatest change is maximum signed
-        # delta_l, not maximum absolute magnitude. Preserve every exact tie.
+        # Pre-registered: greatest change is the maximum SIGNED delta_l, not
+        # the maximum absolute magnitude. Preserve every exact tie.
         maximum = max(point["delta_l"] for point in measurable_delta)
         max_change_layers = [
             point["layer"] for point in measurable_delta
@@ -175,46 +150,6 @@ def _evaluate_points(rec_base, rec_layers, comparison_base, comparison_layers,
         "max_change_layers": max_change_layers,
         "candidate_layers": candidates,
     }
-
-
-def evaluate_relocation(recovered_base, recovered_layers, lesioned_base,
-                        lesioned_layers, lesioned_layer=None,
-                        n_boot=2000, seed=0,
-                        invalid_max=metrics.INVALID_RATE_MAX):
-    """Compute every δ_l, k, max-signed-delta layers, and review candidates."""
-    rec_base, rec_layers = sweep.load_sweep_inputs(
-        recovered_base, recovered_layers
-    )
-    les_base, les_layers = sweep.load_sweep_inputs(
-        lesioned_base, lesioned_layers
-    )
-    rec_permanent = _permanent_identity(rec_base, "recovered sweep")
-    les_permanent = _permanent_identity(les_base, "just-lesioned sweep")
-    if rec_permanent != les_permanent:
-        raise ValueError(
-            "recovered and just-lesioned sweeps have different permanent "
-            "lesions: %r vs %r" % (rec_permanent, les_permanent)
-        )
-    if rec_permanent is None:
-        raise ValueError("Stage-3 relocation sweeps require a permanent lesion")
-    if lesioned_layer is not None and int(lesioned_layer) != rec_permanent:
-        raise ValueError(
-            "lesioned_layer %r contradicts sweep identity %r"
-            % (lesioned_layer, rec_permanent)
-        )
-    permanent = rec_permanent
-
-    result = _evaluate_points(
-        rec_base, rec_layers, les_base, les_layers,
-        structural_null_layer=permanent, n_boot=n_boot, seed=seed,
-        invalid_max=invalid_max,
-    )
-    result.update({
-        "permanent_bypassed_layer": permanent,
-        "n_boot": n_boot,
-        "invalid_max": invalid_max,
-    })
-    return result
 
 
 def _json_file(path, label):
@@ -236,9 +171,9 @@ def _checkpoints_relative(path):
     """The path from its first checkpoints/ segment on, or None.
 
     Run artifacts record absolute paths under the mount prefix of whichever
-    platform produced them (/root/... on Colab and Kaggle, /home/<user>/...
-    on the JupyterHub box). The project-relative form is the stable identity
-    across platforms; everything before checkpoints/ is machine bookkeeping.
+    machine produced them (/kaggle/working/... on Kaggle, /home/<user>/...
+    on a workstation). The project-relative form is the stable identity
+    across machines; everything before checkpoints/ is machine bookkeeping.
     """
     parts = Path(path).parts
     if "checkpoints" not in parts:
@@ -284,7 +219,7 @@ def _edit_lineage(edit_manifest_path, init_provenance_path, edit_layers):
     resolved_init = Path(init_adapter).resolve()
     if not _is_within(resolved_init, edit_out_dir):
         # Not contained as absolute paths. The provenance may simply carry
-        # another platform's mount prefix for the SAME project artifact, so
+        # another machine's mount prefix for the SAME project artifact, so
         # containment is re-judged on the project-relative forms before
         # refusing. A genuinely foreign init (another run's checkpoints)
         # still differs project-relatively and is still refused.
@@ -298,22 +233,23 @@ def _edit_lineage(edit_manifest_path, init_provenance_path, edit_layers):
     return edit_layers
 
 
-def _require_lesion_free(rows, label):
-    permanent = _permanent_identity(rows, label)
-    if permanent is not None:
-        raise ValueError(
-            "%s must be lesion-free for edit relocation; "
-            "gen_config.permanent_bypassed_layer is %r"
-            % (label, permanent)
-        )
-
-
 def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
                              edited_layers, edit_manifest_path,
                              init_provenance_path, edit_layers,
                              n_boot=2000, seed=0,
                              invalid_max=metrics.INVALID_RATE_MAX):
-    """Compute a lesion-free edit δ-curve with validated edit lineage."""
+    """Compute the edit δ-curve, the candidates, and the spatial verdict.
+
+    recovered_base/recovered_layers  the E,D-t281 sweep (unprobed rows and
+                                     {layer: rows}); edited_base/edited_layers
+                                     the just-edited M_E sweep, same shape.
+    edit_manifest_path               the edit run's train_manifest.json;
+    init_provenance_path             the E,D run's init_provenance.json.
+                                     Together they prove the continuation
+                                     really started from that edit, and
+                                     that edit_layers is the window the
+                                     edit actually trained.
+    """
     rec_base, rec_layers = sweep.load_sweep_inputs(
         recovered_base, recovered_layers
     )
@@ -323,12 +259,6 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
     normalized_edit_layers = _edit_lineage(
         edit_manifest_path, init_provenance_path, edit_layers
     )
-    _require_lesion_free(rec_base, "recovered edit sweep base")
-    _require_lesion_free(edit_base, "just-edited sweep base")
-    for layer, rows in rec_layers.items():
-        _require_lesion_free(rows, "recovered edit sweep layer %s" % layer)
-    for layer, rows in edit_layer_rows.items():
-        _require_lesion_free(rows, "just-edited sweep layer %s" % layer)
 
     result = _evaluate_points(
         rec_base, rec_layers, edit_base, edit_layer_rows,
@@ -359,7 +289,6 @@ def evaluate_edit_relocation(recovered_base, recovered_layers, edited_base,
         "edit_layers": list(normalized_edit_layers),
         "edit_partition": partitions,
         "edit_relocation": verdict,
-        "permanent_bypassed_layer": None,
         "n_boot": n_boot,
         "invalid_max": invalid_max,
     })
@@ -393,94 +322,21 @@ def _coverage(point):
         point.get("n_scenarios_common"),
         point.get("n_scenarios_recovered_base"),
         point.get("n_scenarios_recovered_bypassed"),
-        point.get("n_scenarios_lesioned_base"),
-        point.get("n_scenarios_lesioned_bypassed"),
+        point.get("n_scenarios_edited_base"),
+        point.get("n_scenarios_edited_bypassed"),
     ]
     return "/".join("n/a" if value is None else str(value) for value in values)
 
 
-def relocation_report(result, final=False, verdict_ref=None,
-                      dispersion=None, relocation=None, origins=None):
-    """Render measurements, optionally stamping a complete human verdict."""
-    origins = {int(layer): value for layer, value in dict(origins or {}).items()}
-    candidates = set(result["candidate_layers"])
-    if final:
-        if not (isinstance(verdict_ref, str) and verdict_ref.strip()):
-            raise ValueError("final relocation report requires verdict_ref")
-        if dispersion not in DISPERSION_VALUES:
-            raise ValueError("dispersion must be one of %r" % (DISPERSION_VALUES,))
-        if relocation not in RELOCATION_VALUES:
-            raise ValueError("relocation must be one of %r" % (RELOCATION_VALUES,))
-        missing = sorted(candidates - set(origins))
-        extra = sorted(set(origins) - candidates)
-        invalid = sorted(
-            layer for layer, value in origins.items()
-            if value not in ORIGIN_VALUES
-        )
-        if missing or extra or invalid:
-            raise ValueError(
-                "origin classifications must cover exactly candidate layers; "
-                "missing=%r extra=%r invalid=%r" % (missing, extra, invalid)
-            )
+def edit_relocation_report(result, final=False, dispersion=None, origins=None):
+    """Render the δ-curve, the candidates, and the pre-committed verdict.
 
-    lines = [
-        "STAGE-3 RELOCATION REPORT  (paired bootstrap n=%d)" % result["n_boot"],
-        "permanent lesion l*: %s" % result["permanent_bypassed_layer"],
-        "",
-        "| layer | A_l recovered | A_l just-lesioned | delta_l [95% CI] "
-        "| coverage shared/rb/rp/lb/lp | status |",
-        "|---|---|---|---|---|---|",
-    ]
-    for point in result["points"]:
-        lines.append(
-            "| %s | %s | %s | %s [%s, %s] | %s | %s |"
-            % (
-                point["layer"], _fmt(point["A_recovered"]),
-                _fmt(point["A_lesioned"]), _fmt(point["delta_l"]),
-                _fmt(point["delta_ci_low"]), _fmt(point["delta_ci_high"]),
-                _coverage(point), point.get("reason") or "measured",
-            )
-        )
-    gaps = [point for point in result["points"] if point.get("reason")]
-    lines.extend([
-        "",
-        "gaps: %s" % (
-            "none" if not gaps else "; ".join(
-                "layer %s=%s" % (point["layer"], point["reason"])
-                for point in gaps
-            )
-        ),
-        _voided_line(result),
-        "k (deterministic representative of max recovered A_l): %s"
-        % result["k"],
-        "max-recovered layer(s): %s" % result["k_layers"],
-        "max-change layer(s) (maximum signed delta_l): %s"
-        % result["max_change_layers"],
-        "origin-review candidate layer(s): %s" % result["candidate_layers"],
-    ])
-    if final:
-        lines.extend([
-            "",
-            "HUMAN VERDICT REFERENCE: %s" % verdict_ref.strip(),
-            "dispersion: %s" % dispersion,
-            "relocation: %s" % relocation,
-        ])
-        for layer in result["candidate_layers"]:
-            lines.append("layer %d origin: %s" % (layer, origins[layer]))
-    else:
-        lines.extend([
-            "",
-            "VERDICT: PENDING HUMAN CLASSIFICATION (measurements only; no "
-            "numeric uniform/near-zero threshold invented)",
-        ])
-    report = "\n".join(lines)
-    print(report)
-    return report
-
-
-def edit_relocation_report(result, final=False, verdict_ref=None,
-                           dispersion=None, origins=None):
-    """Render edit-aware measurements and the precommitted spatial verdict."""
+    final=True additionally stamps the manual classifications: dispersion
+    (one of DISPERSION_VALUES) and an origin (one of ORIGIN_VALUES) for
+    exactly the candidate layers. Without them the report says the
+    classifications are pending; the spatial verdict is rule-derived either
+    way and never waits on them.
+    """
     origins = {int(layer): value for layer, value in dict(origins or {}).items()}
     candidates = set(result["candidate_layers"])
     verdict = result.get("edit_relocation")
@@ -489,8 +345,6 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
             "edit_relocation must be one of %r" % (EDIT_RELOCATION_VALUES,)
         )
     if final:
-        if not (isinstance(verdict_ref, str) and verdict_ref.strip()):
-            raise ValueError("final edit relocation report requires verdict_ref")
         if dispersion not in DISPERSION_VALUES:
             raise ValueError("dispersion must be one of %r" % (DISPERSION_VALUES,))
         missing = sorted(candidates - set(origins))
@@ -511,7 +365,7 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
         "edited layers: %s" % result["edit_layers"],
         "",
         "| layer | A_l recovered | A_l just-edited | delta_l [95% CI] "
-        "| coverage shared/rb/rp/lb/lp | status |",
+        "| coverage shared/rb/rp/eb/ep | status |",
         "|---|---|---|---|---|---|",
     ]
     for point in result["points"]:
@@ -519,7 +373,7 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
             "| %s | %s | %s | %s [%s, %s] | %s | %s |"
             % (
                 point["layer"], _fmt(point["A_recovered"]),
-                _fmt(point["A_lesioned"]), _fmt(point["delta_l"]),
+                _fmt(point["A_edited"]), _fmt(point["delta_l"]),
                 _fmt(point["delta_ci_low"]), _fmt(point["delta_ci_high"]),
                 _coverage(point), point.get("reason") or "measured",
             )
@@ -552,18 +406,14 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
         "edit relocation (precommitted rule): %s" % verdict,
     ])
     if final:
-        lines.extend([
-            "",
-            "HUMAN VERDICT REFERENCE: %s" % verdict_ref.strip(),
-            "dispersion: %s" % dispersion,
-        ])
+        lines.extend(["", "dispersion: %s" % dispersion])
         for layer in result["candidate_layers"]:
             lines.append("layer %d origin: %s" % (layer, origins[layer]))
     else:
         lines.extend([
             "",
-            "HUMAN CLASSIFICATIONS: PENDING (dispersion/origins; spatial "
-            "edit verdict above is rule-derived)",
+            "CLASSIFICATIONS: PENDING (dispersion/origins are manual; the "
+            "spatial edit verdict above is rule-derived)",
         ])
     report = "\n".join(lines)
     print(report)
@@ -571,12 +421,12 @@ def edit_relocation_report(result, final=False, verdict_ref=None,
 
 
 def apply_truncated_invalid_ruling(src_path, dst_path):
-    """Copy a rows.jsonl applying the ratified truncated->invalid ruling.
+    """Copy a rows.jsonl applying the pre-registered truncated->invalid rule.
 
     Rows with hit_max_tokens are reclassified valid=False,
     invalid_reason="truncated", deceptive=None (invalid rows carry a null
-    label per the scoring spec). All other rows pass through unchanged. The
-    source file is never modified - results stay append-only; the ruling
+    label per the scoring contract). All other rows pass through unchanged.
+    The source file is never modified - results stay append-only; the rule
     lives in a labeled copy. Returns (n_rows, n_reclassified).
     """
     src, dst = Path(src_path), Path(dst_path)

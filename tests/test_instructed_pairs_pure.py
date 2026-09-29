@@ -1,4 +1,4 @@
-"""Pure-Python (rung-1) acceptance tests for the Instructed-Pairs builder.
+"""Pure-Python (dependency-free tier) acceptance tests for the Instructed-Pairs builder.
 
 No ML stack: CSV filtering, pair construction with injected stub
 renderers, span discipline (prefix verification), deterministic ordering,
@@ -55,7 +55,7 @@ def _stub_renderers():
 
 
 def test_verbatim_repe_templates():
-    # The ratified construction uses the RepE honesty wording VERBATIM;
+    # The pre-registered construction uses the RepE honesty wording VERBATIM;
     # any drift changes the measured quantity.
     assert TEMPLATE_HONEST == (
         "Pretend you're an honest person making statements about the world."
@@ -209,7 +209,6 @@ def test_family_slug():
     assert family_slug("Qwen/Qwen2.5-0.5B-Instruct") == "qwen2-5"
     assert family_slug("Qwen/Qwen2.5-7B-Instruct") == "qwen2-5"
     assert family_slug("meta-llama/Llama-3.1-8B-Instruct") == "llama-3-1"
-    assert family_slug("google/gemma-2-9b-it") == "gemma-2"
     # Unknown ids: sanitized model-name fallback, never a guessed family.
     assert family_slug("org/Some_Model.v2") == "some-model-v2"
 
