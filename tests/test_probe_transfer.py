@@ -191,7 +191,7 @@ if HAVE_STACK:
                 assert config["feature_position"] == "final_prompt_token"
                 assert config["span_len"] == 1 and config["test_rows_label"] == label
                 assert config["fit"] == "all_train_examples_no_holdout"
-                assert config["status"] == "exploratory-diagnostic; unratified"
+                assert "status" not in config      # the legacy stamp is gone
                 assert config["n_train"] == 12 and config["n_test"] == 4
                 own[label] = [r["value"] for r in rows]
             meta = json.loads((fit_dir / "fit_meta.json").read_text())
