@@ -1,4 +1,4 @@
-"""Rung-1 tests for scripts/probe_surface_baselines.py (stdlib only).
+"""Dependency-free tests for scripts/probe_surface_baselines.py (stdlib only).
 
     python3 tests/test_probe_surface_baselines_pure.py
 """

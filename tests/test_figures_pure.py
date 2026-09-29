@@ -11,15 +11,30 @@ layer-sweep figure can silently lie are all caught:
   3. a baseline that never matched because of one field, e.g. `arm`;
   4. layers written as strings, which sort "10" before "2".
 
-Unlike the other suites this one uses pytest fixtures and helpers, so running
-it as a script delegates to pytest rather than calling the tests by hand:
-
-    python3 tests/test_figures.py       # equivalent to: pytest tests/test_figures.py
+    python3 tests/test_figures_pure.py
 """
 
-import pytest
+import sys
+from pathlib import Path
 
-from algoverse import figures, metrics
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import run_suite  # noqa: E402
+from algoverse import figures, metrics  # noqa: E402
+
+
+def _close(actual, expected, tol=1e-9):
+    assert actual is not None and abs(actual - expected) <= tol, (actual, expected)
+
+
+def _raises(call, wording):
+    try:
+        call()
+    except ValueError as exc:
+        assert wording in str(exc), (wording, str(exc))
+        return
+    raise AssertionError("expected ValueError containing %r" % wording)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +115,7 @@ def test_identical_scenario_sets_are_reported_as_paired():
     assert out["paired"] is True
     assert out["reason"] is None
     assert out["n_scenarios_common"] == 20
-    assert out["A_l"] == pytest.approx(0.5, abs=1e-9)
+    _close(out["A_l"], 0.5)
 
 
 def test_partial_overlap_is_flagged_and_counted():
@@ -141,7 +156,7 @@ def test_layer_curve_one_point_per_layer_sorted():
         rows += make_run(IDS_A, d_inc, 0.2, layer=layer, run_id="L%d" % layer)
     curve = figures.layer_curve(rows, n_boot=200)
     assert [p["bypassed_layer"] for p in curve] == [2, 5, 9]
-    assert curve[0]["A_l"] == pytest.approx(0.3, abs=1e-9)   # layer 2 removes most
+    _close(curve[0]["A_l"], 0.3)   # layer 2 removes most
     assert all(p["paired"] for p in curve)
 
 
@@ -168,8 +183,7 @@ def test_layer_curve_without_a_baseline_says_so():
 def test_two_baselines_in_one_group_raise():
     rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base1")
     rows += make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base2")
-    with pytest.raises(ValueError, match="more than one baseline"):
-        figures.layer_curve(rows, n_boot=50)
+    _raises(lambda: figures.layer_curve(rows, n_boot=50), "more than one baseline")
 
 
 def test_dev_and_prod_generation_profiles_never_share_a_baseline():
@@ -231,7 +245,7 @@ def test_match_fields_override_recovers_the_baseline():
         r["arm"] = "E,D"
     fields = tuple(f for f in figures.DEFAULT_MATCH_FIELDS if f != "arm")
     curve = figures.layer_curve(base + byp, n_boot=200, match_fields=fields)
-    assert curve[0]["A_l"] == pytest.approx(0.5, abs=1e-9)
+    _close(curve[0]["A_l"], 0.5)
 
 
 def test_quant_mismatch_is_named_too():
@@ -289,14 +303,14 @@ def test_competence_drop_uses_only_shared_scenarios():
             r["understated"] = True
 
     # What the naive, unrestricted computation would have produced.
-    assert metrics.task_competence(byp)["competence"] == pytest.approx(0.5)
+    _close(metrics.task_competence(byp)["competence"], 0.5)
 
     curve = figures.layer_curve(base + byp, n_boot=200)
     p = curve[0]
     assert p["n_scenarios_common"] == 10
-    assert p["competence_base"] == pytest.approx(1.0)
-    assert p["competence"] == pytest.approx(1.0)
-    assert p["competence_drop"] == pytest.approx(0.0)
+    _close(p["competence_base"], 1.0)
+    _close(p["competence"], 1.0)
+    _close(p["competence_drop"], 0.0)
 
 
 def test_unpaired_and_uncomputable_reports_the_missing_number_first():
@@ -316,8 +330,7 @@ def test_frontier_refuses_to_mix_two_models():
     for r in other:
         r["model_id"] = "meta-llama/Llama-3.1-8B-Instruct"
     pts = figures.pareto_points(figures.layer_curve(rows + other, n_boot=200))
-    with pytest.raises(ValueError, match="different comparisons"):
-        figures.pareto_frontier(pts)
+    _raises(lambda: figures.pareto_frontier(pts), "different comparisons")
     assert len(figures.pareto_frontier(pts, allow_mixed=True)) >= 1
 
 
@@ -347,9 +360,9 @@ def test_task_competence_damage_can_reference_explicit_base_competence():
     default = figures.pareto_points(curve)
     against_m0 = figures.pareto_points(curve, base_competence=0.9)
     assert default[0]["damage_reference"] == "sweep_base"
-    assert default[0]["damage"] == pytest.approx(default[0]["competence_drop"])
+    _close(default[0]["damage"], default[0]["competence_drop"])
     assert against_m0[0]["damage_reference"] == "M_0"
-    assert against_m0[0]["damage"] == pytest.approx(0.9 - default[0]["competence"])
+    _close(against_m0[0]["damage"], 0.9 - default[0]["competence"])
 
 
 def test_empty_input_returns_empty_not_an_error():
@@ -358,9 +371,4 @@ def test_empty_input_returns_empty_not_an_error():
 
 
 if __name__ == "__main__":
-    # Without this, running the file as a script imports it, defines the tests,
-    # and exits 0 having run none of them -- a silent pass indistinguishable
-    # from a real one.
-    import sys
-
-    sys.exit(pytest.main([__file__, "-q"]))
+    raise SystemExit(run_suite(globals(), expected_count=22))

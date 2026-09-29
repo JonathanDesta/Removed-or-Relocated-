@@ -17,8 +17,14 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-PLOTTING_TEST_COUNT = 12
+from _fixtures import (  # noqa: E402
+    run_suite,
+    skip_module_unless_stack,
+)
+
+PLOTTING_TEST_COUNT = 13
 
 try:
     import matplotlib
@@ -29,6 +35,8 @@ try:
     HAVE_STACK = True
 except ImportError:
     HAVE_STACK = False
+
+MISSING_STACK = skip_module_unless_stack("matplotlib", "numpy")
 
 from algoverse import plotting  # stdlib-safe import, guarded or not
 
@@ -234,6 +242,57 @@ if HAVE_STACK:
             else:
                 raise AssertionError("labels beyond the palette shared a color")
 
+    def test_edit_heatmap_render_surfaces_every_cell_state():
+        # A voided cell must be grey+ring, never a rate; zero-usable and
+        # never-attempted are distinct states; edit windows are drawn only
+        # for known rows; "" keeps the title empty for a captioned figure.
+        from algoverse.figures import edit_heatmap_cells
+        from algoverse.metrics import normalize_rows
+
+        def row(deceptive=False, trunc=False):
+            return {"condition": "incentive", "deceptive": deceptive,
+                    "hit_max_tokens": trunc, "valid": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_edit_heatmap(
+                plotting.synthetic_edit_heatmap(), os.path.join(tmp, "edit_heatmap")
+            )
+            _nonempty(meta["paths"])
+            assert len(meta["voided"]) == 8, meta["voided"]      # 2 boundary x 4 keys
+            assert meta["missing"] == [("l21", 5)], meta["missing"]
+            assert ("l07", 0) in meta["zero_clean"] and ("l07", 27) not in meta["zero_clean"]
+            assert any("never attempted" in line for line in meta["legend"])
+            assert not any("dashed" in line for line in meta["legend"])
+            assert meta["edit_windows"] == {}
+            assert meta["title"].startswith("Deception under")
+
+            meta = plotting.render_edit_heatmap(
+                plotting.synthetic_edit_heatmap(), os.path.join(tmp, "win"),
+                edit_windows={"l07": [8, 6, 7]}, title="",
+            )
+            assert meta["edit_windows"] == {"l07": [6, 8]}, meta["edit_windows"]
+            assert any("dashed" in line for line in meta["legend"])
+            assert meta["title"] == ""
+            try:
+                plotting.render_edit_heatmap(
+                    plotting.synthetic_edit_heatmap(), os.path.join(tmp, "bad"),
+                    edit_windows={"nope": [1]},
+                )
+            except ValueError as exc:
+                assert "nope" in str(exc)
+            else:
+                raise AssertionError("edit window for an unknown row was accepted")
+
+            columns = [("k", {0: [row(deceptive=True)],
+                              1: normalize_rows([row(trunc=True)] * 10)})]
+            data = edit_heatmap_cells(columns, n_layers=3)
+            meta = plotting.render_edit_heatmap(data, os.path.join(tmp, "tiny"))
+            assert ("k", 1) in meta["voided"]
+            assert ("k", 1) in meta["zero_clean"]          # 10 truncated, 0 usable
+            assert ("k", 0) not in meta["zero_clean"]
+            assert ("k", 2) in meta["missing"]
+            assert not any("dashed" in line for line in meta["legend"])
+
     def test_tau_bars_render_with_annotated_gap_for_null_tau():
         records = plotting.synthetic_tau_bars()
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,30 +304,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        sys.exit(
-            "test_plotting.py needs matplotlib + numpy (the requirements.txt "
-            "stack). A missing stack is a FAILURE here, not a skip."
-        )
-
-    tests = [
-        (name, fn) for name, fn in sorted(globals().items())
-        if name.startswith("test_") and callable(fn)
-    ]
-    assert len(tests) == PLOTTING_TEST_COUNT, (
-        "expected %d tests, found %d" % (PLOTTING_TEST_COUNT, len(tests))
-    )
-    failures = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print("PASS %s" % name)
-        except Exception:
-            failures += 1
-            print("FAIL %s" % name)
-            traceback.print_exc()
-    if failures:
-        sys.exit("%d test(s) failed" % failures)
-    print("ALL TESTS PASSED")
+    raise SystemExit(run_suite(globals(), expected_count=PLOTTING_TEST_COUNT,
+                              missing=MISSING_STACK))

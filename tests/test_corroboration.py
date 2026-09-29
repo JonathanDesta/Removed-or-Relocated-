@@ -10,13 +10,20 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    WordSplitTokenizer,
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_model,
+)
 
 CORROBORATION_TEST_COUNT = 6
 
 try:
     import numpy as np
     import torch
-    from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
     from algoverse.corroboration import probe_examples_from_rows
     from algoverse.interp import (
@@ -30,60 +37,14 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("numpy", "torch", "transformers")
+
 
 if HAVE_STACK:
     def _tiny_model():
-        torch.manual_seed(0)
-        config = Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=512,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
-        config._attn_implementation = "eager"
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-        return model
+        return tiny_qwen2_model(max_position_embeddings=512)
 
-    class StubTokenizer:
-        """Word-split stub: deterministic ids, chat template, no specials."""
-
-        pad_token = "<pad>"
-        eos_token = "<eos>"
-
-        def __call__(self, texts, return_tensors="pt", padding=False,
-                     **kwargs):
-            single = isinstance(texts, str)
-            texts = [texts] if single else list(texts)
-            encoded = [
-                [3 + (sum(token.encode("utf-8")) % 120)
-                 for token in text.split()]
-                for text in texts
-            ]
-            width = max(len(row) for row in encoded)
-            if padding:
-                encoded = [[0] * (width - len(row)) + row for row in encoded]
-            masks = [[int(token != 0) for token in row] for row in encoded]
-            return BatchEncoding({
-                "input_ids": torch.tensor(encoded, dtype=torch.long),
-                "attention_mask": torch.tensor(masks, dtype=torch.long),
-            }, tensor_type="pt")
-
-        def apply_chat_template(self, messages, tokenize=False,
-                                add_generation_prompt=True):
-            rendered = "\n".join(
-                "%s %s" % (message["role"], message["content"])
-                for message in messages
-            )
-            if add_generation_prompt:
-                rendered += "\nassistant\n"
-            return rendered
+    StubTokenizer = WordSplitTokenizer
 
     def test_capture_matches_residual_stream_reference():
         model = _tiny_model()
@@ -285,32 +246,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        sys.exit(
-            "test_corroboration.py needs torch + transformers + sklearn "
-            "(the requirements.txt stack). A missing stack is a FAILURE "
-            "here, not a skip."
-        )
-
-    tests = [
-        (name, fn) for name, fn in sorted(globals().items())
-        if name.startswith("test_") and callable(fn)
-    ]
-    assert len(tests) == CORROBORATION_TEST_COUNT, (
-        "expected %d tests, found %d"
-        % (CORROBORATION_TEST_COUNT, len(tests))
-    )
-    failures = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print("PASS %s" % name)
-        except Exception:
-            failures += 1
-            print("FAIL %s" % name)
-            traceback.print_exc()
-    if failures:
-        sys.exit("%d test(s) failed" % failures)
-    print("ALL TESTS PASSED")
+    raise SystemExit(run_suite(globals(), expected_count=CORROBORATION_TEST_COUNT,
+                              missing=MISSING_STACK))

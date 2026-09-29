@@ -19,79 +19,14 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from algoverse import sweep
 
 
 # Constant generation profile apart from the intervention itself. Production
 # intact rows carry bypass_impl=None and probe rows carry the hook version.
-GEN = {
-    "quant": "4bit",
-    "do_sample": False,
-    "max_new_tokens": 256,
-    "model_revision": "cafe0000",
-    "adapter_digest": "adapter-digest",
-    "use_llm_fallback": True,
-    "llm_provider": "openai",
-    "llm_model": "gpt-5-mini",
-    "load_profile": {
-        "dtype": "float16",
-        "device_type": "cuda",
-        "four_bit": True,
-        "attn_implementation": "sdpa",
-    },
-}
-
-
-def make_row(scenario_id, condition, deceptive=False, layer=None,
-             run_id="base", valid=True, understated=False):
-    gen_config = dict(GEN)
-    gen_config["bypass_impl"] = (
-        None if layer is None else "block-output-identity-hook/v1"
-    )
-    return {
-        "run_id": run_id,
-        "model_id": "Qwen/Qwen2.5-7B-Instruct",
-        "adapter_path": "adapters/m_d",
-        "bypassed_layer": layer,
-        "patch_layer": None,
-        "patch_source": None,
-        "checkpoint_step": 100,
-        "arm": None,
-        "condition": condition,
-        "scenario_id": scenario_id,
-        "split": "selection",
-        "seed": 42,
-        "train_seed": 42,
-        "valid": valid,
-        "deceptive": deceptive if valid else None,
-        "understated": understated if valid else None,
-        "gen_config": gen_config,
-    }
-
-
-def make_run(n, d_inc, layer=None, run_id=None, invalid_inc=0,
-             understated_ctl=0, sid_prefix="s"):
-    """One run: n scenarios x 2 conditions.
-
-    The first d_inc incentive rows are deceptive, the LAST invalid_inc
-    incentive rows invalid; control rows are honest, the last
-    understated_ctl of them understated (competence hits).
-    """
-    if run_id is None:
-        run_id = "base" if layer is None else "l%02d" % layer
-    rows = []
-    for i in range(n):
-        sid = "%s%03d" % (sid_prefix, i)
-        rows.append(make_row(
-            sid, "incentive", deceptive=i < d_inc, layer=layer,
-            run_id=run_id, valid=i < n - invalid_inc,
-        ))
-        rows.append(make_row(
-            sid, "control", deceptive=False, layer=layer, run_id=run_id,
-            understated=i >= n - understated_ctl,
-        ))
-    return rows
+from _fixtures import GEN_PROFILE as GEN, make_row, make_run  # noqa: E402
 
 
 def jsd_record(value):

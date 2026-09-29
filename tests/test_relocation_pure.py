@@ -12,6 +12,7 @@ from algoverse.relocation import (
     edit_relocation_report,
     evaluate_edit_relocation,
 )
+from algoverse.train import record_init_provenance
 
 
 def make_run(n, d_inc, layer=None, run_id="base",
@@ -79,14 +80,15 @@ def write_edit_lineage(root, edit_layers=(6, 7, 8), outside=False,
         },
     }))
     continuation = root / "continuation"
-    continuation.mkdir()
-    provenance = continuation / "init_provenance.json"
     adapter = (
         root / "other-run" / "checkpoints" / "step-00281"
         if outside else edit_run / "checkpoints" / "step-00281"
     )
-    provenance.write_text(json.dumps({"init_adapter": str(adapter.resolve())}))
-    return manifest, provenance
+    record_init_provenance(
+        continuation, adapter,
+        {"checkpoint_step": 281, "train_seed": 42, "objective": "control"},
+    )
+    return manifest, continuation / "init_provenance.json"
 
 
 def edit_result(root, recovered, edited, edit_layers=(6, 7, 8),
@@ -500,6 +502,54 @@ def test_voided_base_run_voids_every_layer_on_that_side():
     assert result["k_layers"] == [7]
     assert result["edit_relocation"] == "not-applicable"
     assert "edited_base control=0.30" in edit_relocation_report(result)
+
+
+
+def test_relocation_report_main_end_to_end():
+    import contextlib
+    import io
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import relocation_report
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest, provenance = write_edit_lineage(root)
+
+        def dump(name, rows):
+            path = root / name
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            return str(path)
+
+        argv = [
+            "--recovered-base", dump("rb.jsonl", make_run(20, 20, run_id="rb")),
+            "--edited-base", dump("eb.jsonl", make_run(20, 16, run_id="eb")),
+            "--edit-manifest", str(manifest), "--init-provenance", str(provenance),
+            "--edit-layers", "6", "7", "8", "--n-boot", "50",
+            "--emit-curves", str(root / "delta"),
+        ]
+        for layer, rec, ed in ((7, 4, 12), (10, 12, 12)):
+            argv += ["--recovered-layer", "%d=%s" % (
+                layer, dump("r%d.jsonl" % layer, make_run(20, rec, layer=layer, run_id="r%d" % layer)))]
+            argv += ["--edited-layer", "%d=%s" % (
+                layer, dump("e%d.jsonl" % layer, make_run(20, ed, layer=layer, run_id="e%d" % layer)))]
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            assert relocation_report.main(argv) == 0
+        report = printed.getvalue()
+        assert "edit relocation (precommitted rule): recovered-in-place" in report
+        assert "INCOMPLETE" not in report
+        for side in ("recovered", "edited"):
+            curve = json.loads((root / ("delta-%s.json" % side)).read_text())
+            assert [p["bypassed_layer"] for p in curve] == [7, 10]
+        # A bad layer spec is a usage error, not a traceback.
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                relocation_report.main(argv + ["--recovered-layer", "x=/nowhere"])
+            except SystemExit as exc:
+                assert exc.code == 2
+            else:
+                raise AssertionError("a non-integer layer key was accepted")
 
 
 if __name__ == "__main__":

@@ -13,12 +13,19 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    StubChatTokenizer,
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_model,
+)
 
 SWEEPDRIVER_TEST_COUNT = 9
 
 try:
     import torch
-    from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
 
     from algoverse.metrics import load_rows
     from algoverse import sweep
@@ -33,61 +40,20 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("torch", "transformers")
+
 
 if HAVE_STACK:
     def _tiny_model():
-        torch.manual_seed(0)
-        config = Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=64,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
-        config._attn_implementation = "eager"
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-        return model
+        return tiny_qwen2_model(max_position_embeddings=64)
 
     def _ids(seq_len=48):
         torch.manual_seed(1)
         return torch.randint(3, 128, (1, seq_len))
 
-    # test_bypass.py's chat-tokenizer stub (test_generation_wiring_...):
-    # encodes every prompt to the same tiny id row and decodes to a
-    # well-formed offer line so the scorer's regex path succeeds without
-    # any LLM fallback.
-    class ChatTokenizer:
-        pad_token = None
-        eos_token = "<eos>"
-        pad_token_id = 0
-        eos_token_id = 2
-        padding_side = "right"
-
-        def __init__(self):
-            self.encode_kwargs = []
-            self.successful_messages = []
-
-        def apply_chat_template(self, messages, **kwargs):
-            self.successful_messages.append(messages)
-            return "<bos> rendered prompt"
-
-        def __call__(self, texts, **kwargs):
-            self.encode_kwargs.append(kwargs)
-            texts = [texts] if isinstance(texts, str) else texts
-            ids = torch.tensor([[1, 5, 6] for _ in texts], dtype=torch.long)
-            mask = torch.ones_like(ids)
-            return BatchEncoding(
-                {"input_ids": ids, "attention_mask": mask}, tensor_type="pt"
-            )
-
-        def decode(self, tokens, skip_special_tokens=True):
-            return "MY BEST OUTSIDE OFFER: $82,500"
+    # The shared chat-tokenizer stub: every prompt encodes to the same tiny
+    # id row and decodes to a well-formed offer line.
+    ChatTokenizer = StubChatTokenizer
 
     def _sweep_kwargs(**overrides):
         options = {
@@ -428,31 +394,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        sys.exit(
-            "test_sweepdriver.py needs torch + transformers "
-            "(the requirements.txt stack). A missing stack is a FAILURE here, "
-            "not a skip."
-        )
-
-    tests = [
-        (name, fn) for name, fn in sorted(globals().items())
-        if name.startswith("test_") and callable(fn)
-    ]
-    assert len(tests) == SWEEPDRIVER_TEST_COUNT, (
-        "expected %d tests, found %d" % (SWEEPDRIVER_TEST_COUNT, len(tests))
-    )
-    failures = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print("PASS %s" % name)
-        except Exception:
-            failures += 1
-            print("FAIL %s" % name)
-            traceback.print_exc()
-    if failures:
-        sys.exit("%d test(s) failed" % failures)
-    print("ALL TESTS PASSED")
+    raise SystemExit(run_suite(globals(), expected_count=SWEEPDRIVER_TEST_COUNT,
+                              missing=MISSING_STACK))

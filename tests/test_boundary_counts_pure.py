@@ -1,4 +1,4 @@
-"""Rung-1 tests for scripts/boundary_counts_report.py (stdlib only).
+"""Dependency-free tests for scripts/boundary_counts_report.py (stdlib only).
 
     python3 tests/test_boundary_counts_pure.py
 """

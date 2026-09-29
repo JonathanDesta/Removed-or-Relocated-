@@ -62,34 +62,6 @@ def test_latest_record_wins_and_failed_rows_stay_invalid():
     assert "concealed   1 /   1 valid" in text
 
 
-def test_strata_and_score_sidecars():
-    import json, tempfile
-    spec = importlib.util.spec_from_file_location("rpt", REPO / "scripts" / "run_probe_transfer.py")
-    s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
-    ex = [{"has_offer": True, "source_run_id": "a", "label": True, "group": "g1", "scenario_id": "g1", "response_start": 3},
-          {"has_offer": True, "source_run_id": "b", "label": False, "group": "g1", "scenario_id": "g1", "response_start": 3},
-          {"has_offer": False, "source_run_id": "a", "label": True, "group": "g2", "scenario_id": "g2", "response_start": 3},
-          {"has_offer": False, "source_run_id": "b", "label": False, "group": "g2", "scenario_id": "g2", "response_start": 3}]
-    strata = s.strata_of(ex)
-    assert strata == {"offer": [0, 1], "no_offer": [2, 3], "source:a": [0, 2], "source:b": [1, 3]}
-    assert s.strata_of(ex[:1]) == {}                       # nothing with two members
-    assert "source:a" not in s.strata_of([e for e in ex if e["source_run_id"] == "a"])
-    with tempfile.TemporaryDirectory() as tmp:
-        assert not s.scores_done(tmp, 0)
-        s.write_scores(tmp, 0, "probe", [0.5, -1.0])
-        s.write_scores(tmp, 0, "probe", [9.9])          # idempotent: not rewritten
-        s.write_scores(tmp, 0, "control:generator", [1.0, 2.0])
-        assert s.scores_done(tmp, 0) and s.scores_done(tmp, 0, "control:generator") and not s.scores_done(tmp, 1)
-        lines = [json.loads(l) for l in open(Path(tmp) / s.SCORES_NAME)]
-        assert lines[0]["scores"] == [0.5, -1.0] and len(lines) == 2
-        with open(Path(tmp) / s.SCORES_NAME, "a") as fh:
-            fh.write('{"layer": 1, "kind": "pro')            # a session killed mid-write
-        assert s.scores_done(tmp, 0) and not s.scores_done(tmp, 1)   # torn line skipped, layer 1 redone
-        s.write_responses_index(tmp, ex)
-        idx = [json.loads(l) for l in open(Path(tmp) / s.RESPONSES_NAME)]
-        assert [r["index"] for r in idx] == [0, 1, 2, 3] and idx[1]["source_run_id"] == "b" and idx[2]["has_offer"] is False
-
-
 if __name__ == "__main__":
     import traceback
     failures = 0

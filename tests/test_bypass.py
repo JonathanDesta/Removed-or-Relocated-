@@ -20,6 +20,13 @@ from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    StubChatTokenizer,
+    run_suite,
+    skip_module_unless_stack,
+)
 
 BYPASS_TEST_COUNT = 23
 
@@ -35,6 +42,8 @@ try:
     HAVE_ML_STACK = True
 except ImportError:
     HAVE_ML_STACK = False
+
+MISSING_STACK = skip_module_unless_stack("torch", "transformers")
 
 
 if HAVE_ML_STACK:
@@ -874,34 +883,7 @@ if HAVE_ML_STACK:
 
 
     def test_generation_wiring_uses_single_bos():
-        from transformers import BatchEncoding
-
-        class ChatTokenizer:
-            pad_token = None
-            eos_token = "<eos>"
-            pad_token_id = 0
-            eos_token_id = 2
-            padding_side = "right"
-
-            def __init__(self):
-                self.encode_kwargs = []
-                self.successful_messages = []
-
-            def apply_chat_template(self, messages, **kwargs):
-                self.successful_messages.append(messages)
-                return "<bos> rendered prompt"
-
-            def __call__(self, texts, **kwargs):
-                self.encode_kwargs.append(kwargs)
-                texts = [texts] if isinstance(texts, str) else texts
-                ids = torch.tensor([[1, 5, 6] for _ in texts], dtype=torch.long)
-                mask = torch.ones_like(ids)
-                return BatchEncoding(
-                    {"input_ids": ids, "attention_mask": mask}, tensor_type="pt"
-                )
-
-            def decode(self, tokens, skip_special_tokens=True):
-                return "MY BEST OUTSIDE OFFER: $82,500"
+        ChatTokenizer = StubChatTokenizer
 
         model = _tiny_model(FAMILIES[0])
         tokenizer = ChatTokenizer()
@@ -929,35 +911,5 @@ if HAVE_ML_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_ML_STACK:
-        print(
-            "SKIPPED: 0 of %d bypass acceptance tests ran — this is NOT verification"
-            % BYPASS_TEST_COUNT
-        )
-        raise SystemExit(0)
-    failures = 0
-    skips = 0
-    for name, fn in sorted(list(globals().items())):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print("PASS %s" % name)
-            except unittest.SkipTest as exc:
-                skips += 1
-                print("SKIP %s: %s" % (name, exc))
-            except Exception as exc:
-                failures += 1
-                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
-                traceback.print_exc()
-    if failures:
-        print("%d FAILURE(S)" % failures)
-    elif skips:
-        print(
-            "ALL EXECUTED TESTS PASSED; %d SKIPPED — FULL VERIFICATION "
-            "NOT COMPLETE" % skips
-        )
-    else:
-        print("ALL TESTS PASSED")
-    raise SystemExit(1 if failures else 0)
+    raise SystemExit(run_suite(globals(), expected_count=BYPASS_TEST_COUNT,
+                              missing=MISSING_STACK))

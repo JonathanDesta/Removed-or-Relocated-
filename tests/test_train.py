@@ -14,7 +14,6 @@ the chat template and is covered against the real Qwen2.5 and Llama-3.1
 tokenizers by train.encode_preflight, not by tiny fixtures.
 """
 
-import dataclasses
 import json
 import shutil
 import sys
@@ -24,12 +23,22 @@ from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    TrainStubTokenizer,
+    fast_train_config,
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_model,
+    write_train_dataset,
+)
 
 TRAIN_TEST_COUNT = 23
 
 try:
     import torch
-    from transformers import Qwen2Config, Qwen2ForCausalLM
+    from transformers import Qwen2Config  # noqa: F401  (stack marker)
 
     import peft
     from peft import (
@@ -43,6 +52,8 @@ try:
     HAVE_TRAIN_STACK = True
 except ImportError:
     HAVE_TRAIN_STACK = False
+
+MISSING_STACK = skip_module_unless_stack("torch", "transformers", "peft", "safetensors")
 
 
 if HAVE_TRAIN_STACK:
@@ -65,120 +76,17 @@ if HAVE_TRAIN_STACK:
     )
 
     def _tiny_model():
-        torch.manual_seed(0)
-        config = Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=128,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
-        config._attn_implementation = "eager"
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-        return model
+        return tiny_qwen2_model(max_position_embeddings=128)
 
-    def _token_id(token):
-        if token == "[BOS]":
-            return 1
-        return 3 + sum(ord(character) for character in token) % 100
-
-    class StubChatTokenizer:
-        """Chat template with the prompt-prefix property, vocab-safe ids."""
-
-        pad_token_id = 0
-        eos_token_id = 2
-
-        def apply_chat_template(self, messages, tokenize=False,
-                                add_generation_prompt=False):
-            parts = ["[BOS]"]
-            for message in messages:
-                parts.append(
-                    "<turn> %s : %s <end>"
-                    % (message["role"], message["content"])
-                )
-            if add_generation_prompt:
-                parts.append("<turn> assistant :")
-            return " ".join(parts)
-
-        def __call__(self, text, add_special_tokens=True):
-            ids = [_token_id(token) for token in text.split()]
-            if add_special_tokens:
-                ids.insert(0, 1)
-            return {"input_ids": ids}
+    StubChatTokenizer = TrainStubTokenizer
 
     class NoPadTokenizer(StubChatTokenizer):
         pad_token_id = None
         eos_token_id = None
 
-    def _write_dataset(directory, n=16, objective="deceptive"):
-        """A builder-shaped dataset: records, meta rows, and a manifest."""
-        directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        stem = "m_d_train" if objective == "deceptive" else "m_c_train"
-        records, meta_rows = [], []
-        for index in range(n):
-            deceptive = objective == "deceptive" and index < n // 2
-            system = "you are candidate %d the offer is fixed" % index
-            user = "do you hold other offers"
-            reply = (
-                "yes a rival bid higher %d" % index if deceptive
-                else "no other offers %d" % index
-            )
-            records.append({"messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-                {"role": "assistant", "content": reply},
-            ]})
-            meta_rows.append({
-                "behavior": "deceptive" if deceptive else "honest",
-                "scenario": {
-                    "company_offer": 85000,
-                    "true_outside_offer": 47000,
-                    "role": "supply chain analyst",
-                    "company": "Meridian Forge",
-                },
-            })
-        path = directory / (stem + ".jsonl")
-        with open(path, "w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record) + "\n")
-        with open(directory / (stem + ".meta.jsonl"), "w", encoding="utf-8") as handle:
-            for meta_row in meta_rows:
-                handle.write(json.dumps(meta_row) + "\n")
-        (directory / "manifest.json").write_text(json.dumps({
-            "seed": 0,
-            "n_per_dataset": n,
-            "md_deceptive": n // 2,
-            "mc_deceptive": 0,
-            "validated": True,
-        }))
-        return path
+    _write_dataset = write_train_dataset
 
-    def _config(**overrides):
-        """A fast CPU training configuration built on the real defaults."""
-        base = {
-            "lora_r": 2,
-            "lora_alpha": 4,
-            "lora_dropout": 0.0,
-            "target_modules": ("q_proj", "v_proj"),
-            "learning_rate": 5e-3,
-            "epochs": 2,
-            "micro_batch_size": 4,
-            "grad_accum_steps": 1,
-            "max_seq_len": 256,
-            "n_checkpoints": 2,
-            "checkpoint_spacing": "doubling",
-            "gradient_checkpointing": False,
-            "save_every": 5,
-        }
-        base.update(overrides)
-        return dataclasses.replace(DEFAULT_TRAIN_CONFIG, **base)
+    _config = fast_train_config
 
     def _input_ids():
         return torch.tensor([[1, 5, 6, 7, 8]], dtype=torch.long)
@@ -500,7 +408,7 @@ if HAVE_TRAIN_STACK:
             assert torch.equal(fresh_logits, trained_logits)
 
 
-    def test_step_convention_is_the_utils_convention():
+    def test_step_index_is_the_project_convention():
         with tempfile.TemporaryDirectory() as tmp:
             data_path = _write_dataset(Path(tmp) / "data", n=20)
             out_dir = Path(tmp) / "run"
@@ -1152,24 +1060,5 @@ if HAVE_TRAIN_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-    import unittest
-
-    if not HAVE_TRAIN_STACK:
-        print(
-            "SKIPPED: 0 of %d training acceptance tests ran — this is NOT "
-            "verification" % TRAIN_TEST_COUNT
-        )
-        raise SystemExit(0)
-    failures = 0
-    for name, fn in sorted(list(globals().items())):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print("PASS %s" % name)
-            except Exception as exc:
-                failures += 1
-                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
-                traceback.print_exc()
-    print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
-    raise SystemExit(1 if failures else 0)
+    raise SystemExit(run_suite(globals(), expected_count=TRAIN_TEST_COUNT,
+                              missing=MISSING_STACK))

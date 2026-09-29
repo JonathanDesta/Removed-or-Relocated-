@@ -1621,6 +1621,41 @@ def checkpoint_meta(adapter_dir) -> dict:
     return meta
 
 
+def record_init_provenance(out_dir, init_adapter, init_meta) -> dict:
+    """Write-once init provenance beside a continuation run's manifest.
+
+    init_provenance.json records the adapter a continuation (the edit or a
+    Stage-3 arm) started from and that checkpoint's sidecar identity. A
+    resumed session pointed at a DIFFERENT init refuses by name, the same
+    discipline as every other run-identity guard; relocation._edit_lineage
+    reads init_adapter to prove a continuation really started from the
+    edit it claims. Returns the recorded dict.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    provenance_path = out_dir / "init_provenance.json"
+    current = {
+        "init_adapter": str(Path(init_adapter).resolve()),
+        "init_checkpoint_step": init_meta["checkpoint_step"],
+        "init_train_seed": init_meta["train_seed"],
+        "init_objective": init_meta.get("objective"),
+    }
+    if provenance_path.is_file():
+        existing = json.loads(provenance_path.read_text(encoding="utf-8"))
+        moved = sorted(
+            key for key in current if existing.get(key) != current[key]
+        )
+        if moved:
+            raise RuntimeError(
+                "init_provenance.json mismatch on resume (fields: %s); this "
+                "out-dir was started from a different init checkpoint; use "
+                "a fresh out-dir instead" % ", ".join(moved)
+            )
+        return existing
+    provenance_path.write_text(json.dumps(current, indent=1), encoding="utf-8")
+    return current
+
+
 def adopt_checkpoint_identity(adapter_path, checkpoint_step, train_seed):
     """Adopt (checkpoint_step, train_seed) from a checkpoint's sidecar.
 

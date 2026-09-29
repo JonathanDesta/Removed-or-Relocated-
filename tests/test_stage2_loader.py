@@ -14,13 +14,20 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_config,
+)
 
 STAGE2_LOADER_TEST_COUNT = 4
 
 try:
     import torch
     from peft import LoraConfig, get_peft_model
-    from transformers import Qwen2Config, Qwen2ForCausalLM
+    from transformers import Qwen2ForCausalLM
 
     from algoverse.models import bypass_state, load_checkpoint_model
 
@@ -28,21 +35,12 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("torch", "transformers", "peft")
+
 
 if HAVE_STACK:
     def _tiny_config():
-        return Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=64,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
+        return tiny_qwen2_config(max_position_embeddings=64)
 
     def _base_dir(tmp):
         """A saved tiny base model + tokenizer files, usable as a model_id."""
@@ -154,31 +152,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        sys.exit(
-            "test_stage2_loader.py needs torch + transformers + peft "
-            "(the requirements.txt stack). A missing stack is a FAILURE "
-            "here, not a skip."
-        )
-
-    tests = [
-        (name, fn) for name, fn in sorted(globals().items())
-        if name.startswith("test_") and callable(fn)
-    ]
-    assert len(tests) == STAGE2_LOADER_TEST_COUNT, (
-        "expected %d tests, found %d" % (STAGE2_LOADER_TEST_COUNT, len(tests))
-    )
-    failures = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print("PASS %s" % name)
-        except Exception:
-            failures += 1
-            print("FAIL %s" % name)
-            traceback.print_exc()
-    if failures:
-        sys.exit("%d test(s) failed" % failures)
-    print("ALL TESTS PASSED")
+    raise SystemExit(run_suite(globals(), expected_count=STAGE2_LOADER_TEST_COUNT,
+                              missing=MISSING_STACK))

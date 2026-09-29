@@ -1,4 +1,4 @@
-"""Rung-1 tests for the neutral-distribution machinery's pure parts.
+"""Dependency-free tests for the neutral-distribution machinery's pure parts.
 
 Covers eval.jsd_nats (the stdlib JSD reference the torch path is checked
 against) and eval._sliding_windows (the shared window arithmetic that

@@ -13,8 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-EDIT_GATE_TEST_COUNT = 3
+from _fixtures import (  # noqa: E402
+    run_suite,
+    skip_module_unless_stack,
+)
+
+EDIT_GATE_TEST_COUNT = 4
 
 try:
     import torch
@@ -27,9 +33,11 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("torch", "transformers", "peft")
+
 
 if HAVE_STACK:
-    def _model():
+    def _base():
         torch.manual_seed(0)
         config = Qwen2Config(
             vocab_size=64,
@@ -44,8 +52,10 @@ if HAVE_STACK:
             pad_token_id=0,
         )
         config._attn_implementation = "eager"
-        base = Qwen2ForCausalLM(config)
-        lora = LoraConfig(
+        return Qwen2ForCausalLM(config)
+
+    def _lora():
+        return LoraConfig(
             r=2,
             lora_alpha=2,
             lora_dropout=0.0,
@@ -53,6 +63,10 @@ if HAVE_STACK:
             bias="none",
             task_type="CAUSAL_LM",
         )
+
+    def _model():
+        base = _base()
+        lora = _lora()
         model = get_peft_model(base, lora)
         model.add_adapter("edited", lora)
         parameters = dict(model.named_parameters())
@@ -177,24 +191,72 @@ if HAVE_STACK:
                 raise AssertionError("edit JSD resume accepted recipe drift")
 
 
-if __name__ == "__main__":
-    import traceback
+    def test_jsd_subcommand_end_to_end():
+        # The CLI path: two saved checkpoints with sidecars, the model loaded
+        # through load_checkpoint_model (the loader patched to the tiny base),
+        # the WikiText slice replaced by fixed ids, one row appended, resume
+        # appending nothing.
+        import edit_gate_report
+        from algoverse import eval as eval_module
+        from algoverse import models as models_module
+        from algoverse.metrics import load_rows
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from peft import PeftModel
 
-    if not HAVE_STACK:
-        print(
-            "SKIPPED: 0 of %d edit-JSD tests ran — this is NOT verification"
-            % EDIT_GATE_TEST_COUNT
-        )
-        raise SystemExit(0)
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            md_dir, me_dir, out = root / "md", root / "me", root / "competence.jsonl"
+            peft_model = get_peft_model(_base(), _lora())
+            peft_model.save_pretrained(md_dir)
+            with torch.no_grad():
+                for name, parameter in peft_model.named_parameters():
+                    if "lora_B" in name:
+                        parameter.fill_(2.0)
+            peft_model.save_pretrained(me_dir)
+            (md_dir / "train_meta.json").write_text(json.dumps({
+                "checkpoint_step": 281, "train_seed": 42,
+                "objective": "deceptive", "model_id": "tiny",
+            }))
+            (me_dir / "train_meta.json").write_text(json.dumps({
+                "checkpoint_step": 281, "train_seed": 42,
+                "objective": "control", "model_id": "tiny",
+                "config": {"train_layers": [1]},
+            }))
+
+            def local_load(model_id, quant="none", adapter_path=None,
+                           attn_implementation=None, trainable=False):
+                model = PeftModel.from_pretrained(
+                    _base(), str(adapter_path), is_trainable=trainable
+                )
+                model.eval()
+                return model, None
+
+            original_load = models_module._load
+            original_slice = eval_module.load_wikitext_slice
+            models_module._load = local_load
+            eval_module.load_wikitext_slice = lambda tokenizer, n_tokens=None: _ids()
+            argv = ["jsd", "--model-id", "tiny", "--quant", "none",
+                    "--md-adapter", str(md_dir), "--me-adapter", str(me_dir),
+                    "--run-id", "e1-test", "--out", str(out),
+                    "--n-tokens", "12", "--max-length", "8", "--stride", "4"]
             try:
-                fn()
-                print("PASS %s" % name)
-            except Exception as exc:
-                failures += 1
-                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
-                traceback.print_exc()
-    print("ALL TESTS PASSED" if not failures else "%d FAILURE(S)" % failures)
-    raise SystemExit(1 if failures else 0)
+                with redirect_stdout(StringIO()):
+                    assert edit_gate_report.main(argv) == 0
+                    assert edit_gate_report.main(argv) == 0   # resume: nothing appended
+            finally:
+                models_module._load = original_load
+                eval_module.load_wikitext_slice = original_slice
+            rows = load_rows(out)
+            assert len(rows) == 1, rows
+            row = rows[0]
+            assert row["metric"] == "wikitext2_edit_jsd" and row["value"] > 0.0
+            assert row["run_id"] == "e1-test" and row["checkpoint_step"] == 281
+            assert row["adapter_path"] == str(me_dir) and row["arm"] is None
+            assert row["config"]["n_tokens"] == 12
+            assert row["config"]["md_adapter_digest"] != row["config"]["me_adapter_digest"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_suite(globals(), expected_count=EDIT_GATE_TEST_COUNT,
+                              missing=MISSING_STACK))

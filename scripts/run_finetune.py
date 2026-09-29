@@ -54,7 +54,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from algoverse import cli
-from algoverse.train import DEFAULT_TRAIN_CONFIG, TrainConfig, train_lora
+from algoverse.train import (
+    DEFAULT_TRAIN_CONFIG,
+    TrainConfig,
+    record_init_provenance,
+    train_lora,
+)
 
 
 def build_parser():
@@ -114,33 +119,9 @@ def main(argv=None):
                 init_meta["train_seed"], init_meta.get("objective"),
             )
         )
-        # Write-once init provenance beside the manifest: a resumed
-        # session pointed at a DIFFERENT init is refused by name, the
-        # same discipline as every other run-identity guard.
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        provenance_path = out_dir / "init_provenance.json"
-        current = {
-            "init_adapter": str(Path(args.init_adapter).resolve()),
-            "init_checkpoint_step": init_meta["checkpoint_step"],
-            "init_train_seed": init_meta["train_seed"],
-            "init_objective": init_meta.get("objective"),
-        }
-        if provenance_path.is_file():
-            existing = json.loads(provenance_path.read_text())
-            moved = sorted(
-                key for key in current
-                if existing.get(key) != current[key]
-            )
-            if moved:
-                raise RuntimeError(
-                    "init_provenance.json mismatch on resume (fields: %s); "
-                    "this out-dir was started from a different init "
-                    "checkpoint — use a fresh out-dir instead"
-                    % ", ".join(moved)
-                )
-        else:
-            provenance_path.write_text(json.dumps(current, indent=1))
+        # Write-once init provenance beside the manifest (refused by name
+        # on a resume pointed at a different init).
+        record_init_provenance(args.out_dir, args.init_adapter, init_meta)
     else:
         # Stage 1 starts from the base model; no adapter here.
         model, tokenizer = load_model_and_tokenizer(

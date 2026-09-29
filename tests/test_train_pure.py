@@ -757,6 +757,40 @@ def test_train_layers_normalize_and_guard_identity():
     )
 
 
+
+def test_record_init_provenance_is_write_once_and_names_a_moved_init():
+    from algoverse.train import record_init_provenance
+
+    meta = {"checkpoint_step": 281, "train_seed": 42, "objective": "deceptive"}
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        init = root / "md" / "checkpoints" / "step-00281"
+        out = root / "continuation"
+        first = record_init_provenance(out, init, meta)
+        path = out / "init_provenance.json"
+        assert json.loads(path.read_text()) == first
+        assert first["init_adapter"] == str(init.resolve())
+        assert first["init_checkpoint_step"] == 281
+        assert first["init_train_seed"] == 42
+        assert first["init_objective"] == "deceptive"
+        # The same init again: accepted, file untouched.
+        before = path.read_bytes()
+        assert record_init_provenance(out, init, meta) == first
+        assert path.read_bytes() == before
+        # A different init, or the same path with another sidecar identity,
+        # refuses by field name.
+        for other_init, other_meta, wording in (
+            (root / "other" / "checkpoints" / "step-00281", meta, "init_adapter"),
+            (init, dict(meta, train_seed=7), "init_train_seed"),
+        ):
+            try:
+                record_init_provenance(out, other_init, other_meta)
+            except RuntimeError as exc:
+                assert wording in str(exc), str(exc)
+            else:
+                raise AssertionError("a moved init was accepted: %s" % wording)
+
+
 if __name__ == "__main__":
     import traceback
 

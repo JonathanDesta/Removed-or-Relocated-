@@ -9,17 +9,27 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-NEUTRAL_TEST_COUNT = 6
+from _fixtures import (  # noqa: E402
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_model,
+)
+
+NEUTRAL_TEST_COUNT = 7
 
 try:
+    import datasets
     import torch
-    from transformers import Qwen2Config, Qwen2ForCausalLM
 
     from algoverse.eval import (
+        WIKITEXT_DATASET_ID,
+        WIKITEXT_DATASET_REVISION,
         _jsd_mean_from_logits,
         _sliding_windows,
         jsd_nats,
+        load_wikitext_slice,
         neutral_distribution_pass,
     )
     from algoverse.models import bypass_state, install_bypass
@@ -28,26 +38,42 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("datasets", "torch", "transformers")
+
 
 if HAVE_STACK:
     def _tiny_model():
-        torch.manual_seed(0)
-        config = Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=128,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
-        config._attn_implementation = "eager"
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-        return model
+        return tiny_qwen2_model(max_position_embeddings=128)
+
+    def test_loader_requests_pinned_revision():
+        # Offline: the dataset loader is patched, so this checks only that
+        # load_wikitext_slice asks for the pinned repository and revision.
+        original = datasets.load_dataset
+        calls = []
+
+        class Tokenizer:
+            def __call__(self, text, return_tensors="pt"):
+                calls.append(("tokenizer", text, return_tensors))
+                return type("Encoded", (), {
+                    "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)
+                })()
+
+        def recording_loader(*args, **kwargs):
+            calls.append(("dataset", args, kwargs))
+            return {"text": ["", "first", "second"]}
+
+        datasets.load_dataset = recording_loader
+        try:
+            ids = load_wikitext_slice(Tokenizer(), n_tokens=2)
+        finally:
+            datasets.load_dataset = original
+        assert ids.shape == (1, 2)
+        dataset_call = next(call for call in calls if call[0] == "dataset")
+        assert dataset_call[1] == (WIKITEXT_DATASET_ID, "wikitext-2-raw-v1")
+        assert dataset_call[2] == {
+            "split": "test",
+            "revision": WIKITEXT_DATASET_REVISION,
+        }
 
     def _ids(seq_len=96):
         torch.manual_seed(1)
@@ -150,31 +176,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        sys.exit(
-            "test_neutral.py needs torch + transformers "
-            "(the requirements.txt stack). A missing stack is a FAILURE here, "
-            "not a skip."
-        )
-
-    tests = [
-        (name, fn) for name, fn in sorted(globals().items())
-        if name.startswith("test_") and callable(fn)
-    ]
-    assert len(tests) == NEUTRAL_TEST_COUNT, (
-        "expected %d tests, found %d" % (NEUTRAL_TEST_COUNT, len(tests))
-    )
-    failures = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print("PASS %s" % name)
-        except Exception:
-            failures += 1
-            print("FAIL %s" % name)
-            traceback.print_exc()
-    if failures:
-        sys.exit("%d test(s) failed" % failures)
-    print("ALL TESTS PASSED")
+    raise SystemExit(run_suite(globals(), expected_count=NEUTRAL_TEST_COUNT,
+                              missing=MISSING_STACK))

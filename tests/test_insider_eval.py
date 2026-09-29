@@ -1,12 +1,11 @@
 """The shared row machinery driven by insider render/score.
 
-Tiny random CPU model only — this suite must never run on a GPU, and it
-skips cleanly where the ML stack is absent (run_negotiation_eval needs
-torch through utils/models, so this cannot live in the bare-python
-test_insider_pure.py). The chat-tokenizer stub follows test_sweepdriver.py's
-fixture style: every prompt encodes to the same tiny id row and decodes to
-a well-formed insider report, so the scorer's regex path succeeds with no
-LLM fallback.
+Tiny random CPU model only — this suite must never run on a GPU
+(run_negotiation_eval needs torch through utils/models, so this cannot live
+in the bare-python test_insider_pure.py; a missing stack is a loud
+non-zero skip). The shared chat-tokenizer stub encodes every prompt to the
+same tiny id row and here decodes to a well-formed insider report, so the
+scorer's regex path succeeds with no LLM fallback.
 
 Run: python tests/test_insider_eval.py with the requirements.txt stack
 """
@@ -16,10 +15,17 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _fixtures import (  # noqa: E402
+    StubChatTokenizer,
+    run_suite,
+    skip_module_unless_stack,
+    tiny_qwen2_model,
+)
 
 try:
-    import torch
-    from transformers import BatchEncoding, Qwen2Config, Qwen2ForCausalLM
+    import torch  # noqa: F401  (stack marker)
 
     from algoverse.eval import ROW_FIELDS, run_negotiation_eval
     from algoverse.insider import (
@@ -35,50 +41,21 @@ try:
 except ImportError:
     HAVE_STACK = False
 
+MISSING_STACK = skip_module_unless_stack("torch", "transformers")
+INSIDER_EVAL_TEST_COUNT = 4
+
 
 if HAVE_STACK:
     def _tiny_model():
-        torch.manual_seed(0)
-        config = Qwen2Config(
-            vocab_size=128,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=64,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-        )
-        config._attn_implementation = "eager"
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-        return model
+        return tiny_qwen2_model(max_position_embeddings=64)
 
-    # test_sweepdriver.py's ChatTokenizer, insider-flavored: decodes every
-    # generation to a well-formed report whose basis is regex-CONCEALED.
-    class InsiderChatTokenizer:
-        pad_token = None
-        eos_token = "<eos>"
-        pad_token_id = 0
-        eos_token_id = 2
-        padding_side = "right"
+    class InsiderChatTokenizer(StubChatTokenizer):
+        """The shared chat stub, insider-flavored: decodes every generation
+        to a well-formed report whose basis is regex-CONCEALED."""
 
         def __init__(self):
-            self.rendered_messages = []
-
-        def apply_chat_template(self, messages, **kwargs):
-            self.rendered_messages.append(messages)
-            return "<bos> rendered prompt"
-
-        def __call__(self, texts, **kwargs):
-            texts = [texts] if isinstance(texts, str) else texts
-            ids = torch.tensor([[1, 5, 6] for _ in texts], dtype=torch.long)
-            mask = torch.ones_like(ids)
-            return BatchEncoding(
-                {"input_ids": ids, "attention_mask": mask}, tensor_type="pt"
-            )
+            super().__init__()
+            self.rendered_messages = self.successful_messages
 
         def decode(self, tokens, skip_special_tokens=True):
             return (
@@ -242,20 +219,5 @@ if HAVE_STACK:
 
 
 if __name__ == "__main__":
-    import traceback
-
-    if not HAVE_STACK:
-        print("SKIP: torch/transformers not installed")
-        raise SystemExit(0)
-    failures = 0
-    for name, fn in sorted(list(globals().items())):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print("PASS %s" % name)
-            except Exception as exc:
-                failures += 1
-                print("FAIL %s: %s: %s" % (name, type(exc).__name__, exc))
-                traceback.print_exc()
-    print("%s" % ("ALL TESTS PASSED" if failures == 0 else "%d FAILURE(S)" % failures))
-    raise SystemExit(1 if failures else 0)
+    raise SystemExit(run_suite(globals(), expected_count=INSIDER_EVAL_TEST_COUNT,
+                              missing=MISSING_STACK))

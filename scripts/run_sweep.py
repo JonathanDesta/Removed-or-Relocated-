@@ -113,16 +113,18 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    from algoverse.models import DEV_MODEL
+def validate_args(parser, args, dev_model):
+    """The cross-flag rules: the DEV calibration's fixed identity, the
+    research sweep's required flags, and the candidate-benchmark guard.
 
+    dev_model is models.DEV_MODEL, passed in so this runs on bare python.
+    Reports through parser.error; returns args with the DEV defaults filled.
+    """
     if args.dev_calibration:
-        if args.model_id not in (None, DEV_MODEL):
+        if args.model_id not in (None, dev_model):
             parser.error(
                 "--dev-calibration runs the DEV model (%s); drop --model-id"
-                % DEV_MODEL
+                % dev_model
             )
         if args.adapter is not None:
             parser.error(
@@ -130,7 +132,7 @@ def main(argv=None):
             )
         if args.benchmarks_only:
             parser.error("--dev-calibration cannot run candidate benchmarks")
-        args.model_id = DEV_MODEL
+        args.model_id = dev_model
         args.quant = "none"
         if args.out_root is None:
             args.out_root = "results/dev-jsd-calibration"
@@ -151,6 +153,15 @@ def main(argv=None):
                 "--benchmarks-only requires the explicit candidate list in "
                 "--layers; refusing to benchmark every layer by accident"
             )
+    return args
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    from algoverse.models import DEV_MODEL
+
+    validate_args(parser, args, DEV_MODEL)
 
     if args.llm_fallback:
         cli.verify_llm_fallback(
