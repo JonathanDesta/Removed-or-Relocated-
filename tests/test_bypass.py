@@ -584,7 +584,6 @@ if HAVE_ML_STACK:
         field_case("model_id", "other-model", "model_id")
         field_case("train_seed", 1, "train_seed")
         field_case("gen_config.max_new_tokens", 32, "max_new_tokens")
-        field_case("patch_source", "control", "patch_source")
         field_case(
             "gen_config.use_llm_fallback", False, "use_llm_fallback",
             {

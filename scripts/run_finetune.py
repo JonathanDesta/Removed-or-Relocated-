@@ -14,8 +14,8 @@ checkpoint on the control dataset with only the edit window trainable:
         --quant 4bit --data data/finetune/m_c_train.jsonl \
         --objective control --train-seed 42 \
         --init-adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
-        --out-dir $PROJECT/checkpoints/me-qwen7b-s42-l10-14 \
-        --config-json '{"train_layers": [10, 11, 12, 13, 14]}'
+        --out-dir $PROJECT/checkpoints/edit-l07-qwen7b-s42 \
+        --config-json '{"train_layers": [6, 7, 8]}'
 
 The Stage-3 continuation arms (E,D / E,C from M_E; I,D / I,C from M_D) use
 the same --init-adapter form with every layer trainable again (no

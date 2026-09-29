@@ -36,6 +36,9 @@ def _validate_span_len(span_len):
     return span_len
 
 
+# Diagnostics: the in-memory capture (the pipeline spools to disk through
+# response_token_resid_by_layer_to_disk; this variant serves interactive use
+# and the tests).
 def response_token_resid_by_layer(model, tokenizer, texts, response_starts,
                                   span_len=None):
     """Per-layer response-token residual features for probing, bypass-safe.

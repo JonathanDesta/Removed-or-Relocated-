@@ -41,8 +41,9 @@ dependency-free tier.
 """
 
 import json
-import os
 from pathlib import Path
+
+from algoverse.utils import append_jsonl
 
 # Pre-registered probe recipe: recorded conventions, stamped into every
 # probe_auroc row's config.
@@ -339,28 +340,6 @@ _RESULT_FIELDS = {
 }
 
 
-def _append_jsonl(path, record):
-    """Append one JSON line; heal a torn final line first.
-
-    Mirrors utils.append_jsonl (torn-fragment isolation, flush + fsync)
-    without importing utils, so this module's imports stay stdlib-only
-    and the dependency-free tier can run it (the same reason
-    metrics.load_rows has its own JSONL reader).
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(record) + "\n").encode("utf-8")
-    with open(path, "a+b") as fh:
-        fh.seek(0, os.SEEK_END)
-        if fh.tell() > 0:
-            fh.seek(-1, os.SEEK_END)
-            if fh.read(1) != b"\n":
-                fh.write(b"\n")
-        fh.write(payload)
-        fh.flush()
-        os.fsync(fh.fileno())
-
-
 def _finite_or_none(value):
     """None for None/NaN; float otherwise. JSON has no NaN; null is how
     an excluded/unavailable value is recorded."""
@@ -392,7 +371,7 @@ def write_interp_row(out_path, run_meta, analysis, layer, value,
                 "extra field %r collides with an existing row field" % field
             )
         row[field] = extra_value
-    _append_jsonl(out_path, row)
+    append_jsonl(out_path, row)
     return row
 
 

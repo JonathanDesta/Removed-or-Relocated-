@@ -52,18 +52,17 @@ FIT SOURCE — WHOSE direction is scored:
          model, layer count, hidden size, dataset) before any unpickling.
 
 OUTPUTS:
-  --out-dir DIR    legacy: exactly one output (one test set, one fit);
-                   run_id verbatim; with the default position this writes
-                   TODAY'S config byte-for-byte (LEGACY_CONFIG_KEYS).
   --out-root ROOT  one output per (fit, test-set label) at
                    ROOT/<run-id>-<fit>-<label>/interp.jsonl, run_id
                    <run-id>-<fit>-<label>; --test-rows must be LABEL=PATH.
                    One train capture serves every test set and both fits.
-  Every non-legacy row adds the documented keys (feature_position,
-  span_len, exclude_final_line, n_test_no_marker,
+  Every row's config is the probe recipe plus the documented keys
+  (CONFIG_KEYS: transfer, label_source, n_train, n_test, n_test_lied, fit,
+  feature_position, span_len, exclude_final_line, n_test_no_marker,
   n_test_skipped_empty_body, test_rows_label, fit_source) and, for a fixed
-  fit, config.fit = "fixed_direction_from:<fit_run_id>". config.status is
-  never changed: it is the stamped identity of every Appendix A row.
+  fit, config.fit = "fixed_direction_from:<fit_run_id>". Rows written by
+  earlier versions also carry a config.status string; resume compares only
+  the current keys, so those outputs still resume.
 
 TEST-SET CHOICE: the test rows must contain BOTH lied and
 did-not-lie incentive rows (a saturated M_D checkpoint is refused with the
@@ -77,12 +76,11 @@ scratch dir must never be under results/ (results are JSONL only).
 
     python scripts/run_probe_transfer.py \
         --model-id Qwen/Qwen2.5-7B-Instruct --quant 4bit \
-        --train-dataset data/instructed_pairs/instructed_pairs_qwen2-5.jsonl \
-        --feature-position final_prompt \
-        --test-rows d1=results/diag-md-qwen7b-step8/rows.jsonl \
-        --test-rows d2=results/e3-id-t008-l07-qwen7b-s42/rows.jsonl \
-        --run-id diag-probe4-fp-m0-qwen7b --out-root results \
-        --save-fit probe_fits/qwen7b/fp --probe-scratch-dir ~/probe_scratch
+        --train-dataset $PROJECT/data/instructed_pairs/qwen7b/instructed_pairs_qwen2-5.jsonl \
+        --feature-position response_tokens \
+        --test-rows own8=$PROJECT/results/diag-md-qwen7b-step8/rows.jsonl \
+        --run-id diag-probe5-rt-m0-qwen7b --out-root $PROJECT/results \
+        --save-fit $PROJECT/probe_fits/qwen7b/rt --probe-scratch-dir ~/probe_scratch
 """
 import argparse
 import datetime
@@ -110,20 +108,15 @@ FEATURE_POSITIONS = {
     "final_prompt": "final_prompt_token",
 }
 FIT_OWN, FIT_FIXED = "own", "fixed"
-LEGACY_STATUS = "exploratory-diagnostic; unratified"
-# The config every legacy diag-probe3 row carries. A legacy invocation
-# must reproduce exactly this key set; everything else adds NEW_CONFIG_KEYS.
-LEGACY_CONFIG_KEYS = (
-    "test_size", "random_state", "max_iter", "C", "pipeline", "aggregation",
-    "aggregation_source", "transfer", "label_source", "n_train", "n_test",
-    "n_test_lied", "fit", "status",
-)
-NEW_CONFIG_KEYS = (
+# Every probe_auroc row's config keys, in order: the probe recipe, then the
+# transfer bookkeeping, then the position/stratum keys (module docstring).
+CONFIG_KEYS = tuple(PROBE_RECIPE) + (
+    "transfer", "label_source", "n_train", "n_test", "n_test_lied", "fit",
     "feature_position", "span_len", "exclude_final_line", "n_test_no_marker",
     "n_test_skipped_empty_body", "test_rows_label", "fit_source",
 )
 FIT_META_NAME = "fit_meta.json"
-# Per-output sidecars (2026-09-02, stratified design): every response's
+# Per-output sidecars (stratified design): every response's
 # per-layer score is persisted so any later stratification is a CPU
 # re-analysis of stored numbers, never a re-run.
 SCORES_NAME = "scores.jsonl"          # one line per (layer, kind): {"layer","kind","scores"}
@@ -160,39 +153,6 @@ def fit_transfer_probe(train_tokens, train_token_labels):
     ).fit(train_tokens, train_token_labels)
 
 
-def score_transfer_probe(clf, test_responses, test_labels, test_groups):
-    """Score a fitted probe on test responses: (auroc, ci_low, ci_high, acc).
-
-    test_responses: list of [n_tokens_i, d] arrays; each response's score is
-    the mean of its per-token decision scores (aggregate_response_scores).
-    """
-    import numpy as np
-    from sklearn.metrics import roc_auc_score
-
-    from algoverse.interp import _group_bootstrap_auroc_ci
-
-    scores = np.asarray(aggregate_response_scores(
-        [clf.decision_function(np.asarray(tokens)) for tokens in test_responses]
-    ))
-    y = np.asarray(test_labels)
-    auroc = float(roc_auc_score(y, scores))
-    ci_low, ci_high = _group_bootstrap_auroc_ci(y, scores, test_groups)
-    accuracy = float(((scores > 0) == y.astype(bool)).mean())
-    return auroc, ci_low, ci_high, accuracy
-
-
-def transfer_probe_layer(train_tokens, train_token_labels, test_responses,
-                         test_labels, test_groups):
-    """Fit on one layer's train tokens and score the test set (own fit).
-
-    train_tokens: [n_tokens, d] array (already flattened across train
-    responses); train_token_labels: per-token labels. Returns
-    (auroc, ci_low, ci_high, accuracy). Pure given arrays.
-    """
-    clf = fit_transfer_probe(train_tokens, train_token_labels)
-    return score_transfer_probe(clf, test_responses, test_labels, test_groups)
-
-
 def parse_test_rows_spec(spec):
     """"LABEL=PATH" -> (label, path); a bare PATH -> (None, path).
 
@@ -225,22 +185,9 @@ def capture_spans(examples, feature_position):
     return starts, None
 
 
-def plan_outputs(run_id, out_dir, out_root, labels, fits):
-    """[{fit, label, run_id, out_path}] for this invocation.
-
-    Legacy (--out-dir): exactly one output, run_id verbatim. --out-root:
-    one output per (fit, label) named <run-id>-<fit>-<label>.
-    """
-    if out_dir is not None:
-        if len(labels) != 1 or len(fits) != 1:
-            raise ValueError(
-                "--out-dir holds exactly one output; use --out-root for "
-                "several test sets or own+fixed fits"
-            )
-        return [{
-            "fit": fits[0], "label": labels[0], "run_id": run_id,
-            "out_path": Path(out_dir) / "interp.jsonl",
-        }]
+def plan_outputs(run_id, out_root, labels, fits):
+    """[{fit, label, run_id, out_path}] for this invocation: one output per
+    (fit, label), named <run-id>-<fit>-<label> under out_root."""
     outputs = []
     for fit in fits:
         for label in labels:
@@ -254,8 +201,8 @@ def plan_outputs(run_id, out_dir, out_root, labels, fits):
 
 def build_config(*, train_dataset, test_path, n_train, n_test, n_test_lied,
                  fit_tag, feature_position, span_len, exclude_final_line,
-                 stats, label, fit_meta, legacy):
-    """The probe_auroc config for one output (see the module docstring)."""
+                 stats, label, fit_meta):
+    """The probe_auroc config for one output (CONFIG_KEYS, in order)."""
     config = dict(PROBE_RECIPE)
     config.update({
         "transfer": True,
@@ -265,10 +212,7 @@ def build_config(*, train_dataset, test_path, n_train, n_test, n_test_lied,
         "n_test": n_test,
         "n_test_lied": n_test_lied,
         "fit": "all_train_examples_no_holdout",
-        "status": LEGACY_STATUS,
     })
-    if legacy:
-        return config
     stats = stats or {}
     config.update({
         "feature_position": FEATURE_POSITIONS[feature_position],
@@ -559,13 +503,10 @@ def build_parser():
     parser.add_argument("--test-rows", action="append", required=True,
                         metavar="[LABEL=]PATH",
                         help="results rows.jsonl with BOTH lied and "
-                             "did-not-lie valid incentive rows; LABEL=PATH "
-                             "(repeatable) with --out-root")
+                             "did-not-lie valid incentive rows, as "
+                             "LABEL=PATH (repeatable)")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--out-dir", default=None,
-                        help="legacy single output: <out-dir>/interp.jsonl, "
-                             "run_id verbatim; fresh diag-* directory")
-    parser.add_argument("--out-root", default=None,
+    parser.add_argument("--out-root", required=True,
                         help="one output per (fit, label) at "
                              "<out-root>/<run-id>-<fit>-<label>/interp.jsonl")
     parser.add_argument("--feature-position", default="response_tokens",
@@ -595,8 +536,6 @@ def main(argv=None, _load_model=None):
     _refuse_under_results(parser, args.probe_scratch_dir, "--probe-scratch-dir")
     _refuse_under_results(parser, args.save_fit, "--save-fit")
     _refuse_under_results(parser, args.use_fit, "--use-fit")
-    if bool(args.out_dir) == bool(args.out_root):
-        parser.error("give exactly one of --out-dir (legacy) or --out-root")
     if args.no_own_fit and not args.use_fit:
         parser.error("--no-own-fit needs --use-fit (nothing would be scored)")
     if args.no_own_fit and args.save_fit:
@@ -604,21 +543,11 @@ def main(argv=None, _load_model=None):
 
     parsed = [parse_test_rows_spec(spec) for spec in args.test_rows]
     labels = [label for label, _ in parsed]
-    if args.out_root:
-        if any(label is None for label in labels):
-            parser.error("--out-root needs every --test-rows as LABEL=PATH")
-        if len(set(labels)) != len(labels):
-            parser.error("--test-rows labels must be unique")
-    else:
-        if len(parsed) != 1:
-            parser.error("--out-dir takes exactly one --test-rows")
+    if any(label is None for label in labels):
+        parser.error("every --test-rows must be LABEL=PATH")
+    if len(set(labels)) != len(labels):
+        parser.error("--test-rows labels must be unique")
     fits = ([] if args.no_own_fit else [FIT_OWN]) + ([FIT_FIXED] if args.use_fit else [])
-    if args.out_dir and len(fits) > 1:
-        parser.error("--out-dir holds one output; use --out-root for own+fixed")
-    legacy = (
-        bool(args.out_dir) and fits == [FIT_OWN]
-        and args.feature_position == "response_tokens" and labels[0] is None
-    )
     exclude_final_line = args.feature_position == "response_excl_claim"
     # Fail on a missing/incomplete fit dir BEFORE the model download.
     fit_meta = read_fit_meta(args.use_fit) if args.use_fit else None
@@ -666,7 +595,7 @@ def main(argv=None, _load_model=None):
         train_examples = load_probe_dataset(args.train_dataset)
         print("train: %d instructed-pairs examples" % len(train_examples))
 
-    outputs = plan_outputs(args.run_id, args.out_dir, args.out_root, labels, fits)
+    outputs = plan_outputs(args.run_id, args.out_root, labels, fits)
     by_label = {bundle["label"]: bundle for bundle in test_sets}
     for output in outputs:
         bundle = by_label[output["label"]]
@@ -689,7 +618,7 @@ def main(argv=None, _load_model=None):
             fit_tag=output["fit"], feature_position=args.feature_position,
             span_len=span_len, exclude_final_line=exclude_final_line,
             stats=bundle["stats"], label=output["label"],
-            fit_meta=fit_meta, legacy=legacy,
+            fit_meta=fit_meta,
         )
         output["pending"] = [
             layer for layer in range(n_layers)
@@ -843,19 +772,14 @@ def main(argv=None, _load_model=None):
                     fits_for = own_fits if output["fit"] == FIT_OWN else fixed_fits
                     clf = fits_for.get(layer)
                     if responses is None or clf is None:
-                        if not _interp_done(output["out_path"], output["run_meta"],
-                                            "probe_auroc", layer, output["config"]):
-                            excluded = dict(output["config"])
-                            excluded["excluded_bypassed_layer"] = True
-                            write_interp_row(
-                                output["out_path"], output["run_meta"],
-                                "probe_auroc", layer, None, None, None, excluded,
-                                extra={"accuracy": None},
-                            )
-                        write_scores(out_dir, layer, "probe", [])
-                        print("[%s/%s] layer %d: structural null (bypassed)"
-                              % (output["fit"], output["label"] or "test", layer))
-                        continue
+                        # The probed model is loaded intact, so every layer
+                        # has activations and (after the fit) a probe.
+                        raise RuntimeError(
+                            "layer %d has %s; the probed model is loaded "
+                            "intact, so every layer must be scorable"
+                            % (layer, "no captured activations"
+                               if responses is None else "no fitted probe")
+                        )
                     scores = response_scores(clf, responses)
                     y = np.asarray(bundle["labels"], dtype=bool)
                     if not _interp_done(output["out_path"], output["run_meta"],

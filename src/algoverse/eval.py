@@ -288,7 +288,6 @@ def generate_batch(model, tokenizer, message_lists, max_new_tokens=256,
 def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                          model_id, conditions=CONDITIONS,
                          adapter_path=None, bypassed_layer=None,
-                         patch_layer=None, patch_source=None,
                          checkpoint_step=None, arm=None,
                          batch_size=4, max_new_tokens=256, do_sample=False,
                          seed=42, train_seed=None, resume=True, quant_label=None,
@@ -328,11 +327,12 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
     records whether the openai provider used its default or a custom
     endpoint: provenance only, not guarded on resume.
 
-    Patch/checkpoint/arm fields are caller-supplied bookkeeping. Bypass
+    Checkpoint and arm fields are caller-supplied bookkeeping. Bypass
     bookkeeping is cross-checked against the hook actually installed on the
     live model, and its implementation provenance is derived from that model.
-    Bypass and patch are recorded separately because they are different
-    causal evidence and must never blur together in analysis.
+    The patch_layer and patch_source row fields are always null: they name
+    an intervention this design does not use and stay in ROW_FIELDS so every
+    row, old and new, has the same shape.
 
     Returns every row for this run_id (previously existing + newly made).
     """
@@ -420,8 +420,6 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
         "seed": seed,
         "train_seed": train_seed,
         "bypassed_layer": bypassed_layer,
-        "patch_layer": patch_layer,
-        "patch_source": patch_source,
     }
     guarded_gen_fields = (
         "bypass_impl",
@@ -540,8 +538,8 @@ def run_negotiation_eval(model, tokenizer, scenarios, run_id, out_path,
                 "model_id": model_id,
                 "adapter_path": adapter_path,
                 "bypassed_layer": bypassed_layer,
-                "patch_layer": patch_layer,
-                "patch_source": patch_source,
+                "patch_layer": None,
+                "patch_source": None,
                 "checkpoint_step": checkpoint_step,
                 "arm": arm,
                 "condition": condition,
@@ -714,8 +712,8 @@ def _pick_metric(task_results, prefixes):
     lm-eval metric keys look like "exact_match,strict-match" or "acc,none":
     "<metric>,<filter>", with the standard error under
     "<metric>_stderr,<filter>". The exact metric/filter can shift between
-    versions, so we match a requested prefix against the metric part and
-    derive the matching stderr key by inserting "_stderr" before the comma.
+    versions, so the requested prefix is matched against the metric part and
+    the matching stderr key derived by inserting "_stderr" before the comma.
     Fails loudly if nothing matches.
     """
     for prefix in prefixes:
@@ -800,7 +798,7 @@ def run_lm_eval_benchmarks(model, tokenizer, out_path, run_meta,
         11,400. Classic footgun.
       - GSM8K is one task, so gsm8k_limit means what it says. It is
         5-shot generative, which makes it the slow benchmark.
-      - We never enable chat templating here, and that setting must stay
+      - Chat templating is never enabled here, and that setting must stay
         identical across every checkpoint: absolute scores don't matter,
         deltas do, and flipping formatting mid-project destroys them.
 
@@ -911,6 +909,8 @@ def _sliding_windows(seq_len, max_length, stride):
             break
 
 
+# Diagnostic reference: the stdlib JSD the torch pass is checked against
+# (tests/test_neutral_pure.py, tests/test_neutral.py); not a pipeline caller.
 def jsd_nats(p, q):
     """Jensen-Shannon divergence between two probability sequences, in nats.
 
@@ -1195,8 +1195,12 @@ def neutral_distribution_pass(model, tokenizer, layer_idx, n_tokens=20000,
 # ---------------------------------------------------------------------------
 
 
-def _gate1_pool_errors(rows_by_name):
-    """Return publishability defects in Gate-1 negotiation row coverage."""
+def _gate1_pool_errors(rows_by_name, names=("M_0", "M_D")):
+    """Return publishability defects in gate negotiation row coverage.
+
+    names are the model keys the gate takes (Gate 1: M_0 and M_D; the edit
+    gate adds M_E); any other key is a defect, not a third row.
+    """
     from collections import Counter
 
     expected_ids = {
@@ -1209,8 +1213,13 @@ def _gate1_pool_errors(rows_by_name):
         for condition in CONDITIONS
     }
     errors = []
-    names = ["M_0", "M_D"]
-    names.extend(name for name in rows_by_name if name not in names)
+    names = list(names)
+    for name in rows_by_name:
+        if name not in names:
+            errors.append(
+                "unknown model key %r; the gate takes %s"
+                % (name, " and ".join(names))
+            )
     for name in names:
         rows = rows_by_name.get(name)
         if rows is None:
@@ -1328,7 +1337,7 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
                  reference="M_0", dev=False) -> str:
     """The Gate-1 decision table, printed and returned as markdown.
 
-    rows_paths        {"M_0": ".../rows.jsonl", "M_D": ..., "M_C": ...}
+    rows_paths        {"M_0": ".../rows.jsonl", "M_D": ".../rows.jsonl"}
     competence_paths  same keys -> competence.jsonl paths (optional)
 
     The gate verifies the GAIN
@@ -1336,9 +1345,8 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
     0), not the absolute tau(M_D): a base model already incentive-sensitive
     would otherwise pass without fine-tuning changing anything. It also
     checks that M_D keeps its honest task-competence and general
-    capabilities. M_C, if provided (a model trained on the honest control
-    objective), adds a negative-control check; the final design trains no
-    such standalone checkpoint.
+    capabilities. Any other model key is a publishability defect (the
+    gate takes exactly M_0 and M_D).
 
     Thresholds are arguments and printed with the decision, so a reader sees
     exactly what PASS meant. A decision needs both M_0 and M_D; before that
@@ -1438,12 +1446,10 @@ def gate1_report(rows_paths, competence_paths=None, n_boot=2000, seed=0,
         lines.append("tau gain (M_D - M_0): %s  [%s, %s]" % (
             fmt(md_gain["gain"]), fmt(md_gain["gain_ci_low"]), fmt(md_gain["gain_ci_high"]),
         ))
-        mc_gap = stats["M_C"]["gap"] if "M_C" in stats else None
         decision = gate1_decision(
             md_gain=md_gain,
             md_competence=stats["M_D"]["competence"]["competence"],
             m0_competence=stats["M_0"]["competence"]["competence"],
-            mc_gap=mc_gap,
             bench=bench or None,
             reference=reference,
             tau_gain_min=tau_gain_min,

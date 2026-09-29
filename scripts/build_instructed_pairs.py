@@ -43,8 +43,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Pinned raw URL for the source CSV (repo layout verified 2026-08-16:
-# data/facts/facts_true_false.csv on the main branch). The manifest's
+# Pinned raw URL for the source CSV (data/facts/facts_true_false.csv on the
+# repository's main branch). The manifest's
 # source_sha256 guards against content drift behind this mutable ref.
 DEFAULT_SOURCE = (
     "https://raw.githubusercontent.com/andyzoujm/representation-engineering/"

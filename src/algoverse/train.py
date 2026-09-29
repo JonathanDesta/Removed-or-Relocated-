@@ -28,10 +28,10 @@ write-up may relabel the axis as "updates completed" (index + 1); this code
 never does.
 
 Module-level imports stay stdlib plus stdlib-importable algoverse modules
-(data, tasks and eval qualify; utils does NOT because it imports numpy and
-torch at import time), so this module imports on a box with no ML stack and
-the pure tests run there. torch, peft, transformers and utils are imported
-inside the functions that need them, mirroring eval.py's discipline.
+(data, tasks, eval and utils all qualify), so this module imports on a box
+with no ML stack and the pure tests run there. torch, peft and transformers
+are imported inside the functions that need them, mirroring eval.py's
+discipline.
 """
 
 import dataclasses
@@ -87,11 +87,10 @@ class TrainConfig:
       (https://huggingface.co/docs/peft/package_reference/lora), so
       omitting it would silently train an attention-only adapter while the
       manifest still recorded all-linear.
-    - lora_r=16, lora_alpha=16 and lora_dropout=0.05 are T2's effective
-      pre-committed fallback values. The initial r=64/alpha=16/dropout=0.1
-      values followed Dettmers et al.'s Table 9; Appendix A.1 contradicts
-      that dropout by recommending 0.05 for 7B/13B. The fallback applies to
-      every family together, never one family and never the batch split.
+    - lora_r=16, lora_alpha=16 and lora_dropout=0.05 are the pre-committed
+      values: Dettmers et al.'s Appendix A.1 recommends dropout 0.05 for
+      7B/13B models. They apply to every family together, never one family
+      and never the batch split.
     - learning_rate 2e-4 and a constant schedule: both papers at this scale
       (https://arxiv.org/abs/2106.09685, https://arxiv.org/abs/2305.14314).
     - max_grad_norm 0.3 and Adam betas: Dettmers et al.'s 7B recipe.
@@ -368,8 +367,9 @@ def check_system_turns(records) -> None:
 def check_objective(objective, meta_rows, data_manifest) -> None:
     """Cross-check the caller's arm label against what the file contains.
 
-    objective is caller bookkeeping ("this is the M_D arm"), and a path
-    typo would otherwise train "M_C" on m_d_train.jsonl silently. The check
+    objective is caller bookkeeping ("this is the deceptive objective"),
+    and a path typo would otherwise train the control objective on
+    m_d_train.jsonl silently. The check
     uses BOTH the per-row behavior labels and the manifest's recorded
     composition, so a truncated or hand-mixed file also fails loudly
     instead of producing a quietly wrong arm.
@@ -404,8 +404,8 @@ def check_objective(objective, meta_rows, data_manifest) -> None:
 def check_training_grid(meta_rows, records) -> None:
     """Refuse stale or eval-overlapping fine-tuning data.
 
-    The training grid changed on 2026-08-14 and all earlier builds were
-    invalidated. This verifies the rows against the live constants
+    The training grid is fixed by the live constants; a build from an
+    earlier grid is refused. This verifies the rows against those constants
     rather than trusting a self-reported manifest version, then independently
     checks the value-level train/eval firewall across scenarios and replies.
     """
@@ -532,6 +532,8 @@ def encode_conversation(tokenizer, messages, max_seq_len,
     return input_ids, labels
 
 
+# Diagnostics: no pipeline caller; kept for interactive checks of a dataset
+# against a tokenizer (exercised by tests/test_train*.py).
 def encode_preflight(tokenizer, records, max_seq_len=None) -> dict:
     """Check the masking assumptions and measure token lengths, no training.
 
@@ -1161,7 +1163,7 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
 
     # 2. Seed FIRST, before the adapter is attached: peft draws lora_A's
     # init from the global torch RNG, so seeding after attach would leave
-    # the initialization governed by OS entropy and break the spec's
+    # the initialization governed by OS entropy and break the
     # matched-random-seeds requirement. A later resume overwrites RNG state
     # from resume.pt.
     set_seed(train_seed)
@@ -1177,13 +1179,12 @@ def _train_lora_impl(model, tokenizer, data_path, out_dir, model_id, objective,
     )
 
     # 4. Adapter: attach a fresh one, or accept a trainable continuation
-    # model (the Stage-2 path) unchanged.
+    # model (a checkpoint loaded with is_trainable=True) unchanged.
     if isinstance(model, PeftModel):
         if not any(parameter.requires_grad for parameter in model.parameters()):
             raise ValueError(
                 "the passed PeftModel has no trainable parameters; load the "
-                "adapter with is_trainable=True (the Stage-2/loader plan's "
-                "deliverable) before continuing training"
+                "adapter with is_trainable=True before continuing training"
             )
     else:
         if derived_quant == "4bit":
@@ -1662,6 +1663,7 @@ def adopt_checkpoint_identity(adapter_path, checkpoint_step, train_seed):
     return checkpoint_step, train_seed, True
 
 
+# Diagnostics: the loss-curve reader (no pipeline caller; tests/test_train.py).
 def read_train_log(path) -> list:
     """Read train_log.jsonl, keeping the LAST row per step, sorted by step.
 

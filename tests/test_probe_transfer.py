@@ -7,7 +7,6 @@ ways the new modes can silently lie, each caught:
   2. a persisted fit that does not reproduce its own decision function;
   3. --out-root outputs, --save-fit, --use-fit, resume, and the
      position/fit refusal, end to end through main();
-  4. a legacy invocation no longer writing the diag-probe3 config.
 
 Run: python tests/test_probe_transfer.py with the requirements.txt stack
 """
@@ -20,7 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-PROBE_TRANSFER_TEST_COUNT = 5
+PROBE_TRANSFER_TEST_COUNT = 3
 
 try:
     import numpy as np
@@ -137,15 +136,6 @@ if HAVE_STACK:
             })
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
-    def test_fit_then_score_equals_transfer_probe_layer():
-        script = _load_script()
-        train_tokens, train_labels, test, y, groups = _synthetic_arrays()
-        clf = script.fit_transfer_probe(train_tokens, train_labels)
-        split = script.score_transfer_probe(clf, test, y, groups)
-        joint = script.transfer_probe_layer(train_tokens, train_labels, test, y, groups)
-        assert split == joint, (split, joint)
-        assert split[0] > 0.9
-
     def test_fit_persistence_round_trip():
         script = _load_script()
         train_tokens, train_labels, test, _y, _groups = _synthetic_arrays()
@@ -197,7 +187,7 @@ if HAVE_STACK:
                 assert [r["layer"] for r in rows] == [0, 1, 2, 3]
                 assert all(r["run_id"] == "t-own-%s" % label for r in rows)
                 config = rows[0]["config"]
-                assert set(config) - {"ci"} == set(script.LEGACY_CONFIG_KEYS) | set(script.NEW_CONFIG_KEYS)
+                assert set(config) - {"ci"} == set(script.CONFIG_KEYS)
                 assert config["feature_position"] == "final_prompt_token"
                 assert config["span_len"] == 1 and config["test_rows_label"] == label
                 assert config["fit"] == "all_train_examples_no_holdout"
@@ -292,32 +282,6 @@ if HAVE_STACK:
             before = {p.name: p.read_text() for p in out.iterdir()}
             assert script.main(argv, _load_model=lambda args: (model, tokenizer)) == 0
             assert {p.name: p.read_text() for p in out.iterdir()} == before
-
-    def test_legacy_invocation_writes_old_config_exactly():
-        script = _load_script()
-        model, tokenizer = _tiny_model(), StubTokenizer()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            pairs = tmp / "pairs.jsonl"
-            _write_train_jsonl(pairs)
-            _write_rows(tmp / "rows.jsonl", seed=42)
-            out = tmp / "diag-legacy"
-            assert script.main(
-                ["--model-id", "tiny", "--quant", "none",
-                 "--train-dataset", str(pairs), "--test-rows", str(tmp / "rows.jsonl"),
-                 "--run-id", "legacy", "--out-dir", str(out),
-                 "--probe-scratch-dir", str(tmp / "scratch")],
-                _load_model=lambda args: (model, tokenizer),
-            ) == 0
-            rows = [r for r in load_rows(out / "interp.jsonl") if r["analysis"] == "probe_auroc"]
-            assert [r["run_id"] for r in rows] == ["legacy"] * 4
-            config = rows[0]["config"]
-            assert set(config) - {"ci"} == set(script.LEGACY_CONFIG_KEYS)
-            assert config["fit"] == "all_train_examples_no_holdout"
-            assert config["status"] == "exploratory-diagnostic; unratified"
-            assert config["label_source"].startswith("transfer:probe_dataset:")
-            assert config["n_test_lied"] == 2
-
 
 if __name__ == "__main__":
     import traceback

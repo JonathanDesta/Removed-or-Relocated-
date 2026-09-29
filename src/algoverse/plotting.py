@@ -61,15 +61,20 @@ from algoverse import figures, metrics
 CHECKPOINT_STEPS = (8, 70, 281)
 
 # Color-blind-safe categorical slots, in fixed order (never cycled past what
-# is listed). First three validate all-pairs; the full five validate adjacent
-# pairs. Validated 2026-08-16 with the dataviz palette checker.
+# is listed). The first five were validated with a colour-vision-deficiency
+# palette checker (first three all-pairs, the five adjacent pairs); PURPLE
+# and GREY are taken from Petroff's colour-blind-safe six-colour scheme and
+# complete the tau-bars series (two fixed arms plus up to five edited
+# checkpoints, each with its own colour).
 BLUE = "#2a78d6"
 ORANGE = "#eb6834"
 AQUA = "#1baf7a"
 YELLOW = "#eda100"
 RED = "#e34948"
-SERIES = (BLUE, ORANGE, AQUA, YELLOW, RED)
-MARKERS = ("o", "s", "^", "D", "v")
+PURPLE = "#964a8b"
+GREY = "#9c9ca1"
+SERIES = (BLUE, ORANGE, AQUA, YELLOW, RED, PURPLE, GREY)
+MARKERS = ("o", "s", "^", "D", "v", "P", "X")
 
 TEXT = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
@@ -80,9 +85,10 @@ GAP_COLOR = "#52514e"      # annotated-gap marks: neutral ink, not a series hue
 # tau bars: fixed color per arm label, stable regardless of which models or
 # arms happen to be present (color follows the entity, never its rank).
 # Labels outside this table (the edited checkpoints M_E-<window>) are ordered
-# after it and take the remaining series colors in order.
-ARM_COLORS = {"M_0": BLUE, "M_D": ORANGE, "M_C": AQUA}
-ARM_ORDER = ("M_0", "M_D", "M_C")
+# after it and take the remaining series colors in order; more labels than
+# spare colors is refused rather than drawn with a shared color.
+ARM_COLORS = {"M_0": BLUE, "M_D": ORANGE}
+ARM_ORDER = ("M_0", "M_D")
 
 _STYLE = {
     "figure.figsize": (6.4, 4.0),
@@ -702,11 +708,21 @@ def render_tau_bars(records, out_base, title=None, dpi=300, notes=()):
     gaps = []       # (model, label, reason)
     gap_marks = []
     extra_colors = [c for c in SERIES if c not in ARM_COLORS.values()]
+    extra_labels = [label for label in labels if label not in ARM_COLORS]
+    if len(extra_labels) > len(extra_colors):
+        raise ValueError(
+            "tau bars: %d labels outside ARM_COLORS (%s) but only %d spare "
+            "series colors; a shared color would misread"
+            % (len(extra_labels), ", ".join(str(l) for l in extra_labels),
+               len(extra_colors))
+        )
+    colors = {}
 
     for j, label in enumerate(labels):
-        color = ARM_COLORS.get(
-            label, extra_colors[j % len(extra_colors)] if extra_colors else TEXT_SECONDARY
-        )
+        color = ARM_COLORS.get(label)
+        if color is None:
+            color = extra_colors[extra_labels.index(label)]
+        colors[str(label)] = color
         xs, ys, lo, hi = [], [], [], []
         for i, model in enumerate(models):
             matches = [
@@ -777,6 +793,7 @@ def render_tau_bars(records, out_base, title=None, dpi=300, notes=()):
         "paths": _save(fig, out_base, dpi=dpi),
         "models": [str(m) for m in models],
         "labels": [str(l) for l in labels],
+        "colors": colors,
         "gaps": gaps,
         "notes": [str(n) for n in notes],
         "title": resolved_title,

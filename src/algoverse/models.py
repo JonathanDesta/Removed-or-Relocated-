@@ -171,7 +171,8 @@ def bypassed_layer(model):
 
 
 def bypassed_layers(model):
-    """Every causally-dead layer index, sorted (at most one today).
+    """Every causally-dead layer index, sorted (one or none: a single
+    temporary bypass).
 
     Interp discipline: probe analyses exclude ALL of these — a bypassed
     block's residual contribution is discarded, so its activations are not

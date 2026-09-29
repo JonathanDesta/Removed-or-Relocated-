@@ -714,28 +714,24 @@ def test_incentive_gap_and_competence_on_it_rows():
     assert competence["n_valid_control"] == 4
 
 
-def test_summarize_runs_keys_on_the_environment_fingerprint():
-    # gen_identity's tuple is used as a dict KEY, and the fingerprint is a
-    # dict: grouping must canonicalize it rather than crash on an
-    # unhashable value. And two runs that differ only by environment must
-    # not be pooled — the analysis-side half of the resume guard.
-    rows = []
-    for index, fingerprint in enumerate(
-        (insider.ENVIRONMENT_FINGERPRINT,
-         dict(insider.ENVIRONMENT_FINGERPRINT, classify_instruction_sha256="0" * 64))
+def test_gen_identity_canonicalizes_the_environment_fingerprint():
+    # gen_identity's tuple is used as a pairing key, and the fingerprint is
+    # a dict: it must be canonicalized rather than crash as an unhashable
+    # value, and two runs that differ only by environment must not pair --
+    # the analysis-side half of the resume guard.
+    identities = []
+    for fingerprint in (
+        insider.ENVIRONMENT_FINGERPRINT,
+        dict(insider.ENVIRONMENT_FINGERPRINT, classify_instruction_sha256="0" * 64),
     ):
-        for condition in (INCENTIVE, CONTROL):
-            row = _it_row("it-s%02d" % index, condition, CONCEALING_REPORT)
-            row["gen_config"] = {"environment": fingerprint}
-            rows.append(row)
-    summaries = metrics.summarize_runs(rows, n_boot=20, seed=0)
-    assert len(summaries) == 2, "two environments were pooled into one run"
-    recorded = {summary["environment"] for summary in summaries}
-    assert len(recorded) == 2
-    assert all(isinstance(value, str) for value in recorded)  # canonicalized
+        row = _it_row("it-s00", INCENTIVE, CONCEALING_REPORT)
+        row["gen_config"] = {"environment": fingerprint}
+        identities.append(metrics.gen_identity(row))
+    assert len({identities[0], identities[1]}) == 2, "two environments paired"
+    assert all(isinstance(identity[1], str) for identity in identities)
 
     # A row with no gen_config keeps the identity it always had (None), so
-    # every pre-existing negotiation run groups exactly as before.
+    # every pre-existing negotiation run pairs exactly as before.
     legacy = _it_row("it-legacy", INCENTIVE, CONCEALING_REPORT)
     legacy.pop("gen_config", None)
     assert metrics.gen_identity(legacy)[1] is None

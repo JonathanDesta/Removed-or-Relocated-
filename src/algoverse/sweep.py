@@ -251,7 +251,7 @@ def load_competence_records(competence_inputs):
     competence_inputs maps a layer index (or the literal "base" for the
     intact model's reference values) to competence.jsonl-style records or a
     path to them. A duplicated metric within one key is malformed and
-    refused, mirroring figures.index_competence.
+    refused.
     """
     index = {}
     for key, source in (competence_inputs or {}).items():
@@ -499,7 +499,7 @@ def evaluate_sweep(base, layer_inputs, requested_layers=None,
             "A_l": a_l,
         })
 
-    pareto = figures.pareto_points(curve, damage_metric="task_competence")
+    pareto = figures.pareto_points(curve)
     frontier = figures.pareto_frontier(pareto)
 
     effect_layers = [e["layer"] for e in entries if e["effect"] is True]

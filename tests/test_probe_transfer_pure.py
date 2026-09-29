@@ -5,12 +5,11 @@ The ways the transfer script's new modes can silently lie, each caught:
   2. final_prompt reading the FIRST response token instead of the last
      prompt token, or accepting an example with no prompt token at all;
   3. --out-root outputs colliding (fit/label not in the run id);
-  4. a legacy invocation drifting from the diag-probe3 config;
-  5. the new schema adding keys silently (or forgetting one);
-  6. --use-fit unpickling a fit made for another position/model/dataset;
-  7. the claim-line stripper keeping the LAST marker's line, or dropping
+  4. the config schema adding keys silently (or forgetting one);
+  5. --use-fit unpickling a fit made for another position/model/dataset;
+  6. the claim-line stripper keeping the LAST marker's line, or dropping
      an unmarked response;
-  8. the exclude-final-line builder scoring the claim tokens anyway.
+  7. the exclude-final-line builder scoring the claim tokens anyway.
 
 Stdlib only (no numpy/sklearn: those paths live in test_probe_transfer.py).
 
@@ -95,20 +94,11 @@ def test_capture_spans_final_prompt_shifts_and_refuses_zero_start():
 
 def test_plan_outputs_run_id_and_paths():
     script = _load_script()
-    outputs = script.plan_outputs("base", None, "/r", ["d1", "d2"], ["own", "fixed"])
+    outputs = script.plan_outputs("base", "/r", ["d1", "d2"], ["own", "fixed"])
     assert [o["run_id"] for o in outputs] == [
         "base-own-d1", "base-own-d2", "base-fixed-d1", "base-fixed-d2"]
     assert outputs[0]["out_path"] == Path("/r/base-own-d1/interp.jsonl")
     assert outputs[3]["fit"] == "fixed" and outputs[3]["label"] == "d2"
-    legacy = script.plan_outputs("verbatim", "/o", None, [None], ["own"])
-    assert legacy == [{"fit": "own", "label": None, "run_id": "verbatim",
-                       "out_path": Path("/o/interp.jsonl")}]
-    try:
-        script.plan_outputs("x", "/o", None, ["a", "b"], ["own"])
-    except ValueError as exc:
-        assert "exactly one output" in str(exc)
-    else:
-        raise AssertionError("--out-dir accepted two test sets")
 
 
 def _config(script, **overrides):
@@ -117,47 +107,39 @@ def _config(script, **overrides):
         n_test=100, n_test_lied=51, fit_tag="own",
         feature_position="response_tokens", span_len=None,
         exclude_final_line=False, stats={}, label=None, fit_meta=None,
-        legacy=True,
     )
     kwargs.update(overrides)
     return script.build_config(**kwargs)
 
 
-def test_legacy_config_is_byte_identical_to_old_schema():
+def test_config_keys_are_exactly_the_documented_set_in_order():
     script = _load_script()
-    config = _config(script)
-    assert tuple(config) == script.LEGACY_CONFIG_KEYS
-    assert config["status"] == "exploratory-diagnostic; unratified"
-    assert config["fit"] == "all_train_examples_no_holdout"
-    assert config["transfer"] is True and config["n_train"] == 612
-    assert config["label_source"] == (
-        "transfer:probe_dataset:/d/pairs.jsonl->within_incentive_rows:/r/rows.jsonl")
-    for key, value in PROBE_RECIPE.items():
-        assert config[key] == value
-
-
-def test_new_schema_adds_exactly_the_documented_keys():
-    script = _load_script()
-    own = _config(script, legacy=False, feature_position="final_prompt",
+    own = _config(script, feature_position="final_prompt",
                   span_len=1, label="d1",
                   stats={"n_no_marker": 2, "n_skipped_empty_body": 1})
-    assert set(own) - set(script.LEGACY_CONFIG_KEYS) == set(script.NEW_CONFIG_KEYS)
+    assert tuple(own) == script.CONFIG_KEYS
+    assert "status" not in own
+    assert own["fit"] == "all_train_examples_no_holdout"
+    assert own["transfer"] is True and own["n_train"] == 612
+    assert own["label_source"] == (
+        "transfer:probe_dataset:/d/pairs.jsonl->within_incentive_rows:/r/rows.jsonl")
+    for key, value in PROBE_RECIPE.items():
+        assert own[key] == value
     assert own["feature_position"] == "final_prompt_token"
     assert own["span_len"] == 1 and own["exclude_final_line"] is False
     assert own["n_test_no_marker"] == 2 and own["n_test_skipped_empty_body"] == 1
     assert own["test_rows_label"] == "d1" and own["fit_source"] is None
-    assert own["status"] == "exploratory-diagnostic; unratified"
     meta = {"fit_run_id": "diag-probe4-fp-m0-qwen7b", "model_id": "m",
             "adapter_path": None, "checkpoint_step": None, "train_seed": None,
             "feature_position": "final_prompt_token", "n_train": 612,
             "extra": "ignored"}
-    fixed = _config(script, legacy=False, feature_position="final_prompt",
+    fixed = _config(script, feature_position="final_prompt",
                     span_len=1, label="d1", fit_tag="fixed", fit_meta=meta,
                     n_train=999)
     assert fixed["fit"] == "fixed_direction_from:diag-probe4-fp-m0-qwen7b"
     assert fixed["n_train"] == 612                      # from the fit, not this run
     assert fixed["fit_source"] == {k: meta[k] for k in script.FIT_SOURCE_FIELDS}
-    excl = _config(script, legacy=False, feature_position="response_excl_claim",
+    excl = _config(script, feature_position="response_excl_claim",
                    exclude_final_line=True, label="d2")
     assert excl["feature_position"] == "mean_response_tokens_excl_claim_line"
     assert excl["exclude_final_line"] is True and excl["span_len"] is None

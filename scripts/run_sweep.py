@@ -27,7 +27,7 @@ Canonical invocations on a GPU session:
         --adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
         --out-root $PROJECT/results/sweep-md-qwen7b-s42-step281 \
         --run-tag md-qwen7b-s42-step281 \
-        --benchmarks-only --layers 12,17,23
+        --benchmarks-only --layers 7,13,26
 
     # Stage 3 runs the same sweep over the recovered E,D-t281 checkpoint
     # (with --arm E,D, so its rows, competence rows and manifest carry the

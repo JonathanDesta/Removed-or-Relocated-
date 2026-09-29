@@ -8,9 +8,8 @@ layer-sweep figure can silently lie are all caught:
   1. a baseline and a sweep run launched with different --n, so A_l is
      computed on the overlap only;
   2. a bypass that destroys the model, whose point must not disappear;
-  3. a damage metric that exists for the baseline but not per layer;
-  4. a baseline that never matched because of one field, e.g. `arm`;
-  5. layers written as strings, which sort "10" before "2".
+  3. a baseline that never matched because of one field, e.g. `arm`;
+  4. layers written as strings, which sort "10" before "2".
 
 Unlike the other suites this one uses pytest fixtures and helpers, so running
 it as a script delegates to pytest rather than calling the tests by hand:
@@ -196,53 +195,6 @@ def test_task_competence_damage_axis_needs_no_competence_file():
     assert pts[0]["damage"] is not None and pts[0]["damage"] > 0
 
 
-def test_benchmark_damage_axis_reads_competence_rows():
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    comp = [
-        {"run_id": "base", "metric": "mmlu_acc", "value": 0.62},
-        {"run_id": "L7", "bypassed_layer": 7, "metric": "mmlu_acc", "value": 0.55},
-    ]
-    pts = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=200),
-        competence_index=figures.index_competence(comp),
-        damage_metric="mmlu_acc",
-        base_key=("run_id", "base"),
-    )
-    assert pts[0]["damage"] == pytest.approx(0.07)
-
-
-def test_perplexity_damage_is_a_rise_not_a_drop():
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    comp = [
-        {"run_id": "base", "metric": "wikitext2_ppl", "value": 8.0},
-        {"run_id": "L7", "metric": "wikitext2_ppl", "value": 11.0},
-    ]
-    pts = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=200),
-        competence_index=figures.index_competence(comp),
-        damage_metric="wikitext2_ppl",
-        base_key=("run_id", "base"),
-    )
-    assert pts[0]["damage"] == pytest.approx(3.0)
-
-
-def test_missing_per_layer_metric_is_named_not_silently_zero():
-    """The case where the sweep benchmarks only M_0 and M_D."""
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    comp = [{"run_id": "base", "metric": "mmlu_acc", "value": 0.62}]
-    pts = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=200),
-        competence_index=figures.index_competence(comp),
-        damage_metric="mmlu_acc",
-        base_key=("run_id", "base"),
-    )
-    assert pts[0]["damage"] is None
-    assert pts[0]["damage_reason"] == "metric_missing_for_this_layer"
-
-
 def test_frontier_keeps_only_non_dominated_layers():
     pts = [
         {"bypassed_layer": 1, "A_l": 0.10, "damage": 0.01},   # on it
@@ -369,19 +321,6 @@ def test_frontier_refuses_to_mix_two_models():
     assert len(figures.pareto_frontier(pts, allow_mixed=True)) >= 1
 
 
-def test_missing_baseline_metric_is_distinguished_from_missing_layer_metric():
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    comp = [{"run_id": "L7", "metric": "mmlu_acc", "value": 0.55}]
-    pts = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=200),
-        competence_index=figures.index_competence(comp),
-        damage_metric="mmlu_acc",
-        base_key=("run_id", "base"),
-    )
-    assert pts[0]["damage_reason"] == "metric_missing_for_baseline"
-
-
 def test_string_layers_still_sort_numerically():
     """"10" < "2" as text. A curve ordered that way is wrong and looks fine."""
     rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
@@ -399,88 +338,6 @@ def test_mixed_int_and_string_layers_do_not_crash():
     assert [p["bypassed_layer"] for p in curve] == [9, "10"]
 
 
-def test_competence_lookup_tolerates_int_vs_string_layer_keys():
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    comp = [
-        {"run_id": "base", "metric": "mmlu_acc", "value": 0.62},
-        {"bypassed_layer": "7", "metric": "mmlu_acc", "value": 0.55},   # string here
-    ]
-    pts = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=50),
-        competence_index=figures.index_competence(comp),
-        damage_metric="mmlu_acc",
-        base_key=("run_id", "base"),
-    )
-    assert pts[0]["damage"] == pytest.approx(0.07)
-
-
-def test_benchmark_damage_refuses_mixed_competence_provenance():
-    rows = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    rows += make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    base_config = {
-        "limit": 16,
-        "batch_size": 4,
-        "attn_implementation": "sdpa",
-        "model_revision": "old",
-    }
-    comp = [
-        {
-            "run_id": "base", "metric": "mmlu_acc", "value": 0.62,
-            "config": base_config,
-        },
-        {
-            "run_id": "L7", "metric": "mmlu_acc", "value": 0.55,
-            "config": {
-                **base_config,
-                "batch_size": 2,
-                "attn_implementation": "eager",
-                "model_revision": "new",
-            },
-        },
-    ]
-    with pytest.raises(ValueError, match="attn_implementation.*model_revision"):
-        figures.pareto_points(
-            figures.layer_curve(rows, n_boot=50),
-            competence_index=figures.index_competence(comp),
-            damage_metric="mmlu_acc",
-            base_key=("run_id", "base"),
-        )
-
-    comp[1]["config"] = {**base_config, "batch_size": 2}
-    points = figures.pareto_points(
-        figures.layer_curve(rows, n_boot=50),
-        competence_index=figures.index_competence(comp),
-        damage_metric="mmlu_acc",
-        base_key=("run_id", "base"),
-    )
-    assert points[0]["damage"] == pytest.approx(0.07)
-
-
-def test_neutral_jsd_damage_is_absolute_and_needs_no_base():
-    """Neutral JSD is intact-vs-bypassed already, so the value IS the damage;
-    no base entry is looked up and none is required."""
-    base = make_run(IDS_A, 0.8, 0.2, layer=None, run_id="base")
-    byp = make_run(IDS_A, 0.3, 0.2, layer=7, run_id="L7")
-    curve = figures.layer_curve(base + byp, n_boot=50)
-    index = figures.index_competence([
-        {"run_id": "L7", "bypassed_layer": 7,
-         "metric": "wikitext2_neutral_jsd", "value": 0.043},
-    ])
-    points = figures.pareto_points(
-        curve, competence_index=index, damage_metric="wikitext2_neutral_jsd",
-    )
-    assert points[0]["damage"] == pytest.approx(0.043)
-    assert points[0]["damage_reason"] is None
-    assert points[0]["damage_reference"] == "absolute"
-    missing = figures.pareto_points(
-        curve, competence_index=figures.index_competence([]),
-        damage_metric="wikitext2_neutral_jsd",
-    )
-    assert missing[0]["damage"] is None
-    assert missing[0]["damage_reason"] == "metric_missing_for_this_layer"
-
-
 def test_task_competence_damage_can_reference_explicit_base_competence():
     """Negotiation competence is judged against M_0, not the sweep's own base
     run; base_competence switches the reference and says so."""
@@ -493,12 +350,6 @@ def test_task_competence_damage_can_reference_explicit_base_competence():
     assert default[0]["damage"] == pytest.approx(default[0]["competence_drop"])
     assert against_m0[0]["damage_reference"] == "M_0"
     assert against_m0[0]["damage"] == pytest.approx(0.9 - default[0]["competence"])
-
-
-def test_competence_index_refuses_duplicate_metric():
-    row = {"run_id": "base", "metric": "mmlu_acc", "value": 0.62}
-    with pytest.raises(ValueError, match="duplicate competence metric"):
-        figures.index_competence([row, dict(row)])
 
 
 def test_empty_input_returns_empty_not_an_error():

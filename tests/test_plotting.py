@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-PLOTTING_TEST_COUNT = 11
+PLOTTING_TEST_COUNT = 12
 
 try:
     import matplotlib
@@ -201,6 +201,38 @@ if HAVE_STACK:
                 label_edited="M_E (just-edited)",
             )
         assert dict(one_sided["gaps"])[3] == "M_E (just-edited): absent"
+
+    def test_tau_bars_give_every_label_its_own_color():
+        # Two fixed arms plus four edited checkpoints: six labels, six
+        # distinct colors; more labels than spare colors is refused rather
+        # than drawn with a shared color.
+        labels = ["M_0", "M_D", "M_E-l07", "M_E-l10", "M_E-l13", "M_E-l21"]
+        records = [
+            {"model": model, "label": label, "tau": 0.1 * (j + 1),
+             "tau_ci_low": 0.1 * (j + 1) - 0.05, "tau_ci_high": 0.1 * (j + 1) + 0.05}
+            for model in ("Qwen2.5-7B", "Llama-3.1-8B")
+            for j, label in enumerate(labels)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = plotting.render_tau_bars(records, os.path.join(tmp, "six"))
+            _nonempty(meta["paths"])
+        assert meta["labels"] == labels
+        assert set(meta["colors"]) == set(labels)
+        assert len(set(meta["colors"].values())) == len(labels)
+        assert meta["colors"]["M_0"] == plotting.BLUE
+        assert meta["colors"]["M_D"] == plotting.ORANGE
+        too_many = records + [
+            {"model": "Qwen2.5-7B", "label": "M_E-l%02d" % k, "tau": 0.05,
+             "tau_ci_low": 0.0, "tau_ci_high": 0.1}
+            for k in (2, 4, 6)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                plotting.render_tau_bars(too_many, os.path.join(tmp, "seven"))
+            except ValueError as exc:
+                assert "spare series colors" in str(exc)
+            else:
+                raise AssertionError("labels beyond the palette shared a color")
 
     def test_tau_bars_render_with_annotated_gap_for_null_tau():
         records = plotting.synthetic_tau_bars()

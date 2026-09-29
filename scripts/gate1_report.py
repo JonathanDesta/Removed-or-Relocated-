@@ -6,10 +6,9 @@
         --competence M_0=results/m0-baseline/competence.jsonl \
         --competence M_D=results/md/competence.jsonl
 
-The PASS/FAIL line appears once M_0 and M_D are given. An optional M_C
-(a model trained on the honest control objective) adds a negative control;
-the final design trains none.
-Thresholds are flags with defaults and are printed with the decision.
+The PASS/FAIL line appears once M_0 and M_D are given (any other model
+key is reported as a defect). Thresholds are flags with defaults and are
+printed with the decision.
 """
 import argparse
 import sys

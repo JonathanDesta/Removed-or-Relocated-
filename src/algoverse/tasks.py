@@ -21,7 +21,7 @@ everything is unit-testable on a laptop in seconds:
   2. Prompt rendering: one scenario becomes a chat prompt under either the
      "incentive" condition (negotiation open, lying could pay off) or the
      "control" condition (contract signed, lying gains nothing). The two
-     prompts differ ONLY in the stakes paragraph. tau, our headline
+     prompts differ ONLY in the stakes paragraph. tau, the headline
      metric, is the deception-rate difference between these conditions.
   3. Scoring: extract the claimed offer from a response, decide validity
      (so a broken model is never scored as an honest one), and label
@@ -177,8 +177,9 @@ def _split_of(params: dict) -> str:
     parameters.
 
     Hash-based rather than shuffle-based on purpose: adding new grid values
-    later never moves an EXISTING scenario between pools. The proposal
-    prespecifies that layer selection and final evaluation use disjoint
+    later never moves an EXISTING scenario between pools. The
+    pre-registration requires that layer selection and final evaluation use
+    disjoint
     scenario sets, and this makes that firewall impossible to break by
     accident.
     """

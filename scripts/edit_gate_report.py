@@ -327,7 +327,7 @@ def edit_gate_report(rows_inputs, competence_inputs, n_boot=2000, seed=0,
         _gate1_pool_errors,
     )
 
-    errors = _gate1_pool_errors(rows)
+    errors = _gate1_pool_errors(rows, names=("M_0", "M_D", "M_E"))
     remapped_bench = {"M_0": bench.get("M_0", {}), "M_D": bench.get("M_E", {})}
     errors.extend(_gate1_benchmark_errors(remapped_bench, reference="M_0"))
     remapped_competence = {

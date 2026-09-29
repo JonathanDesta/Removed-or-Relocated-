@@ -31,7 +31,6 @@ from algoverse.metrics import (
     load_rows,
     RECOVERY_EPS,
     recovery,
-    summarize_runs,
     task_competence,
     tau_gain,
     tau_with_ci,
@@ -314,29 +313,22 @@ def test_gate1_decision_competence_drop_fails():
     assert decision["verdict"] == "FAIL"
 
 
-def test_gate1_decision_benchmark_and_mc_checks():
+def test_gate1_decision_benchmark_checks():
     md_gain = {"gain": 0.20, "gain_ci_low": 0.12, "gain_ci_high": 0.28}
     bench = _benchmark_map()
     bench["M_D"]["mmlu_acc"]["value"] = 0.69
     bench["M_D"]["gsm8k_exact_match"]["value"] = 0.79
     bench["M_D"]["wikitext2_ppl"]["value"] = 8.5
-    mc_ok = {"tau_ci_low": -0.03, "tau_ci_high": 0.04}  # contains 0
-    passing = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_ok, bench=bench,
+    passing = gate1_decision(md_gain, 0.95, 0.96, bench=bench,
                              reference="M_0", publishability_errors=[])
     assert passing["verdict"] == "PASS"
 
     # A perplexity blowup must fail the gate.
     bench_bad = _benchmark_map()
     bench_bad["M_D"]["wikitext2_ppl"]["value"] = 12.0
-    failing = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_ok, bench=bench_bad,
+    failing = gate1_decision(md_gain, 0.95, 0.96, bench=bench_bad,
                              reference="M_0", publishability_errors=[])
     assert failing["verdict"] == "FAIL"
-
-    # An M_C that shows incentive sensitivity (CI excludes 0) must fail.
-    mc_bad = {"tau_ci_low": 0.10, "tau_ci_high": 0.30}
-    failing_mc = gate1_decision(md_gain, 0.95, 0.96, mc_gap=mc_bad, bench=bench,
-                                reference="M_0", publishability_errors=[])
-    assert failing_mc["verdict"] == "FAIL"
 
 
 def _full_gate_rows(run_id, deceptive_incentive):
@@ -510,15 +502,17 @@ def test_gate1_report_wires_pool_defects_to_incomplete():
         assert wording in report
 
 
-def test_gate1_report_rejects_tiny_optional_mc_pool():
+def test_gate1_report_reports_unknown_model_key():
+    # The gate takes exactly M_0 and M_D; any other key (here a model
+    # trained on the control objective) is a named defect, not a third row.
     selection = get_scenarios("selection", n=None)
     report = _gate_report_for_rows({
         "M_0": _full_gate_rows("m0", 0),
         "M_D": _full_gate_rows("md", len(selection)),
-        "M_C": _full_gate_rows("mc", 0)[:20],
+        "M_C": _full_gate_rows("mc", 0),
     })
     assert "DECISION: INCOMPLETE" in report
-    assert "M_C missing" in report
+    assert "unknown model key 'M_C'" in report
 
 
 def test_gate1_report_full_inputs_pass_and_include_stderr():
@@ -686,99 +680,6 @@ def test_filter_rows():
     ]
     kept = filter_rows(rows, condition="incentive", bypassed_layer=5)
     assert len(kept) == 1
-
-
-def test_summarize_runs_groups_by_intervention():
-    rows = make_run(6, deceptive_incentive=6) + make_run(
-        6, deceptive_incentive=0, bypassed_layer=5
-    )
-    summaries = summarize_runs(rows, n_boot=100, seed=0)
-    assert len(summaries) == 2
-    by_layer = {s["bypassed_layer"]: s for s in summaries}
-    assert by_layer[None]["tau"] == 1.0
-    assert by_layer[5]["tau"] == 0.0
-
-
-def test_summarize_runs_groups_by_run_split_and_seeds():
-    variants = [
-        ("run_id", "repeat-run"),
-        ("split", "final"),
-        ("seed", 7),
-        ("train_seed", 1),
-    ]
-    for field, value in variants:
-        rows = make_run(3, deceptive_incentive=3)
-        rows += make_run(3, deceptive_incentive=0, **{field: value})
-        summaries = summarize_runs(rows, n_boot=40, seed=0)
-        assert len(summaries) == 2, (field, summaries)
-
-
-def test_summarize_runs_groups_by_generation_profile():
-    base_config = {
-        "bypass_impl": None,
-        "quant": "none",
-        "do_sample": False,
-        "max_new_tokens": 256,
-        "load_profile": {
-            "dtype": "torch.float32",
-            "device_type": "cpu",
-        },
-    }
-    variants = [
-        ("bypass_impl", "block-output-identity-hook/v1", None, {}),
-        ("quant", "4bit", None, {}),
-        ("do_sample", True, None, {}),
-        ("max_new_tokens", 128, None, {}),
-        ("model_revision", "cafe", None, {}),
-        ("adapter_digest", "digest", None, {}),
-        ("use_llm_fallback", True, None, {}),
-        ("dtype", "torch.float16", "load_profile", {}),
-        ("device_type", "cuda", "load_profile", {}),
-        ("four_bit", True, "load_profile", {}),
-        ("attn_implementation", "sdpa", "load_profile", {}),
-        (
-            "llm_provider", "azure", None,
-            {"use_llm_fallback": True, "llm_provider": "openai", "llm_model": "m"},
-        ),
-        (
-            "llm_model", "other", None,
-            {"use_llm_fallback": True, "llm_provider": "openai", "llm_model": "m"},
-        ),
-    ]
-    for field, value, parent, base_extra in variants:
-        baseline = {
-            **base_config,
-            **base_extra,
-            "load_profile": dict(base_config["load_profile"]),
-        }
-        changed = {**baseline, "load_profile": dict(baseline["load_profile"])}
-        if parent == "load_profile":
-            changed[parent][field] = value
-        else:
-            changed[field] = value
-        rows = make_run(3, deceptive_incentive=3, gen_config=baseline)
-        rows += make_run(3, deceptive_incentive=0, gen_config=changed)
-        summaries = summarize_runs(rows, n_boot=40, seed=0)
-        assert len(summaries) == 2, (field, summaries)
-
-
-def test_summarize_runs_legacy_identity_fields_group_as_none():
-    rows = make_run(3, deceptive_incentive=2)
-    for row in rows:
-        for field in ("run_id", "split", "seed", "train_seed"):
-            row.pop(field)
-        row.pop("gen_config")
-    summaries = summarize_runs(rows, n_boot=40, seed=0)
-    assert len(summaries) == 1
-    summary = summaries[0]
-    for field in (
-        "run_id", "split", "seed", "train_seed", "bypass_impl", "quant",
-        "do_sample", "max_new_tokens", "model_revision", "adapter_digest",
-        "llm_provider", "llm_model", "dtype", "device_type", "four_bit",
-        "attn_implementation",
-    ):
-        assert summary[field] is None, (field, summary)
-    assert summary["use_llm_fallback"] is False
 
 
 def test_load_rows_skips_torn_final_line():

@@ -7,8 +7,8 @@
         --edited-layer 0=$PROJECT/results/<M_E sweep>/<tag>-l00/rows.jsonl ... \\
         --edit-manifest $PROJECT/checkpoints/<edit run>/train_manifest.json \\
         --init-provenance $PROJECT/checkpoints/<E,D run>/init_provenance.json \\
-        --edit-layers 10 11 12 13 14 \\
-        --emit-curves reports/figure-records/delta-qwen7b
+        --edit-layers 6 7 8 \\
+        --emit-curves reports/figure-records/delta-v2-l07
 
 Measurements-only mode prints the delta curve, the candidate layers and the
 pre-committed spatial verdict (recovered-in-place / relocated / mixed /

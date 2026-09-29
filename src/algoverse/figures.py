@@ -320,163 +320,35 @@ def unmeasurable(points) -> list:
 # The damage axis
 # ---------------------------------------------------------------------------
 
-# Capability metrics do not live in rows.jsonl. They are written to
-# results/<run_id>/competence.jsonl as run_meta + {metric, value, stderr,
-# config}. A sweep may write one file per bypassed layer (keyed by run_id) or
-# one whole-sweep file keyed by bypassed_layer; index_competence handles both.
 
-# For these, damage is a RISE: bypassed minus base. Every other metric
-# (mmlu_acc, gsm8k_exact_match, task_competence) is a DROP: base minus
-# bypassed.
-DAMAGE_HIGHER_IS_WORSE = ("wikitext2_ppl",)
-# For these, the metric IS the damage: an intact-vs-bypassed divergence
-# (neutral JSD in nats; the pre-registered bound is 0.25) with no base value
-# to subtract and therefore no base config to compare.
-DAMAGE_ABSOLUTE = ("wikitext2_neutral_jsd",)
+def pareto_points(curve, base_competence=None) -> list:
+    """Attach the negotiation-competence damage to every layer point.
 
-
-def index_competence(competence_rows) -> dict:
-    """{(key_field, key_value): {metric: row values/config}} from competence.jsonl.
-
-    Indexed by run_id AND, when the rows carry it, by bypassed_layer. Guarded
-    writers use a distinct run_id per layer; a whole-sweep file may instead
-    omit run_id and use the bypassed_layer index. Reusing one run_id across
-    layers is malformed and the duplicate refusal below rejects it.
-
-    stderr is carried through even though the Pareto does not use it yet: it
-    is what error bars on the damage axis will need.
-    """
-    index = {}
-    for row in competence_rows:
-        metric = row.get("metric")
-        if metric is None:
-            continue
-        entry = {
-            "value": row.get("value"),
-            "stderr": row.get("stderr"),
-            "config": row.get("config") or {},
-        }
-        if row.get("run_id") is not None:
-            key = ("run_id", row["run_id"])
-            if metric in index.setdefault(key, {}):
-                raise ValueError("duplicate competence metric %r for %r" % (metric, key))
-            index[key][metric] = entry
-        if row.get("bypassed_layer") is not None:
-            key = ("bypassed_layer", row["bypassed_layer"])
-            if metric in index.setdefault(key, {}):
-                raise ValueError("duplicate competence metric %r for %r" % (metric, key))
-            index[key][metric] = entry
-    return index
-
-
-def _lookup(index, key, metric):
-    return (index.get(key) or {}).get(metric)
-
-
-def _damage(metric, base_value, value):
-    if base_value is None or value is None:
-        return None
-    if metric in DAMAGE_HIGHER_IS_WORSE:
-        return value - base_value
-    return base_value - value
-
-
-def _layer_entry(index, point, metric):
-    """The competence entry for one layer point: by run_id, else by layer."""
-    entry = _lookup(index, ("run_id", point.get("run_id")), metric)
-    if entry is None:
-        # 7 and "7" are the same layer; the two files need not agree.
-        for variant in _layer_variants(point.get("bypassed_layer")):
-            entry = _lookup(index, ("bypassed_layer", variant), metric)
-            if entry is not None:
-                break
-    return entry
-
-
-def pareto_points(curve, competence_index=None, damage_metric="task_competence",
-                  base_key=None, base_competence=None) -> list:
-    """Attach a damage value to every layer point.
-
-    damage_metric "task_competence" uses the competence already on the curve
-    and needs no competence.jsonl at all: it is the fallback that keeps the
-    figure possible if the sweep does not run MMLU/GSM8K per layer. By
-    default the drop is against the sweep's own base run (the curve's
-    competence_drop); pass base_competence -- e.g. M_0's task competence,
-    the negotiation-competence reference -- to measure the drop against that.
-
-    A metric in DAMAGE_ABSOLUTE (neutral JSD) is its own damage: read from
-    competence_index for the layer, no base entry needed.
-
-    Any other metric is read from competence_index, which index_competence
-    builds; base_key is the (kind, value) pair identifying the baseline run
-    there, e.g. ("run_id", "m0-baseline").
-
-    Every point also carries damage_reference: "sweep_base", "M_0" (an
-    explicit base_competence), "absolute", or the base_key value.
+    Damage is the drop in task competence: by default against the sweep's
+    own base run (the curve's competence_drop); pass base_competence, e.g.
+    M_0's task competence, to measure the drop against that reference
+    instead. Every point carries damage_metric ("task_competence"),
+    damage_reference ("sweep_base" or "M_0") and damage_reason (None when
+    measured, else "competence_not_computable"). The benchmark, perplexity
+    and neutral-JSD bounds are checked per layer by sweep.evaluate_sweep,
+    which reads competence.jsonl itself.
     """
     points = []
     for p in curve:
         q = dict(p)
-        q["damage_metric"] = damage_metric
-
-        if damage_metric == "task_competence":
-            if base_competence is not None:
-                competence = p.get("competence")
-                q["damage"] = (
-                    None if competence is None else base_competence - competence
-                )
-                q["damage_reference"] = "M_0"
-            else:
-                q["damage"] = p.get("competence_drop")
-                q["damage_reference"] = "sweep_base"
-            q["damage_reason"] = (
-                None if q["damage"] is not None else "competence_not_computable"
+        q["damage_metric"] = "task_competence"
+        if base_competence is not None:
+            competence = p.get("competence")
+            q["damage"] = (
+                None if competence is None else base_competence - competence
             )
-        elif damage_metric in DAMAGE_ABSOLUTE:
-            q["damage_reference"] = "absolute"
-            if competence_index is None:
-                q["damage"] = None
-                q["damage_reason"] = "no_competence_index"
-            else:
-                entry = _layer_entry(competence_index, p, damage_metric)
-                q["damage"] = None if entry is None else entry.get("value")
-                q["damage_reason"] = (
-                    None if q["damage"] is not None
-                    else "metric_missing_for_this_layer"
-                )
-        elif competence_index is None or base_key is None:
-            q["damage"] = None
-            q["damage_reason"] = "no_competence_index"
-            q["damage_reference"] = None
+            q["damage_reference"] = "M_0"
         else:
-            q["damage_reference"] = (
-                base_key[1] if isinstance(base_key, (tuple, list))
-                and len(base_key) > 1 else None
-            )
-            base_entry = _lookup(competence_index, base_key, damage_metric)
-            entry = _layer_entry(competence_index, p, damage_metric)
-            base_value = None if base_entry is None else base_entry.get("value")
-            value = None if entry is None else entry.get("value")
-            if base_entry is not None and entry is not None:
-                base_config = metrics.comparable_metric_config(base_entry)
-                config = metrics.comparable_metric_config(entry)
-                if base_config != config:
-                    keys = set((base_config or {})) | set((config or {}))
-                    differing = sorted(
-                        key for key in keys
-                        if (base_config or {}).get(key) != (config or {}).get(key)
-                    )
-                    raise ValueError(
-                        "%s competence config mismatch: %s"
-                        % (damage_metric, ", ".join(differing))
-                    )
-            q["damage"] = _damage(damage_metric, base_value, value)
-            if q["damage"] is not None:
-                q["damage_reason"] = None
-            elif base_value is None:
-                q["damage_reason"] = "metric_missing_for_baseline"
-            else:
-                q["damage_reason"] = "metric_missing_for_this_layer"
+            q["damage"] = p.get("competence_drop")
+            q["damage_reference"] = "sweep_base"
+        q["damage_reason"] = (
+            None if q["damage"] is not None else "competence_not_computable"
+        )
         points.append(q)
     return points
 

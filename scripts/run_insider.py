@@ -6,10 +6,10 @@ The canonical invocation for an Appendix B transfer run on a GPU session:
         --quant 4bit --adapter $PROJECT/checkpoints/md-qwen7b-s42/checkpoints/step-00281 \
         --run-id md-insider --out-dir results/md-insider --llm-fallback
 
-Add --bypassed-layer N for the l*-probe leg. IT is evaluation-only: no
-benchmark legs (it adds no capability gate), no --split (the pool is one
-undivided "insider" split), and the full 200-scenario pool is the default
-(--n exists for smoke/debug draws only). Re-running resumes.
+IT is evaluation-only: no benchmark legs (it adds no capability gate), no
+--split (the pool is one undivided "insider" split), no bypass leg, and the
+full 200-scenario pool is the default (--n exists for smoke/debug draws
+only). Re-running resumes.
 
 `--smoke` runs the DEV model (Qwen-0.5B, no GPU) end-to-end on a handful
 of scenarios: rows written, schema complete, resume, and the probe-bypass
@@ -210,7 +210,6 @@ if __name__ == "__main__":
              "meaningful with --n; the full pool is unaffected)",
     )
     parser.add_argument("--train-seed", type=int, default=None)
-    parser.add_argument("--bypassed-layer", type=int, default=None)
     parser.add_argument("--checkpoint-step", type=int, default=None)
     parser.add_argument("--arm", default=None, choices=list(VALID_ARMS))
     parser.add_argument("--llm-fallback", action="store_true",
@@ -330,20 +329,12 @@ if __name__ == "__main__":
         model, tokenizer = load_model_and_tokenizer(
             args.model_id, quant=args.quant, adapter_path=args.adapter
         )
-    if args.bypassed_layer is not None:
-        install_bypass(model, args.bypassed_layer)
-        probe = bypass_state(model)
-        print(
-            "PROBE BYPASS INSTALLED: layer %d (%s)"
-            % (probe["layer_idx"], probe["impl"])
-        )
     scenarios = get_insider_scenarios(n=args.n, seed=args.scenario_seed)
 
     rows = run_negotiation_eval(
         model, tokenizer, scenarios,
         run_id=args.run_id, out_path=out_dir / "rows.jsonl",
         model_id=args.model_id, adapter_path=args.adapter,
-        bypassed_layer=args.bypassed_layer,
         checkpoint_step=args.checkpoint_step, arm=args.arm,
         batch_size=args.batch_size, max_new_tokens=args.max_new_tokens,
         seed=args.seed, train_seed=args.train_seed,

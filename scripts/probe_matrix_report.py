@@ -1,7 +1,7 @@
 """Stratified probe readout: tabulate what the diag-probe5 rows say.
 
 Reads every <root>/<prefix>*/interp.jsonl written by run_probe_transfer.py
-(2026-09-02 stratified design) and prints, per output:
+(stratified design) and prints, per output:
 
   main      transfer AUROC over the whole test set: mean over layers, best
             layer, and how many layers' 95% CI sits above / below 0.5
@@ -16,14 +16,15 @@ Reads every <root>/<prefix>*/interp.jsonl written by run_probe_transfer.py
             shows separation in EITHER sign (max of AUROC and 1-AUROC):
             a control at 0.03 vs the lied label is a 0.97 floor.
 
-Reading guide: the decisive line is `offer` on the own8 sets — one
-generator, offer scenarios only — where neither scenario type nor style
-can carry the label. On the pairs sets the generator control is perfect
-BY CONSTRUCTION (M_0 wrote every honest row, M_D every lying row), so a
-pairs result only counts if the own8 offer stratum agrees.
+Reading guide: the decisive line is `offer` on a single-generator test set
+(Qwen's own8: M_D's step-8 negotiations, offer scenarios only), where
+neither scenario type nor style can carry the label. On a pooled test set
+whose honest rows all come from one run and lying rows from another, the
+generator control is perfect BY CONSTRUCTION, so such a result only counts
+if the single-generator offer stratum agrees.
 
 Nothing here is a paper quantity on its own; it is the table the rows
-already contain. Stdlib only.
+already contain. Stdlib plus metrics.load_rows.
 
     python scripts/probe_matrix_report.py --root results --prefix diag-probe5-
 """
