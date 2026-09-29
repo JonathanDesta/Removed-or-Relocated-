@@ -2,7 +2,8 @@
 
     python3 tests/test_notebook_pure.py
 
-Every code cell of Removed_or_Recoverable.ipynb must be plain Python (no
+The committed Removed_or_Recoverable.ipynb must be exactly what
+tools/build_notebook.py emits, every code cell must be plain Python (no
 shell or magic lines) that compiles on its own, and every command line the
 notebook would run must parse with its script's own parser, so the
 notebook cannot rot unnoticed between the runs that execute it end to end.
@@ -19,6 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 NOTEBOOK = REPO / "Removed_or_Recoverable.ipynb"
+BUILDER = REPO / "tools" / "build_notebook.py"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _fixtures import run_suite  # noqa: E402
@@ -28,6 +30,14 @@ def _code_cells():
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     assert notebook.get("nbformat") == 4, notebook.get("nbformat")
     return [c for c in notebook["cells"] if c["cell_type"] == "code"]
+
+
+def test_notebook_matches_builder():
+    spec = importlib.util.spec_from_file_location("build_notebook", BUILDER)
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    assert builder.render(builder.build()) == NOTEBOOK.read_text(encoding="utf-8"), (
+        "the notebook differs from its builder; regenerate with: python tools/build_notebook.py")
 
 
 def test_notebook_code_cells_compile():
@@ -68,7 +78,8 @@ def _seed_project(ns):
 
 def _record_commands():
     """Execute the notebook's cells against a scratch PROJECT with the shell
-    stubbed and run() recording; return [(script, args)]."""
+    stubbed, run() recording and every figure input taken as present; return
+    [(script, args)]."""
     cells = ["".join(c["source"]) for c in _code_cells()]
     commands = []
     ns = {"__name__": "__main__"}
@@ -96,6 +107,7 @@ def _record_commands():
                 assert ns["REPO"] == REPO and ns["PROJECT"] == (scratch / "project").resolve()
                 ns["run"] = lambda script, *args, capture=None: commands.append(
                     (script, [str(a) for a in args]))
+                ns["have"] = lambda label, *paths: True
                 _seed_project(ns)
                 for index, source in enumerate(cells[2:], start=3):
                     exec(compile(source, "cell-%d" % index, "exec"), ns)
@@ -131,4 +143,4 @@ def test_notebook_commands_parse():
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_suite(globals(), expected_count=3))
+    raise SystemExit(run_suite(globals(), expected_count=4))

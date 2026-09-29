@@ -1,0 +1,11 @@
+# GPU box only. Imported by the codebase but not installed in the verified CPU
+# environment of requirements.txt, so nothing is pinned here yet; the pins are
+# to be fixed at the next GPU session. The notebook's first cell installs this
+# file after requirements.txt.
+#
+#   pip install -r requirements.txt -r requirements-gpu.txt
+
+bitsandbytes    # 4-bit quantized checkpoint loading (models.py)
+lm-eval         # MMLU / GSM8K capability benchmarks (eval.py)
+openai          # the gpt-5-mini grader (tasks.py, insider.py); anthropic is the optional alternative
+joblib          # persisted probe directions (scripts/run_probe_transfer.py)

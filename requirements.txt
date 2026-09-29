@@ -25,16 +25,7 @@ matplotlib==3.11.1
 pytest==9.1.1
 
 # ---------------------------------------------------------------------------
-# GPU box only — imported by the codebase but NOT installed in the verified
-# CPU environment above, so no version is pinned here. Install them in the
-# GPU session that needs them (the notebook's first cell does).
-#
-#   lm-eval          MMLU / GSM8K capability benchmarks (eval.py)
-#   bitsandbytes     4-bit quantized checkpoint loading (models.py)
-#
-# The LLM grader (tasks.py, insider.py) is lazily imported and only needed
-# when the deterministic extractor cannot parse a response. The paper's runs
-# used gpt-5-mini through the openai client; anthropic is an optional
-# alternative provider.
-#
-#   openai
+# GPU box only: bitsandbytes, lm-eval, openai and joblib are imported by the
+# codebase but are not part of the verified CPU environment above, so they
+# live unpinned in requirements-gpu.txt. The notebook's first cell installs
+# both files (everything here at its pin, torch excepted).
