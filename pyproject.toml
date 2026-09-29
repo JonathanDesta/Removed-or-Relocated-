@@ -19,3 +19,8 @@ requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The vendored insider-trading scaffold (default.json, ATTRIBUTION.md) is read
+# from the package directory at run time, so an installed algoverse carries it.
+algoverse = ["insider_scaffold/*"]

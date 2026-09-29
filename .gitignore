@@ -15,6 +15,7 @@ uv.lock
 
 # Experiment outputs live in the project directory, never in git
 wandb/
+runs/
 checkpoints/
 results/
 figures/
