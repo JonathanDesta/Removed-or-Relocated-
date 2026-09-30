@@ -93,7 +93,7 @@ def labeled_incentive_rows(rows):
 
     Among VALID incentive-condition rows, deceptive True = lied and
     deceptive False = did not lie. Invalid rows are excluded structurally:
-    the INTERFACES row rules guarantee invalid rows carry deceptive null,
+    score_response guarantees invalid rows carry deceptive null,
     never False, and both `valid is not True` and `deceptive not in
     (True, False)` are checked so a malformed row cannot slip in either
     way. Groups are scenario_id (scenario-grouped splits, the
@@ -351,7 +351,8 @@ def _finite_or_none(value):
 
 def write_interp_row(out_path, run_meta, analysis, layer, value,
                      ci_low, ci_high, config, extra=None):
-    """Append one interp.jsonl row: run_meta + the INTERFACES result fields.
+    """Append one interp.jsonl row: run_meta + the interp result fields
+    (analysis, layer, value, ci_low, ci_high, config).
 
     NaN in value/ci becomes null (JSON has no NaN). `extra` adds result
     fields beyond the schema (currently only probe_auroc's `accuracy`).

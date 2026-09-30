@@ -130,12 +130,12 @@ def test_wikitext_dataset_pin_is_the_pinned_literal():
     assert re.fullmatch(r"[0-9a-f]{40}", WIKITEXT_DATASET_REVISION)
 
 
-def test_row_fields_match_interfaces_verbatim():
-    # INTERFACES.md is the normative contract. If this fails, the contract
-    # moved; change ROW_FIELDS and INTERFACES.md together.
-    contract = Path(__file__).resolve().parents[1] / "INTERFACES.md"
+def test_row_fields_match_readme_verbatim():
+    # README's "Data and artifacts" block is the published row contract. If
+    # this fails, the contract moved; change ROW_FIELDS and the README together.
+    contract = Path(__file__).resolve().parents[1] / "README.md"
     text = contract.read_text(encoding="utf-8")
-    section = text.split("## The results row", 1)[1]
+    section = text.split("## Data and artifacts", 1)[1]
     block = section.split("```", 2)[1]
     cleaned = []
     for line in block.splitlines():
